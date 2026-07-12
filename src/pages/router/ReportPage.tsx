@@ -1,0 +1,355 @@
+import { useMemo, useState } from "react";
+import {
+  CalendarDays,
+  CheckCircle2,
+  Clock,
+  Download,
+  FileText,
+  Filter,
+  Printer,
+  RefreshCw,
+  Ticket,
+  Trash2,
+  UserRound
+} from "lucide-react";
+import { useAuth } from "../../app/auth/AuthProvider";
+import { Badge, Button, Card, EmptyState, PageHeader, StatCard } from "../../shared/ui";
+import type { IconComponent } from "../../shared/ui";
+import {
+  buildReportSummary,
+  createDemoReportTickets,
+  emptyReportFilters,
+  filterReportTickets,
+  formatCfa,
+  formatReportDate,
+  getTicketsForMetric,
+  internalProfileLabel,
+  profileLabel,
+  scopeReportTicketsForSession,
+  type ReportFilters,
+  type ReportGroupRow,
+  type ReportMetric,
+  type ReportMetricId,
+  type ReportTicket
+} from "./reportPageModel";
+import { ticketStatusLabel, ticketStatusToBadge } from "./ticketsPageModel";
+
+type SelectedReportTickets = {
+  title: string;
+  tickets: ReportTicket[];
+};
+
+export function ReportPage() {
+  const { session } = useAuth();
+  const [tickets] = useState<ReportTicket[]>(() => createDemoReportTickets());
+  const [filters, setFilters] = useState<ReportFilters>(emptyReportFilters);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [selectedTickets, setSelectedTickets] = useState<SelectedReportTickets | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const scopedTickets = useMemo(() => scopeReportTicketsForSession(tickets, session), [session, tickets]);
+  const filteredTickets = useMemo(() => filterReportTickets(scopedTickets, filters), [filters, scopedTickets]);
+  const summary = useMemo(() => buildReportSummary(scopedTickets, filters), [filters, scopedTickets]);
+  const filterOptions = useMemo(() => buildFilterOptions(scopedTickets), [scopedTickets]);
+
+  const updateFilters = (partial: Partial<ReportFilters>) => {
+    setFilters((current) => ({ ...current, ...partial }));
+    setMessage(null);
+    setSelectedTickets(null);
+  };
+
+  const openMetric = (metric: ReportMetric) => {
+    setSelectedTickets({
+      tickets: getTicketsForMetric(filteredTickets, metric.id, filters),
+      title: metric.label
+    });
+  };
+
+  const resetFilters = () => {
+    setFilters(emptyReportFilters);
+    setMessage(null);
+    setSelectedTickets(null);
+  };
+
+  return (
+    <div className="page-stack">
+      <PageHeader
+        actions={
+          <div className="button-row">
+            <Button icon={FileText} onClick={() => setMessage("Export PDF du rapport préparé.")}>
+              Exporter PDF
+            </Button>
+            <Button icon={Download} onClick={() => setMessage("Export CSV du rapport préparé.")}>
+              Exporter CSV
+            </Button>
+            <Button icon={RefreshCw} onClick={() => setMessage("Rapport rafraîchi.")}>
+              Rafraîchir
+            </Button>
+          </div>
+        }
+        description="Activité des tickets sur une période. Les montants CFA sont des valeurs théoriques basées sur le prix indicatif des plans."
+        eyebrow="Routeur"
+        title="Rapport"
+      />
+
+      <Card>
+        <div className="report-toolbar">
+          <div className="tickets-count">
+            <strong>Tickets ({filteredTickets.length})</strong>
+            <span>
+              Créés : {formatCfa(summary.createdTheoreticalCfa)} · Activés : {formatCfa(summary.activatedTheoreticalCfa)}
+            </span>
+          </div>
+          <label className="date-field">
+            Depuis
+            <input type="date" value={filters.dateFrom} onChange={(event) => updateFilters({ dateFrom: event.target.value })} />
+          </label>
+          <label className="date-field">
+            À
+            <input type="date" value={filters.dateTo} onChange={(event) => updateFilters({ dateTo: event.target.value })} />
+          </label>
+          <Button icon={Filter} onClick={() => setFiltersOpen((current) => !current)}>
+            Filtres
+          </Button>
+        </div>
+
+        {filtersOpen ? (
+          <ReportFiltersPanel filters={filters} onChange={updateFilters} onReset={resetFilters} options={filterOptions} />
+        ) : null}
+      </Card>
+
+      {message ? <p className="form-error form-error--success">{message}</p> : null}
+
+      <div className="page-grid">
+        <div className="span-4">
+          <StatCard icon={Ticket} label="Créés" value={String(summary.metrics.find((metric) => metric.id === "created")?.value ?? 0)} hint={formatCfa(summary.createdTheoreticalCfa)} />
+        </div>
+        <div className="span-4">
+          <StatCard icon={CheckCircle2} label="Activés" value={String(summary.metrics.find((metric) => metric.id === "activated")?.value ?? 0)} hint={formatCfa(summary.activatedTheoreticalCfa)} />
+        </div>
+        <div className="span-4">
+          <StatCard icon={Trash2} label="Supprimés" value={String(summary.metrics.find((metric) => metric.id === "deleted")?.value ?? 0)} hint="Suppression contrôlée" />
+        </div>
+      </div>
+
+      <Card title="Résumé">
+        <div className="report-summary-list">
+          {summary.metrics.map((metric) => (
+            <ReportMetricRow key={metric.id} metric={metric} onClick={() => openMetric(metric)} />
+          ))}
+        </div>
+      </Card>
+
+      <div className="page-grid">
+        <Card className="span-4" title="Activité par plan">
+          <ReportGroupList groups={summary.byPlan} onOpen={(group) => setSelectedTickets({ title: group.label, tickets: group.tickets })} />
+        </Card>
+        <Card className="span-4" title="Activité par profil">
+          <ReportGroupList groups={summary.byOperator} onOpen={(group) => setSelectedTickets({ title: group.label, tickets: group.tickets })} />
+        </Card>
+        <Card className="span-4" title="Activité par jour">
+          <ReportGroupList groups={summary.byDay} onOpen={(group) => setSelectedTickets({ title: group.label, tickets: group.tickets })} />
+        </Card>
+      </div>
+
+      {selectedTickets ? (
+        <Card
+          actions={
+            <Button onClick={() => setSelectedTickets(null)} variant="ghost">
+              Fermer
+            </Button>
+          }
+          title={`${selectedTickets.title} (${selectedTickets.tickets.length})`}
+        >
+          {selectedTickets.tickets.length > 0 ? (
+            <div className="report-ticket-list">
+              {selectedTickets.tickets.slice(0, 20).map((ticket) => (
+                <div className="report-ticket-row" key={ticket.id}>
+                  <strong>{ticket.code}</strong>
+                  <span>{ticket.planName}</span>
+                  <span>{internalProfileLabel(ticket.createdByProfileId)}</span>
+                  <span>{formatReportDate(ticket.createdAt)}</span>
+                  <Badge status={ticketStatusToBadge(ticket.status)}>{ticketStatusLabel(ticket.status)}</Badge>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState description="Aucun ticket ne correspond à cette ligne de rapport." icon={Ticket} title="Aucun ticket" />
+          )}
+        </Card>
+      ) : null}
+    </div>
+  );
+}
+
+type FilterOptions = {
+  internalProfiles: Array<{ id: string; label: string }>;
+  operators: string[];
+  plans: Array<{ id: string; name: string }>;
+  routers: Array<{ id: string; name: string }>;
+};
+
+function ReportMetricRow({ metric, onClick }: { metric: ReportMetric; onClick: () => void }) {
+  const Icon = metricIcon(metric.id);
+
+  return (
+    <button className="report-summary-row" onClick={onClick} type="button">
+      <span className="report-summary-row__icon">
+        <Icon aria-hidden="true" />
+      </span>
+      <span className="report-summary-row__label">
+        <strong>{metric.label}</strong>
+        <small>{metric.hint}</small>
+      </span>
+      <span className="report-summary-row__value">
+        <strong>{metric.value}</strong>
+        {metric.totalCfa !== null ? <small>{formatCfa(metric.totalCfa)}</small> : null}
+      </span>
+    </button>
+  );
+}
+
+function ReportGroupList({
+  groups,
+  onOpen
+}: {
+  groups: ReportGroupRow[];
+  onOpen: (group: ReportGroupRow) => void;
+}) {
+  if (groups.length === 0) {
+    return <EmptyState description="Aucune activité sur la période." icon={Ticket} title="Aucune donnée" />;
+  }
+
+  return (
+    <div className="report-group-list">
+      {groups.map((group) => (
+        <button className="report-group-row" key={group.id} onClick={() => onOpen(group)} type="button">
+          <span>
+            <strong>{group.label}</strong>
+            <small>{formatCfa(group.theoreticalCfa)}</small>
+          </span>
+          <span className="report-group-row__numbers">
+            <b>{group.created}</b>
+            <small>créés</small>
+            <b>{group.activated}</b>
+            <small>activés</small>
+            <b>{group.completed}</b>
+            <small>complétés</small>
+          </span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ReportFiltersPanel({
+  filters,
+  onChange,
+  onReset,
+  options
+}: {
+  filters: ReportFilters;
+  onChange: (partial: Partial<ReportFilters>) => void;
+  onReset: () => void;
+  options: FilterOptions;
+}) {
+  return (
+    <div className="report-filter-panel">
+      <label className="form-field">
+        Plan
+        <select value={filters.planId} onChange={(event) => onChange({ planId: event.target.value })}>
+          <option value="">Tous les plans</option>
+          {options.plans.map((plan) => (
+            <option key={plan.id} value={plan.id}>
+              {plan.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="form-field">
+        Profil interne
+        <select value={filters.internalProfileId} onChange={(event) => onChange({ internalProfileId: event.target.value })}>
+          <option value="">Tous les profils internes</option>
+          {options.internalProfiles.map((profile) => (
+            <option key={profile.id} value={profile.id}>
+              {profile.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="form-field">
+        Rôle
+        <select value={filters.operatorProfile} onChange={(event) => onChange({ operatorProfile: event.target.value })}>
+          <option value="">Tous les rôles</option>
+          {options.operators.map((operator) => (
+            <option key={operator} value={operator}>
+              {profileLabel(operator)}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="form-field">
+        Routeur
+        <select value={filters.routerId} onChange={(event) => onChange({ routerId: event.target.value })}>
+          <option value="">Tous les routeurs</option>
+          {options.routers.map((router) => (
+            <option key={router.id} value={router.id}>
+              {router.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="report-filter-panel__actions">
+        <Button onClick={onReset} variant="ghost">
+          Réinitialiser
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function metricIcon(metricId: ReportMetricId): IconComponent {
+  const icons: Record<ReportMetricId, IconComponent> = {
+    activated: CheckCircle2,
+    available: Ticket,
+    completed: CheckCircle2,
+    created: Ticket,
+    deleted: Trash2,
+    expired: Clock,
+    printed: Printer
+  };
+
+  return icons[metricId];
+}
+
+function buildFilterOptions(tickets: ReportTicket[]): FilterOptions {
+  return {
+    internalProfiles: uniqueBy(
+      tickets.map((ticket) => ({ id: ticket.createdByProfileId, label: internalProfileLabel(ticket.createdByProfileId) })),
+      (profile) => profile.id
+    ),
+    operators: unique(tickets.map((ticket) => ticket.operatorProfile)),
+    plans: uniqueBy(
+      tickets.map((ticket) => ({ id: ticket.planId, name: ticket.planName })),
+      (plan) => plan.id
+    ),
+    routers: uniqueBy(
+      tickets.map((ticket) => ({ id: ticket.routerId, name: ticket.routerName })),
+      (router) => router.id
+    )
+  };
+}
+
+function unique<T extends string>(values: T[]): T[] {
+  return Array.from(new Set(values)).sort((left, right) => left.localeCompare(right));
+}
+
+function uniqueBy<T>(values: T[], getKey: (value: T) => string): T[] {
+  const map = new Map<string, T>();
+
+  values.forEach((value) => {
+    map.set(getKey(value), value);
+  });
+
+  return Array.from(map.values());
+}
