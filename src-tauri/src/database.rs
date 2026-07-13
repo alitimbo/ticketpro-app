@@ -73,13 +73,18 @@ pub struct DbExecuteResult {
 }
 
 fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let data_dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
     fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
     Ok(data_dir.join(DATABASE_FILE_NAME))
 }
 
 fn legacy_sibling_directory(current: &Path) -> Option<PathBuf> {
-    current.parent().map(|parent| parent.join(LEGACY_IDENTIFIER))
+    current
+        .parent()
+        .map(|parent| parent.join(LEGACY_IDENTIFIER))
 }
 
 fn copy_if_missing(source: &Path, target: &Path) -> Result<(), String> {
@@ -118,12 +123,18 @@ fn copy_directory_if_missing(source: &Path, target: &Path) -> Result<(), String>
 }
 
 fn migrate_legacy_storage(app: &AppHandle) -> Result<(), String> {
-    let current_data_dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let current_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
 
     if let Some(legacy_data_dir) = legacy_sibling_directory(&current_data_dir) {
         for suffix in ["", "-wal", "-shm"] {
             let file_name = format!("{DATABASE_FILE_NAME}{suffix}");
-            copy_if_missing(&legacy_data_dir.join(&file_name), &current_data_dir.join(&file_name))?;
+            copy_if_missing(
+                &legacy_data_dir.join(&file_name),
+                &current_data_dir.join(&file_name),
+            )?;
         }
     }
 
@@ -237,7 +248,9 @@ pub fn db_query(
 ) -> Result<Vec<Map<String, Value>>, String> {
     let connection = open_connection(&app)?;
     let values: Vec<SqliteValue> = params.into_iter().map(db_param_to_sqlite_value).collect();
-    let mut statement = connection.prepare(&sql).map_err(|error| error.to_string())?;
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| error.to_string())?;
     let column_names: Vec<String> = statement
         .column_names()
         .iter()

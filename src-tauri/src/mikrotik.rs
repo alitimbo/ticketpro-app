@@ -158,10 +158,7 @@ fn write_length(stream: &mut TcpStream, length: usize) -> Result<(), String> {
     let bytes = if length < 0x80 {
         vec![length as u8]
     } else if length < 0x4000 {
-        vec![
-            ((length >> 8) as u8) | 0x80,
-            (length & 0xFF) as u8,
-        ]
+        vec![((length >> 8) as u8) | 0x80, (length & 0xFF) as u8]
     } else if length < 0x20_0000 {
         vec![
             ((length >> 16) as u8) | 0xC0,
@@ -210,12 +207,10 @@ fn read_length(stream: &mut TcpStream) -> Result<usize, String> {
         let second = read_byte(stream)?;
         let third = read_byte(stream)?;
         let fourth = read_byte(stream)?;
-        return Ok(
-            (((first & 0x0F) as usize) << 24)
-                + ((second as usize) << 16)
-                + ((third as usize) << 8)
-                + fourth as usize,
-        );
+        return Ok((((first & 0x0F) as usize) << 24)
+            + ((second as usize) << 16)
+            + ((third as usize) << 8)
+            + fourth as usize);
     }
 
     let second = read_byte(stream)?;
@@ -223,7 +218,10 @@ fn read_length(stream: &mut TcpStream) -> Result<usize, String> {
     let fourth = read_byte(stream)?;
     let fifth = read_byte(stream)?;
 
-    Ok(((second as usize) << 24) + ((third as usize) << 16) + ((fourth as usize) << 8) + fifth as usize)
+    Ok(((second as usize) << 24)
+        + ((third as usize) << 16)
+        + ((fourth as usize) << 8)
+        + fifth as usize)
 }
 
 fn read_byte(stream: &mut TcpStream) -> Result<u8, String> {
