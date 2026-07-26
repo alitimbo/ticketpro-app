@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { copyFile, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const packageJson = JSON.parse(await readFile("package.json", "utf8"));
@@ -19,7 +19,9 @@ for (const directory of candidateDirectories) {
 
     if (generatedInstaller) {
       const installerPath = join(directory, installerName);
-      await rename(join(directory, generatedInstaller), installerPath);
+      const generatedInstallerPath = join(directory, generatedInstaller);
+      await copyFile(generatedInstallerPath, installerPath);
+      await unlink(generatedInstallerPath);
       const checksum = createHash("sha256").update(await readFile(installerPath)).digest("hex");
       const checksumPath = `${installerPath}.sha256`;
       await writeFile(checksumPath, `${checksum}  ${installerName}\n`, "utf8");

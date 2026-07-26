@@ -16,7 +16,7 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "release:check:windows": "node scripts/check-windows-release.mjs",
-    "tauri:build:windows": "npm run release:check:windows && tauri build --target x86_64-pc-windows-msvc --bundles nsis && node scripts/rename-windows-installer.mjs",
+    "tauri:build:windows": "npm run release:check:windows && node scripts/build-windows.mjs && node scripts/rename-windows-installer.mjs",
     "release:build:windows": "npm test && npm run type-check && npm run test:license-api && cargo check --manifest-path src-tauri/Cargo.toml && npm run tauri:build:windows"
   },
   "dependencies": {
