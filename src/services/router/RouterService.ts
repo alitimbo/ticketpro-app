@@ -1,0 +1,311 @@
+import type {
+  ActiveHotspotUser,
+  CreatedTicket,
+  HotspotPlan,
+  HotspotPlanDraft,
+  HotspotServer,
+  HotspotUser,
+  HotspotUserDraft,
+  HotspotUsersBatchDraft,
+  InterfaceTraffic,
+  RouterConnectionTest,
+  RouterDateTime,
+  RouterErrorCode,
+  RouterHealth,
+  RouterSummary,
+  RouterSystemInfo,
+  TicketDraft
+} from "../../domain/router";
+import type { AuthSession, Permission } from "../../domain/auth";
+import { AuthorizationError, requireProfilePermission } from "../auth";
+import { FakeRouterAdapter } from "./FakeRouterAdapter";
+import {
+  FakeLocalRouterDiscoveryProvider,
+  type DiscoveredRouterCandidate,
+  type LocalRouterDiscoveryProvider
+} from "./LocalRouterDiscoveryProvider";
+import { MikroTikRouterAdapter, type MikroTikRouterAdapterOptions } from "./MikroTikRouterAdapter";
+import {
+  PreparedRemoteConnectionProvider,
+  type RemoteConnectionProvider,
+  type RemoteConnectionRequest
+} from "./RemoteConnectionProvider";
+import type { RouterAdapter } from "./RouterAdapter";
+import { isRouterAdapterError } from "./RouterAdapterError";
+
+export type RouterAdapterMode = "fake" | "mikrotik";
+
+export type RouterActionLog = {
+  action: string;
+  accountId?: string;
+  internalProfileId?: string;
+  internalProfileRole?: string;
+  level: "error" | "info";
+  routerId?: string;
+  technicalCode?: RouterErrorCode;
+  userMessage: string;
+};
+
+export interface RouterActionLogger {
+  write(log: RouterActionLog): Promise<void> | void;
+}
+
+export type RouterServiceOptions = {
+  adapter?: RouterAdapter;
+  discoveryProvider?: LocalRouterDiscoveryProvider;
+  logger?: RouterActionLogger;
+  mikrotik?: MikroTikRouterAdapterOptions;
+  mode?: RouterAdapterMode;
+  authSession?: AuthSession | null;
+  remoteProvider?: RemoteConnectionProvider;
+};
+
+export class RouterService {
+  private readonly adapter: RouterAdapter;
+  private readonly discoveryProvider: LocalRouterDiscoveryProvider;
+  private readonly logger: RouterActionLogger;
+  private readonly authSession: AuthSession | null | undefined;
+  private readonly remoteProvider: RemoteConnectionProvider;
+
+  constructor(options: RouterServiceOptions | RouterAdapter = {}) {
+    if (isRouterAdapter(options)) {
+      this.adapter = options;
+      this.discoveryProvider = new FakeLocalRouterDiscoveryProvider();
+      this.logger = new NoopRouterActionLogger();
+      this.authSession = undefined;
+      this.remoteProvider = new PreparedRemoteConnectionProvider();
+      return;
+    }
+
+    const serviceOptions = options as RouterServiceOptions;
+    this.adapter = serviceOptions.adapter ?? this.createAdapter(serviceOptions.mode ?? "fake", serviceOptions.mikrotik);
+    this.discoveryProvider = serviceOptions.discoveryProvider ?? new FakeLocalRouterDiscoveryProvider();
+    this.logger = serviceOptions.logger ?? new NoopRouterActionLogger();
+    this.authSession = serviceOptions.authSession;
+    this.remoteProvider = serviceOptions.remoteProvider ?? new PreparedRemoteConnectionProvider();
+  }
+
+  async listRouters(): Promise<RouterSummary[]> {
+    if ("listRouters" in this.adapter && typeof this.adapter.listRouters === "function") {
+      return this.adapter.listRouters();
+    }
+
+    return [
+      {
+        connectionMode: "local",
+        host: "192.168.88.1",
+        id: "routeur-demo",
+        isReachable: true,
+        name: "Routeur démo"
+      }
+    ];
+  }
+
+  testConnection() {
+    return this.run("testConnection", () => this.adapter.testConnection());
+  }
+
+  resolveRemoteConnection(request: RemoteConnectionRequest) {
+    return this.run("resolveRemoteConnection", () => this.remoteProvider.resolveEndpoint(request));
+  }
+
+  scanLocalRouters(): Promise<DiscoveredRouterCandidate[]> {
+    return this.run("scanLocalRouters", () => this.discoveryProvider.scan());
+  }
+
+  getSystemInfo() {
+    return this.run("getSystemInfo", () => this.adapter.getSystemInfo());
+  }
+
+  getHotspotServers() {
+    return this.run("getHotspotServers", () => this.adapter.getHotspotServers());
+  }
+
+  getHotspotPlans() {
+    return this.run("getHotspotPlans", () => this.adapter.getHotspotPlans());
+  }
+
+  createHotspotPlan(plan: HotspotPlanDraft) {
+    return this.run("createHotspotPlan", () => this.adapter.createHotspotPlan(plan), "router.plans.write");
+  }
+
+  updateHotspotPlan(planId: string, updates: Partial<HotspotPlanDraft>) {
+    return this.run("updateHotspotPlan", () => this.adapter.updateHotspotPlan(planId, updates), "router.plans.write");
+  }
+
+  deleteHotspotPlan(planId: string) {
+    return this.run("deleteHotspotPlan", () => this.adapter.deleteHotspotPlan(planId), "router.plans.write");
+  }
+
+  listHotspotUsers() {
+    return this.run("listHotspotUsers", () => this.adapter.listHotspotUsers());
+  }
+
+  updateHotspotUser(username: string, planId: string) {
+    return this.run("updateHotspotUser", () => this.adapter.updateHotspotUser(username, planId), "router.tickets.generate");
+  }
+
+  createHotspotUser(user: HotspotUserDraft) {
+    return this.run("createHotspotUser", () => this.adapter.createHotspotUser(user), "router.tickets.generate");
+  }
+
+  createHotspotUsersBatch(batch: HotspotUsersBatchDraft) {
+    return this.run("createHotspotUsersBatch", () => this.adapter.createHotspotUsersBatch(batch), "router.tickets.generate");
+  }
+
+  async createTickets(_routerId: string, draft: TicketDraft): Promise<CreatedTicket[]> {
+    this.ensurePermission("router.tickets.generate");
+    const users = await this.createHotspotUsersBatch({
+      codeLength: draft.codeLength ?? 6,
+      planId: draft.planId,
+      prefix: draft.prefix ?? "",
+      quantity: draft.quantity
+    });
+
+    return users.map((user) => ({
+      createdAt: user.createdAt,
+      id: user.id,
+      passwordSecretRef: user.passwordSecretRef,
+      planId: user.planId,
+      username: user.username
+    }));
+  }
+
+  disableHotspotUser(username: string) {
+    return this.run("disableHotspotUser", () => this.adapter.disableHotspotUser(username), "router.tickets.disable");
+  }
+
+  removeHotspotUser(username: string) {
+    return this.run("removeHotspotUser", () => this.adapter.removeHotspotUser(username), "router.tickets.delete");
+  }
+
+  listActiveUsers() {
+    return this.run("listActiveUsers", () => this.adapter.listActiveUsers());
+  }
+
+  disconnectActiveUser(username: string) {
+    return this.run("disconnectActiveUser", () => this.adapter.disconnectActiveUser(username), "router.clients.disconnect");
+  }
+
+  getRouterHealth() {
+    return this.run("getRouterHealth", () => this.adapter.getRouterHealth());
+  }
+
+  getInterfaceTraffic() {
+    return this.run("getInterfaceTraffic", () => this.adapter.getInterfaceTraffic());
+  }
+
+  getRouterDateTime() {
+    return this.run("getRouterDateTime", () => this.adapter.getRouterDateTime());
+  }
+
+  provisionWireGuard(config: import("../../domain/router").RouterWireGuardConfig) {
+    return this.run("provisionWireGuard", () => this.adapter.provisionWireGuard(config));
+  }
+
+  removeWireGuardPeer(reference: import("../../domain/router").RouterWireGuardPeerReference) {
+    return this.run("removeWireGuardPeer", () => this.adapter.removeWireGuardPeer(reference));
+  }
+
+  private createAdapter(mode: RouterAdapterMode, mikrotikOptions?: MikroTikRouterAdapterOptions): RouterAdapter {
+    if (mode === "fake") {
+      return new FakeRouterAdapter();
+    }
+
+    if (!mikrotikOptions) {
+      throw new Error("Configuration routeur manquante.");
+    }
+
+    return new MikroTikRouterAdapter(mikrotikOptions);
+  }
+
+  private async run<T>(action: string, callback: () => Promise<T>, permission?: Permission): Promise<T> {
+    try {
+      if (permission) {
+        this.ensurePermission(permission);
+      }
+      const result = await callback();
+      await this.logger.write({
+        action,
+        accountId: this.authSession?.account_id,
+        internalProfileId: this.authSession?.internal_profile_id,
+        internalProfileRole: this.authSession?.internal_profile_role,
+        level: "info",
+        userMessage: "Action terminée."
+      });
+      return result;
+    } catch (error) {
+      if (error instanceof AuthorizationError) {
+        throw error;
+      }
+
+      const technicalCode = isRouterAdapterError(error) ? error.code : "timeout";
+      const userMessage = translateRouterError(technicalCode);
+
+      await this.logger.write({
+        action,
+        accountId: this.authSession?.account_id,
+        internalProfileId: this.authSession?.internal_profile_id,
+        internalProfileRole: this.authSession?.internal_profile_role,
+        level: "error",
+        technicalCode,
+        userMessage
+      });
+
+      throw new RouterServiceError(technicalCode, userMessage);
+    }
+  }
+
+  private ensurePermission(permission: Permission): void {
+    if (this.authSession !== undefined) {
+      requireProfilePermission(this.authSession, permission);
+    }
+  }
+}
+
+export class RouterServiceError extends Error {
+  constructor(
+    public readonly code: RouterErrorCode,
+    message: string
+  ) {
+    super(message);
+    this.name = "RouterServiceError";
+  }
+}
+
+export function translateRouterError(code: RouterErrorCode): string {
+  const messages: Partial<Record<RouterErrorCode, string>> = {
+    api_disabled: "Le service du routeur n'est pas activé.",
+    authentication_failed: "Identifiants du routeur incorrects.",
+    duplicate_user: "Ce ticket existe déjà.",
+    hotspot_not_found: "Le service de tickets est introuvable sur ce routeur.",
+    permission_denied: "Vous n'avez pas l'autorisation d'effectuer cette action.",
+    remote_not_configured: "La connexion a distance n'est pas configuree.",
+    remote_unavailable: "La connexion distante securisee n'est pas encore disponible.",
+    router_offline: "Le routeur est hors ligne.",
+    timeout: "Le routeur ne répond pas. Réessayez dans un instant."
+  };
+
+  return messages[code] ?? "La connexion distante n'est pas encore disponible.";
+}
+
+class NoopRouterActionLogger implements RouterActionLogger {
+  write(): void {
+    return undefined;
+  }
+}
+
+function isRouterAdapter(value: unknown): value is RouterAdapter & { listRouters?: () => Promise<RouterSummary[]> } {
+  return Boolean(value && typeof value === "object" && "testConnection" in value);
+}
+
+export type RouterServiceReadModel =
+  | ActiveHotspotUser
+  | HotspotPlan
+  | HotspotServer
+  | HotspotUser
+  | InterfaceTraffic
+  | RouterConnectionTest
+  | RouterDateTime
+  | RouterHealth
+  | RouterSystemInfo;

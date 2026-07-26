@@ -1,0 +1,45 @@
+# Dépendances et sorties de compilation
+node_modules/
+dist/
+target/
+src-tauri/target/
+
+# Données locales utilisateur
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.db
+
+# Fichiers générés
+*.log
+*.pdf
+exports/
+backups/
+output/
+outputs/
+tmp/
+work/
+
+# Installateurs et binaires de distribution
+TicketPro-Setup-*.exe
+*-setup.exe
+*.msi
+
+# Configuration locale, clés et secrets
+.env
+.env.*
+!.env.example
+secrets/
+*.key
+*.pem
+*.pfx
+*.p12
+*.jks
+*.keystore
+
+# Fichiers système et éditeurs
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

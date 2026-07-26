@@ -1,0 +1,362 @@
+import type { HotspotPlan, HotspotUser, RouterSummary } from "../../domain/router";
+import type { CreateTicketBatchInput, CreateTicketInput, SyncStatus } from "../../domain/database";
+import type { UserRole } from "../../domain/auth";
+import type { TicketPdfFormat, TicketPdfInput, TicketPdfTemplate } from "../../services/pdf";
+import { normalizeTicketPrefix, secretRefForTicket } from "../../services/tickets";
+
+export { secretRefForTicket };
+
+export type TicketGenerationStep = 1 | 2 | 3 | 4 | 5 | 6;
+
+export type TicketStatus =
+  | "activé"
+  | "complété"
+  | "disponible"
+  | "erreur_sync"
+  | "expiré"
+  | "imprimé"
+  | "supprimé";
+
+export type TicketGenerationOptions = {
+  codeLength: number;
+  createPdf: boolean;
+  excludeAmbiguous: boolean;
+  generateQrCode: boolean;
+  pdfFormat: TicketPdfFormat;
+  pdfTemplate: TicketPdfTemplate;
+  prefix: string;
+  supportPhone: string;
+  usernameEqualsPassword: boolean;
+};
+
+export type TicketGenerationState = {
+  customQuantity: string;
+  options: TicketGenerationOptions;
+  quantity: number | "custom";
+  selectedPlanId: string;
+  selectedRouterId: string;
+  step: TicketGenerationStep;
+};
+
+export type TicketGenerationResult = {
+  batch: CreateTicketBatchInput;
+  failedTickets: CreateTicketInput[];
+  fileName: string | null;
+  statusLabel: string;
+  succeededTickets: CreateTicketInput[];
+  syncStatus: SyncStatus;
+  totalValue: number | null;
+};
+
+export const quickQuantities = [5, 10, 20, 50, 100] as const;
+
+export const defaultTicketGenerationOptions: TicketGenerationOptions = {
+  codeLength: 6,
+  createPdf: true,
+  excludeAmbiguous: true,
+  generateQrCode: false,
+  pdfFormat: "a4",
+  pdfTemplate: "economy",
+  prefix: "",
+  supportPhone: "",
+  usernameEqualsPassword: true
+};
+
+export const ticketPdfFormatLabels: Record<TicketPdfFormat, string> = {
+  a4: "A4 multi-tickets",
+  a5: "A5",
+  thermal58: "58 mm",
+  thermal80: "80 mm"
+};
+
+export const ticketPdfTemplateLabels: Record<TicketPdfTemplate, string> = {
+  economy: "Économique",
+  premium: "Premium",
+  qr: "QR code",
+  simple: "Simple"
+};
+
+export const ticketStatuses: TicketStatus[] = [
+  "disponible",
+  "imprimé",
+  "activé",
+  "complété",
+  "expiré",
+  "supprimé",
+  "erreur_sync"
+];
+
+export function createInitialTicketGenerationState(routerId: string): TicketGenerationState {
+  return {
+    customQuantity: "20",
+    options: defaultTicketGenerationOptions,
+    quantity: 20,
+    selectedPlanId: "",
+    selectedRouterId: routerId,
+    step: 1
+  };
+}
+
+export function getSelectedQuantity(state: TicketGenerationState): number {
+  return state.quantity === "custom" ? Number(state.customQuantity) : state.quantity;
+}
+
+export function validateTicketGeneration(
+  state: TicketGenerationState,
+  routers: RouterSummary[],
+  plans: HotspotPlan[]
+): string | null {
+  if (!routers.some((router) => router.id === state.selectedRouterId)) {
+    return "Choisissez un routeur.";
+  }
+
+  if (!plans.some((plan) => plan.id === state.selectedPlanId && plan.status === "active")) {
+    return "Choisissez un plan actif.";
+  }
+
+  const quantity = getSelectedQuantity(state);
+
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 500) {
+    return "Choisissez une quantité entre 1 et 500.";
+  }
+
+  if (!Number.isInteger(state.options.codeLength) || state.options.codeLength < 3 || state.options.codeLength > 12) {
+    return "Choisissez une longueur de code entre 3 et 12.";
+  }
+
+  if (state.options.prefix.length > 8) {
+    return "Le préfixe doit contenir 8 caractères maximum.";
+  }
+
+  return null;
+}
+
+export function buildTicketBatch(input: {
+  accountId: string;
+  id: string;
+  operatorProfileId: string;
+  operatorRole: UserRole;
+  planId: string;
+  quantity: number;
+  routerId: string;
+  syncStatus: SyncStatus;
+  options: TicketGenerationOptions;
+}): CreateTicketBatchInput {
+  return {
+    account_id: input.accountId,
+    code_length: input.options.codeLength,
+    created_by_profile: input.operatorRole,
+    created_by_profile_id: input.operatorProfileId,
+    generated_file_id: input.options.createPdf ? `${input.id}-pdf` : null,
+    id: input.id,
+    operator_profile: input.operatorRole,
+    plan_id: input.planId,
+    prefix: normalizePrefix(input.options.prefix) || null,
+    quantity: input.quantity,
+    router_id: input.routerId,
+    status: input.syncStatus === "synced" ? "terminé" : "partiel",
+    sync_status: input.syncStatus
+  };
+}
+
+export function buildTicketRecord(input: {
+  accountId: string;
+  batchId: string;
+  createdByProfileId: string;
+  createdByProfile: UserRole;
+  mikrotikId: string | null;
+  passwordSecretRef: string;
+  planId: string;
+  routerId: string;
+  status: TicketStatus;
+  syncStatus: SyncStatus;
+  username: string;
+}): CreateTicketInput {
+  const id = `ticket-${slugify(input.username)}-${input.batchId}`;
+
+  return {
+    account_id: input.accountId,
+    activated_at: null,
+    batch_id: input.batchId,
+    completed_at: null,
+    created_by_profile: input.createdByProfile,
+    created_by_profile_id: input.createdByProfileId,
+    deleted_at: input.status === "supprimé" ? new Date().toISOString() : null,
+    downloaded_bytes: 0,
+    expires_at: null,
+    id,
+    ip_address: null,
+    mac_address: null,
+    mikrotik_id: input.mikrotikId,
+    password_encrypted: input.passwordSecretRef,
+    plan_id: input.planId,
+    printed_count: input.status === "imprimé" ? 1 : 0,
+    router_id: input.routerId,
+    status: input.status,
+    sync_status: input.syncStatus,
+    uploaded_bytes: 0,
+    username: input.username
+  };
+}
+
+export function getTicketSummary(input: {
+  operatorRole: UserRole;
+  plan: HotspotPlan;
+  quantity: number;
+  router: RouterSummary;
+  syncStatus: SyncStatus;
+}) {
+  return {
+    operator: roleLabel(input.operatorRole),
+    plan: input.plan.name,
+    quantity: input.quantity,
+    router: input.router.name,
+    sync: syncStatusLabel(input.syncStatus),
+    totalValue: input.plan.priceHint === null ? null : input.plan.priceHint * input.quantity
+  };
+}
+
+export function syncStatusLabel(status: SyncStatus): string {
+  const labels: Record<SyncStatus, string> = {
+    conflict: "Création partielle",
+    local: "Local uniquement",
+    pending: "En attente",
+    synced: "Synchronisé"
+  };
+
+  return labels[status];
+}
+
+export function normalizePrefix(prefix: string): string {
+  return normalizeTicketPrefix(prefix);
+}
+
+export function roleLabel(role: UserRole): string {
+  const labels: Record<UserRole, string> = {
+    admin: "Admin",
+    agent: "Agent",
+    guest: "Invité",
+    operator: "Opérateur"
+  };
+
+  return labels[role];
+}
+
+export function ticketStatusLabel(status: TicketStatus): string {
+  return status === "erreur_sync" ? "Erreur sync" : status.charAt(0).toUpperCase() + status.slice(1);
+}
+
+export function createBatchId(): string {
+  return `batch-${Date.now()}`;
+}
+
+export function buildFileName(batchId: string): string {
+  return `tickets-${batchId}.pdf`;
+}
+
+export function buildTicketPdfInput(input: {
+  batch: CreateTicketBatchInput;
+  fileName: string;
+  generatedAt: string;
+  plan: HotspotPlan;
+  router: RouterSummary;
+  tickets: CreateTicketInput[];
+}): TicketPdfInput {
+  return {
+    accountId: input.batch.account_id,
+    batchId: input.batch.id,
+    createdByProfile: input.batch.created_by_profile,
+    createdByProfileId: input.batch.created_by_profile_id,
+    dataLimitLabel: formatDataLimit(input.plan.dataLimitMb),
+    durationLabel: formatDuration(input.plan.durationMinutes),
+    fileName: input.fileName,
+    format: input.batch.generated_file_id ? defaultTicketGenerationOptions.pdfFormat : "a4",
+    generatedAt: input.generatedAt,
+    planName: input.plan.name,
+    priceLabel: input.plan.priceHint === null ? null : `CFA${input.plan.priceHint}`,
+    qrCodeEnabled: false,
+    routerId: input.router.id,
+    supportPhone: null,
+    template: defaultTicketGenerationOptions.pdfTemplate,
+    tickets: input.tickets.map((ticket) => ({
+      passwordSecretRef: ticket.password_encrypted,
+      username: ticket.username
+    })),
+    zoneName: input.router.name
+  };
+}
+
+export function buildTicketPdfInputFromOptions(input: {
+  batch: CreateTicketBatchInput;
+  fileName: string;
+  generatedAt: string;
+  options: TicketGenerationOptions;
+  plan: HotspotPlan;
+  router: RouterSummary;
+  tickets: CreateTicketInput[];
+}): TicketPdfInput {
+  return {
+    ...buildTicketPdfInput(input),
+    format: input.options.pdfFormat,
+    qrCodeEnabled: input.options.generateQrCode,
+    supportPhone: input.options.supportPhone.trim() || null,
+    template: input.options.pdfTemplate
+  };
+}
+
+export function userToTicketRecord(input: {
+  accountId: string;
+  batchId: string;
+  createdByProfileId: string;
+  createdByProfile: UserRole;
+  passwordSecretRef?: string;
+  planId?: string;
+  routerId: string;
+  user: HotspotUser;
+}): CreateTicketInput {
+  return buildTicketRecord({
+    accountId: input.accountId,
+    batchId: input.batchId,
+    createdByProfileId: input.createdByProfileId,
+    createdByProfile: input.createdByProfile,
+    mikrotikId: input.user.id,
+    passwordSecretRef: input.passwordSecretRef ?? input.user.passwordSecretRef,
+    planId: input.planId ?? input.user.planId,
+    routerId: input.routerId,
+    status: "disponible",
+    syncStatus: "synced",
+    username: input.user.username
+  });
+}
+
+function slugify(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+function formatDuration(minutes: number): string {
+  if (minutes >= 1440 && minutes % 1440 === 0) {
+    return `${minutes / 1440} j`;
+  }
+
+  if (minutes >= 60 && minutes % 60 === 0) {
+    return `${minutes / 60} h`;
+  }
+
+  return `${minutes} min`;
+}
+
+function formatDataLimit(megabytes: number | null): string | null {
+  if (megabytes === null) {
+    return null;
+  }
+
+  if (megabytes >= 1024 && megabytes % 1024 === 0) {
+    return `${megabytes / 1024} Go`;
+  }
+
+  return `${megabytes} MB`;
+}
