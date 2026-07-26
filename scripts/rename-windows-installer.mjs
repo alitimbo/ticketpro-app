@@ -1,7 +1,9 @@
-import { readdir, rename } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-const version = "0.1.0";
+const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+const version = packageJson.version;
 const installerName = `TicketPro-Setup-${version}-x64.exe`;
 const candidateDirectories = [
   join("src-tauri", "target", "x86_64-pc-windows-msvc", "release", "bundle", "nsis"),
@@ -16,8 +18,14 @@ for (const directory of candidateDirectories) {
     );
 
     if (generatedInstaller) {
-      await rename(join(directory, generatedInstaller), join(directory, installerName));
-      process.stdout.write(`Installateur généré : ${join(directory, installerName)}\n`);
+      const installerPath = join(directory, installerName);
+      await rename(join(directory, generatedInstaller), installerPath);
+      const checksum = createHash("sha256").update(await readFile(installerPath)).digest("hex");
+      const checksumPath = `${installerPath}.sha256`;
+      await writeFile(checksumPath, `${checksum}  ${installerName}\n`, "utf8");
+      process.stdout.write(`Installateur généré : ${installerPath}\n`);
+      process.stdout.write(`SHA-256 : ${checksum}\n`);
+      process.stdout.write(`Checksum : ${checksumPath}\n`);
       process.exit(0);
     }
   } catch (error) {
