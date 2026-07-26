@@ -648,7 +648,7 @@ function requirePaymentType(body) {
 }
 
 function assertIpayConfigured() {
-  if (!IPAY_ENV || !IPAY_PUBLIC_KEY || !IPAY_PRIVATE_KEY || !IPAY_SECRET_HASH) {
+  if (!IPAY_ENV || IPAY_ENV === "disabled" || !IPAY_PUBLIC_KEY || !IPAY_PRIVATE_KEY || !IPAY_SECRET_HASH) {
     throw new HttpError(503, "Le paiement iPay n'est pas configuré sur le serveur.");
   }
 }

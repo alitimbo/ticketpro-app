@@ -76,11 +76,16 @@ else
   fail "Compose wireguard-hub invalide"
 fi
 
-if docker compose -f "$SCRIPT_DIR/docker-compose.yml" \
-  --project-directory "$SCRIPT_DIR" config --quiet; then
-  ok "Compose reverse-proxy valide"
+REVERSE_PROXY_MODE=$(sed -n 's/^REVERSE_PROXY_MODE=//p' "$SCRIPT_DIR/.env" 2>/dev/null | tail -n 1)
+if [ "${REVERSE_PROXY_MODE:-caddy}" = "caddy" ]; then
+  if docker compose -f "$SCRIPT_DIR/docker-compose.yml" \
+    --project-directory "$SCRIPT_DIR" config --quiet; then
+    ok "Compose reverse-proxy valide"
+  else
+    fail "Compose reverse-proxy invalide"
+  fi
 else
-  fail "Compose reverse-proxy invalide"
+  ok "reverse proxy externe sélectionné"
 fi
 
 LICENSE_HUB_TOKEN=$(sed -n 's/^VPN_HUB_MASTER_TOKEN=//p' "$INFRA_DIR/license-api/.env" 2>/dev/null | tail -n 1)

@@ -42,8 +42,11 @@ docker compose -f "$INFRA_DIR/license-api/docker-compose.yml" \
   --project-directory "$INFRA_DIR/license-api" down
 docker compose -f "$INFRA_DIR/wireguard-hub/docker-compose.yml" \
   --project-directory "$INFRA_DIR/wireguard-hub" down
-docker compose -f "$SCRIPT_DIR/docker-compose.yml" \
-  --project-directory "$SCRIPT_DIR" down
+CURRENT_PROXY_MODE=$(sed -n 's/^REVERSE_PROXY_MODE=//p' "$SCRIPT_DIR/.env" 2>/dev/null | tail -n 1)
+if [ "${CURRENT_PROXY_MODE:-caddy}" = "caddy" ]; then
+  docker compose -f "$SCRIPT_DIR/docker-compose.yml" \
+    --project-directory "$SCRIPT_DIR" down
+fi
 
 mkdir -p "$INFRA_DIR/wireguard-hub/wireguard" "$INFRA_DIR/wireguard-hub/data"
 cp "$WORK_DIR/payload/license-api/.env" "$INFRA_DIR/license-api/.env"
@@ -67,7 +70,10 @@ docker compose -f "$INFRA_DIR/wireguard-hub/docker-compose.yml" \
   --project-directory "$INFRA_DIR/wireguard-hub" up -d --build
 docker compose -f "$INFRA_DIR/license-api/docker-compose.yml" \
   --project-directory "$INFRA_DIR/license-api" up -d --build
-docker compose -f "$SCRIPT_DIR/docker-compose.yml" \
-  --project-directory "$SCRIPT_DIR" up -d
+RESTORED_PROXY_MODE=$(sed -n 's/^REVERSE_PROXY_MODE=//p' "$SCRIPT_DIR/.env" | tail -n 1)
+if [ "${RESTORED_PROXY_MODE:-caddy}" = "caddy" ]; then
+  docker compose -f "$SCRIPT_DIR/docker-compose.yml" \
+    --project-directory "$SCRIPT_DIR" up -d
+fi
 
 echo "Restauration terminée. Vérifier maintenant les healthchecks et le domaine HTTPS."

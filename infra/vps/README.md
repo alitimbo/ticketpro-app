@@ -15,10 +15,8 @@ secrets et WireGuard sans les saisir dans l'application :
 chmod +x vps/*.sh
 export LICENSE_DOMAIN='license.votre-domaine.com'
 export VPN_PUBLIC_ENDPOINT='vpn.votre-domaine.com'
-export IPAY_ENV='sandbox'
-export IPAY_PUBLIC_KEY='...'
-export IPAY_PRIVATE_KEY='...'
-export IPAY_SECRET_HASH='...'
+# Facultatif au premier déploiement :
+export IPAY_ENV='disabled'
 ./vps/initialize.sh
 ./vps/deploy.sh
 ```
@@ -26,9 +24,18 @@ export IPAY_SECRET_HASH='...'
 `initialize.sh` refuse d'écraser une installation existante. Les secrets générés
 doivent ensuite être sauvegardés avec `backup.sh`.
 
+Pour activer les paiements plus tard, renseigner `IPAY_ENV`, `IPAY_PUBLIC_KEY`,
+`IPAY_PRIVATE_KEY` et `IPAY_SECRET_HASH` dans `license-api/.env`, puis redémarrer
+uniquement l'API de licences.
+
 Le hub n'est jamais exposé en HTTP. Seule l'API de licences passe par Caddy.
 Le pare-feu public doit autoriser TCP `80`, TCP `443`, UDP `51820` et le port SSH
 d'administration.
+
+Si le VPS possède déjà Nginx ou un autre reverse proxy, définir
+`REVERSE_PROXY_MODE=external` avant `initialize.sh`. Le script de déploiement ne
+démarrera alors pas Caddy et l'API locale `127.0.0.1:8787` devra être ajoutée au
+reverse proxy existant. Un modèle Nginx est fourni dans `vps/nginx-ticketpro.conf`.
 
 Avant le premier déploiement :
 
@@ -65,6 +72,10 @@ export BACKUP_PASSPHRASE='une-phrase-tres-longue-conservee-hors-du-vps'
 export BACKUP_REMOTE='stockage-ticketpro:backups-vps'
 ./vps/backup.sh /var/backups/ticketpro
 ```
+
+Pour une tâche cron, la phrase peut être placée dans un fichier root `600` et
+référencée avec `BACKUP_PASSPHRASE_FILE`, sans apparaître dans la ligne de
+commande.
 
 Le script crée un snapshot SQLite cohérent avec `VACUUM INTO`, contrôle son
 intégrité, rassemble l'identité WireGuard et les secrets, calcule les sommes

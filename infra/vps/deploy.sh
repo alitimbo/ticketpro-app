@@ -10,8 +10,12 @@ docker compose -f "$INFRA_DIR/wireguard-hub/docker-compose.yml" \
   --project-directory "$INFRA_DIR/wireguard-hub" up -d --build
 docker compose -f "$INFRA_DIR/license-api/docker-compose.yml" \
   --project-directory "$INFRA_DIR/license-api" up -d --build
-docker compose -f "$SCRIPT_DIR/docker-compose.yml" \
-  --project-directory "$SCRIPT_DIR" up -d
+
+REVERSE_PROXY_MODE=$(sed -n 's/^REVERSE_PROXY_MODE=//p' "$SCRIPT_DIR/.env" | tail -n 1)
+if [ "${REVERSE_PROXY_MODE:-caddy}" = "caddy" ]; then
+  docker compose -f "$SCRIPT_DIR/docker-compose.yml" \
+    --project-directory "$SCRIPT_DIR" up -d
+fi
 
 wait_healthy() {
   container=$1
@@ -36,6 +40,10 @@ wait_healthy() {
 
 wait_healthy ticketpro-wireguard-hub
 wait_healthy ticketpro-license-api
-wait_healthy ticketpro-reverse-proxy
+if [ "${REVERSE_PROXY_MODE:-caddy}" = "caddy" ]; then
+  wait_healthy ticketpro-reverse-proxy
+else
+  echo "OK: reverse proxy externe conservé"
+fi
 
 echo "Déploiement TicketPro terminé."

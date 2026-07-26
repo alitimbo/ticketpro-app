@@ -13,9 +13,16 @@ required() {
   fi
 }
 
-for name in LICENSE_DOMAIN VPN_PUBLIC_ENDPOINT IPAY_ENV IPAY_PUBLIC_KEY IPAY_PRIVATE_KEY IPAY_SECRET_HASH; do
+for name in LICENSE_DOMAIN VPN_PUBLIC_ENDPOINT; do
   required "$name"
 done
+
+IPAY_ENV=${IPAY_ENV:-disabled}
+if [ "$IPAY_ENV" != "disabled" ]; then
+  for name in IPAY_PUBLIC_KEY IPAY_PRIVATE_KEY IPAY_SECRET_HASH; do
+    required "$name"
+  done
+fi
 
 if [ -e "$INFRA_DIR/license-api/.env" ] || [ -e "$INFRA_DIR/wireguard-hub/.env" ] || [ -e "$SCRIPT_DIR/.env" ]; then
   echo "Initialisation refusée : un fichier .env existe déjà. Conservez les secrets en place." >&2
@@ -71,15 +78,18 @@ printf '%s\n' "$WG_PUBLIC_KEY" > "$INFRA_DIR/wireguard-hub/wireguard/server_publ
   echo "LICENSE_DEFAULT_ADMIN_PASSWORD=${LICENSE_DEFAULT_ADMIN_PASSWORD:-admin123}"
   echo "IPAY_BASE_URL=${IPAY_BASE_URL:-https://api.i-pay.money}"
   echo "IPAY_ENV=$IPAY_ENV"
-  echo "IPAY_PUBLIC_KEY=$IPAY_PUBLIC_KEY"
-  echo "IPAY_PRIVATE_KEY=$IPAY_PRIVATE_KEY"
-  echo "IPAY_SECRET_HASH=$IPAY_SECRET_HASH"
+  echo "IPAY_PUBLIC_KEY=${IPAY_PUBLIC_KEY:-}"
+  echo "IPAY_PRIVATE_KEY=${IPAY_PRIVATE_KEY:-}"
+  echo "IPAY_SECRET_HASH=${IPAY_SECRET_HASH:-}"
   echo "LICENSE_CORS_ORIGIN=${LICENSE_CORS_ORIGIN:-http://tauri.localhost}"
   echo "VPN_HUB_URL=http://127.0.0.1:8788"
   echo "VPN_HUB_MASTER_TOKEN=$HUB_MASTER_TOKEN"
 } > "$INFRA_DIR/license-api/.env"
 
-printf 'LICENSE_DOMAIN=%s\n' "$LICENSE_DOMAIN" > "$SCRIPT_DIR/.env"
+{
+  printf 'LICENSE_DOMAIN=%s\n' "$LICENSE_DOMAIN"
+  printf 'REVERSE_PROXY_MODE=%s\n' "${REVERSE_PROXY_MODE:-caddy}"
+} > "$SCRIPT_DIR/.env"
 
 chmod 600 \
   "$INFRA_DIR/license-api/.env" \

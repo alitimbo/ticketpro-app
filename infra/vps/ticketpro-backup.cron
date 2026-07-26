@@ -1,0 +1,4 @@
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+15 2 * * * root BACKUP_PASSPHRASE_FILE=/root/.ticketpro-backup-passphrase BACKUP_RETENTION_DAYS=35 /opt/ticketpro/infra/vps/backup.sh /var/backups/ticketpro >> /var/log/ticketpro-backup.log 2>&1

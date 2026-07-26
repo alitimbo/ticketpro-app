@@ -16,6 +16,11 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+if [ -z "${BACKUP_PASSPHRASE:-}" ] && [ -n "${BACKUP_PASSPHRASE_FILE:-}" ]; then
+  BACKUP_PASSPHRASE=$(cat "$BACKUP_PASSPHRASE_FILE")
+  export BACKUP_PASSPHRASE
+fi
+
 if [ -z "${BACKUP_PASSPHRASE:-}" ]; then
   echo "BACKUP_PASSPHRASE doit contenir une phrase secrète longue." >&2
   exit 1
