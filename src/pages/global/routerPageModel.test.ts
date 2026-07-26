@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it } from "vitest";
+import type { RouterConnectionRecord, RouterRecord } from "../../domain/database";
 import {
   createRouterFromForm,
   demoRouters,
   emptyRouterFormValues,
   filterRouters,
   getRouterLimitMessage,
-  listRoutersForAccount
+  listRoutersForAccount,
+  routerCardFromRecord,
+  routerConnectionInputsFromCard
 } from "./routerPageModel";
 import { countRoutersForSubscription, getSubscriptionOverview } from "./subscriptionPageModel";
 
@@ -66,5 +69,78 @@ describe("routerPageModel", () => {
       id: "router-test",
       subscriptionCounted: true
     });
+  });
+
+  it("reconstruit une carte depuis SQLite et ses connexions", () => {
+    const record: RouterRecord = {
+      account_id: "account-douma-demo",
+      api_port: 8728,
+      api_ssl_port: 8729,
+      board_name: "RB5009",
+      connection_mode: "vpn",
+      created_at: "2026-07-13T10:00:00.000Z",
+      created_by_profile_id: "account-douma-demo:internal-profile-admin",
+      deleted_at: null,
+      encrypted_password: "encrypted:router",
+      id: "router-persisted",
+      label: "Zone persistée",
+      last_seen_at: "2026-07-13T10:00:00.000Z",
+      local_ip: "192.168.10.1",
+      model: "RB5009",
+      name: "Zone persistée",
+      notes: "Test SQLite",
+      routeros_version: "7.15",
+      serial_number: "SERIAL-1",
+      status: "active",
+      subscription_counted: 1,
+      sync_status: "synced",
+      updated_at: "2026-07-13T10:00:00.000Z",
+      username: "admin",
+      zone_id: null
+    };
+    const connections: RouterConnectionRecord[] = [
+      {
+        created_at: "2026-07-13T10:00:00.000Z",
+        deleted_at: null,
+        id: "router-persisted:local",
+        last_connected_at: null,
+        last_error: null,
+        mode: "local",
+        port: 8728,
+        router_id: "router-persisted",
+        status: "inactive",
+        sync_status: "local",
+        updated_at: "2026-07-13T10:00:00.000Z",
+        use_ssl: 0,
+        host: "192.168.10.1"
+      },
+      {
+        created_at: "2026-07-13T10:00:00.000Z",
+        deleted_at: null,
+        id: "router-persisted:vpn",
+        last_connected_at: "2026-07-13T10:00:00.000Z",
+        last_error: null,
+        mode: "vpn",
+        port: 8729,
+        router_id: "router-persisted",
+        status: "active",
+        sync_status: "synced",
+        updated_at: "2026-07-13T10:00:00.000Z",
+        use_ssl: 1,
+        host: "router.vpn.local"
+      }
+    ];
+
+    const card = routerCardFromRecord(record, connections);
+
+    expect(card).toMatchObject({
+      id: "router-persisted",
+      notes: "Test SQLite",
+      preferredMode: "vpn",
+      remoteHost: "router.vpn.local",
+      remoteUseSsl: true,
+      status: "active"
+    });
+    expect(routerConnectionInputsFromCard(card).map((connection) => connection.mode)).toEqual(["local", "vpn"]);
   });
 });

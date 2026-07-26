@@ -11,6 +11,7 @@ import { GlobalHomePage } from "../../pages/global/GlobalHomePage";
 import { GlobalSettingsPage } from "../../pages/global/GlobalSettingsPage";
 import { InvoicesPage } from "../../pages/global/InvoicesPage";
 import { RoutersPage } from "../../pages/global/RoutersPage";
+import { VpnPage } from "../../pages/global/VpnPage";
 import { SubscriptionPage } from "../../pages/global/SubscriptionPage";
 import { ConnectedClientsPage } from "../../pages/router/ConnectedClientsPage";
 import { FilesPage } from "../../pages/router/FilesPage";
@@ -22,9 +23,26 @@ import { RouterHomePage } from "../../pages/router/RouterHomePage";
 import { RouterSettingsPage } from "../../pages/router/RouterSettingsPage";
 import { TicketGenerationPage } from "../../pages/router/TicketGenerationPage";
 import { TicketsPage } from "../../pages/router/TicketsPage";
+import { ResellerDashboardPage } from "../../pages/reseller/ResellerDashboardPage";
+import { appModeStorageKey } from "../../services/reseller";
 
 export function AppRouter() {
   const [firstLaunchRequired, setFirstLaunchRequired] = useState(() => getFirstLaunchRequired());
+  const [resellerMode, setResellerMode] = useState(() => localStorage.getItem(appModeStorageKey) === "reseller");
+
+  if (resellerMode) {
+    return (
+      <HashRouter>
+        <Routes>
+          <Route
+            path="/revendeur"
+            element={<ResellerDashboardPage onExit={() => setResellerMode(false)} />}
+          />
+          <Route path="*" element={<Navigate to="/revendeur" replace />} />
+        </Routes>
+      </HashRouter>
+    );
+  }
 
   if (firstLaunchRequired) {
     return (
@@ -32,7 +50,12 @@ export function AppRouter() {
         <Routes>
           <Route
             path="/premier-lancement"
-            element={<FirstLaunchPage onComplete={() => setFirstLaunchRequired(false)} />}
+            element={(
+              <FirstLaunchPage
+                onComplete={() => setFirstLaunchRequired(false)}
+                onResellerAccess={() => setResellerMode(true)}
+              />
+            )}
           />
           <Route path="*" element={<Navigate to="/premier-lancement" replace />} />
         </Routes>
@@ -68,6 +91,12 @@ export function AppRouter() {
         <Route element={<ProtectedRoute permissions={["global.invoices"]} />}>
           <Route element={<DesktopLayout scope="global" />}>
             <Route path="factures" element={<InvoicesPage />} />
+          </Route>
+        </Route>
+
+        <Route element={<ProtectedRoute permissions={["global.vpn"]} />}>
+          <Route element={<DesktopLayout scope="global" />}>
+            <Route path="vpn" element={<VpnPage />} />
           </Route>
         </Route>
 

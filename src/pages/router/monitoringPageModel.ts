@@ -8,6 +8,7 @@ import type {
   RouterDateTime,
   RouterHealth
 } from "../../domain/router";
+import type { RouterSnapshotRecord } from "../../domain/database";
 import type { AppStatus } from "../../shared/ui";
 
 export type MonitoringDiagnosticId =
@@ -63,12 +64,15 @@ export type MonitoringSource = {
   servers: HotspotServer[];
   ticketUsers: HotspotUser[];
   traffic: InterfaceTraffic[];
+  snapshots?: RouterSnapshotRecord[];
 };
 
 export function buildMonitoringViewModel(source: MonitoringSource): MonitoringViewModel {
   const apiAvailable = Boolean(source.connection?.ok);
   const hotspotActive = source.servers.some((server) => server.isEnabled);
-  const memoryPercent = Math.round((source.health.memoryUsed / source.health.memoryTotal) * 100);
+  const memoryPercent = source.health.memoryTotal > 0
+    ? Math.round((source.health.memoryUsed / source.health.memoryTotal) * 100)
+    : 0;
   const cpuHigh = source.health.cpuLoad >= 80;
   const memoryHigh = memoryPercent >= 80;
   const tooManyClients = source.activeUsers.length >= 50;
@@ -125,7 +129,7 @@ export function buildMonitoringViewModel(source: MonitoringSource): MonitoringVi
     apiStatus: apiAvailable ? "success" : "error",
     apiStatusLabel: apiAvailable ? "Disponible" : "Indisponible",
     cpuLoad: source.health.cpuLoad,
-    cpuSeries: createMetricSeries(source.health.cpuLoad, 60, 6, 17),
+    cpuSeries: createHistoricalSeries(source.snapshots?.map((snapshot) => snapshot.cpu_load ?? 0), source.health.cpuLoad),
     dateTimeLabel: `${source.dateTime.date} ${source.dateTime.time}`,
     diagnostics,
     downloadSeries: createTrafficSeries(source.traffic, "rxBytesPerSecond"),
@@ -136,7 +140,13 @@ export function buildMonitoringViewModel(source: MonitoringSource): MonitoringVi
     lastErrors,
     lastSyncLabel: formatDateTime(source.checkedAt),
     memoryPercent,
-    memorySeries: createMetricSeries(memoryPercent, 60, 4, 29),
+    memorySeries: createHistoricalSeries(
+      source.snapshots?.map((snapshot) => {
+        const total = snapshot.memory_total ?? 0;
+        return total > 0 ? Math.round(((snapshot.memory_used ?? 0) / total) * 100) : 0;
+      }),
+      memoryPercent
+    ),
     memoryText: `${formatBytes(source.health.memoryUsed)} / ${formatBytes(source.health.memoryTotal)}`,
     overallMessage: overall.overallMessage,
     overallStatus: overall.overallStatus,
@@ -213,6 +223,17 @@ function createMetricSeries(currentValue: number, length: number, variance: numb
     const pulse = ((index * seed) % 7) - 3;
     return clamp(Math.round(currentValue + wave + pulse), 0, 100);
   });
+}
+
+function createHistoricalSeries(values: number[] | undefined, currentValue: number): number[] {
+  if (!values || values.length === 0) {
+    return Array.from({ length: 60 }, () => currentValue);
+  }
+
+  const normalized = [...values, currentValue].slice(-60);
+  return normalized.length >= 60
+    ? normalized
+    : [...Array.from({ length: 60 - normalized.length }, () => normalized[0] ?? currentValue), ...normalized];
 }
 
 function createTrafficSeries(traffic: InterfaceTraffic[], key: "rxBytesPerSecond" | "txBytesPerSecond"): number[] {

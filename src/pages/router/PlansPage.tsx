@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useParams } from "react-router-dom";
 import {
   Copy,
   Edit3,
@@ -13,7 +14,19 @@ import {
   WifiOff
 } from "lucide-react";
 import { useAuth } from "../../app/auth/AuthProvider";
-import { FakeRouterAdapter, RouterService, type RouterActionLog } from "../../services/router";
+import {
+  createPersistedRouterService,
+  FakeRouterAdapter,
+  RouterService,
+  type RouterActionLog
+} from "../../services/router";
+import {
+  HotspotPlanRepository,
+  RouterConnectionRepository,
+  RouterRepository,
+  TicketRepository,
+  useAppDatabase
+} from "../../services/database";
 import { ActionMenu, Badge, Button, Card, EmptyState, FilterButton, PageHeader, StatusDot } from "../../shared/ui";
 import {
   applyTemplate,
@@ -21,6 +34,8 @@ import {
   formValuesToPlanDraft,
   formatPlanMinutes,
   planFromHotspotPlan,
+  planFromRecord,
+  planRecordFromDraft,
   planToFormValues,
   quickPlanTemplates,
   validatePlanForm,
@@ -38,11 +53,18 @@ type PlanFormState = {
 
 export function PlansPage() {
   const { session, userCan } = useAuth();
+  const { routerId = "routeur-demo" } = useParams();
+  const { database, isInitialized, isPersistent } = useAppDatabase();
   const canManagePlans = userCan("router.plans.write");
   const [plans, setPlans] = useState<PlanViewModel[]>([]);
   const [formState, setFormState] = useState<PlanFormState | null>(null);
   const [logs, setLogs] = useState<RouterActionLog[]>([]);
   const [message, setMessage] = useState<string | null>(null);
+  const [persistedService, setPersistedService] = useState<RouterService | null>(null);
+  const planRepository = useMemo(() => new HotspotPlanRepository(database), [database]);
+  const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
+  const routerRepository = useMemo(() => new RouterRepository(database), [database]);
+  const ticketRepository = useMemo(() => new TicketRepository(database), [database]);
   const service = useMemo(
     () =>
       new RouterService({
@@ -56,9 +78,74 @@ export function PlansPage() {
   );
 
   useEffect(() => {
+    if (!isPersistent || !isInitialized || !session) {
+      setPersistedService(null);
+      return undefined;
+    }
+
     let mounted = true;
+    const accountId = session?.account_id;
+
+    async function prepareService() {
+      const router = await routerRepository.findById(routerId);
+
+      if (!accountId || !router || router.account_id !== accountId) {
+        return;
+      }
+
+      const serviceForRouter = await createPersistedRouterService({
+        authSession: session,
+        connections: await connectionRepository.listByRouter(routerId),
+        database,
+        logger: { write: (log) => setLogs((current) => [...current, log]) },
+        router
+      });
+
+      if (mounted) {
+        setPersistedService(serviceForRouter);
+      }
+    }
+
+    void prepareService().catch((error) => {
+      if (mounted) {
+        setMessage(error instanceof Error ? error.message : "Connexion au routeur indisponible.");
+      }
+    });
+
+    return () => {
+      mounted = false;
+    };
+  }, [connectionRepository, isInitialized, isPersistent, routerId, routerRepository, session]);
+
+  useEffect(() => {
+    if (isPersistent && (!isInitialized || !routerId || !session)) {
+      return undefined;
+    }
+
+    let mounted = true;
+    const accountId = session?.account_id;
 
     async function loadPlans() {
+      if (isPersistent) {
+        const [router, records, ticketRecords] = await Promise.all([
+          routerRepository.findById(routerId),
+          planRepository.listByRouter(routerId),
+          ticketRepository.listByRouter(routerId)
+        ]);
+
+        if (!mounted) {
+          return;
+        }
+
+        if (!accountId || !router || router.account_id !== accountId) {
+          setPlans([]);
+          return;
+        }
+
+        setPlans(records.map((record) => planFromRecord(record, ticketRecords.filter((ticket) => ticket.plan_id === record.id && ticket.account_id === accountId).length)));
+        return;
+      }
+
       const remotePlans = await service.getHotspotPlans();
 
       if (!mounted) {
@@ -73,7 +160,7 @@ export function PlansPage() {
     return () => {
       mounted = false;
     };
-  }, [service]);
+  }, [isInitialized, isPersistent, planRepository, routerId, routerRepository, service, session, ticketRepository]);
 
   const openCreateForm = () => {
     setFormState({
@@ -96,7 +183,19 @@ export function PlansPage() {
   };
 
   const syncPlan = async (plan: PlanViewModel) => {
-    await service.updateHotspotPlan(plan.id, { status: plan.status });
+    if (isPersistent) {
+      if (!persistedService) {
+        setMessage("Le routeur n'est pas prêt ou son mot de passe doit être ressaisi.");
+        return;
+      }
+
+      const draft = formValuesToPlanDraft(planToFormValues(plan));
+      await persistedService.updateHotspotPlan(plan.profileName, draft);
+      await planRepository.update({ ...planRecordFromDraft(draft, routerId, plan.id, "synced") });
+      setPlans((current) => current.map((item) => (item.id === plan.id ? { ...item, syncStatus: "synced" } : item)));
+    } else {
+      await service.updateHotspotPlan(plan.id, { status: plan.status });
+    }
     setMessage(`${plan.name} synchronisé.`);
   };
 
@@ -115,9 +214,29 @@ export function PlansPage() {
     const draft = formValuesToPlanDraft(formState.values);
 
     if (formState.mode === "create") {
-      const created = await service.createHotspotPlan(draft);
+      const planId = `plan-${crypto.randomUUID()}`;
+      const localRecord = planRecordFromDraft(draft, routerId, planId, isPersistent ? "pending" : "local");
+      const storedRecord = isPersistent ? await planRepository.create(localRecord) : null;
+      let syncStatus: PlanViewModel["syncStatus"] = isPersistent ? "pending" : "synced";
+
+      if (isPersistent) {
+        try {
+          if (!persistedService) {
+            throw new Error("Routeur non prêt");
+          }
+          await persistedService.createHotspotPlan(draft);
+          syncStatus = "synced";
+          await planRepository.update({ ...localRecord, sync_status: syncStatus });
+        } catch {
+          setMessage("Plan enregistré localement ; synchronisation à reprendre.");
+        }
+      }
+
+      const created = isPersistent
+        ? planFromRecord({ ...storedRecord!, sync_status: syncStatus })
+        : planFromHotspotPlan(await service.createHotspotPlan(draft), 0);
       const viewModel = {
-        ...planFromHotspotPlan(created, 0),
+        ...created,
         idleTimeout: formState.values.idleTimeout,
         keepaliveTimeout: formState.values.keepaliveTimeout,
         rateLimit: formState.values.rateLimit,
@@ -127,9 +246,28 @@ export function PlansPage() {
       setPlans((current) => [viewModel, ...current]);
       setMessage(`${viewModel.name} créé.`);
     } else if (formState.plan) {
-      const updated = await service.updateHotspotPlan(formState.plan.id, draft);
+      let syncStatus: PlanViewModel["syncStatus"] = isPersistent ? "pending" : "synced";
+      const localRecord = planRecordFromDraft(draft, routerId, formState.plan.id, isPersistent ? "pending" : "local");
+      const storedRecord = isPersistent ? await planRepository.update(localRecord) : null;
+
+      if (isPersistent) {
+        try {
+          if (!persistedService) {
+            throw new Error("Routeur non prêt");
+          }
+          await persistedService.updateHotspotPlan(formState.plan.profileName, draft);
+          syncStatus = "synced";
+          await planRepository.update({ ...localRecord, sync_status: syncStatus });
+        } catch {
+          setMessage("Plan modifié localement ; synchronisation à reprendre.");
+        }
+      }
+
+      const updated = isPersistent
+        ? planFromRecord({ ...storedRecord!, sync_status: syncStatus }, formState.plan.linkedTickets)
+        : planFromHotspotPlan(await service.updateHotspotPlan(formState.plan.id, draft), formState.plan.linkedTickets);
       const viewModel = {
-        ...planFromHotspotPlan(updated, formState.plan.linkedTickets),
+        ...updated,
         idleTimeout: formState.values.idleTimeout,
         keepaliveTimeout: formState.values.keepaliveTimeout,
         rateLimit: formState.values.rateLimit,
@@ -150,9 +288,26 @@ export function PlansPage() {
       profileName: `${plan.profileName}-copie`,
       status: "active"
     });
-    const created = await service.createHotspotPlan(draft);
+    const planId = `plan-${crypto.randomUUID()}`;
+    const localRecord = planRecordFromDraft(draft, routerId, planId, isPersistent ? "pending" : "local");
+    const storedRecord = isPersistent ? await planRepository.create(localRecord) : null;
+    let syncStatus: PlanViewModel["syncStatus"] = isPersistent ? "pending" : "synced";
+
+    if (isPersistent && persistedService) {
+      try {
+        await persistedService.createHotspotPlan(draft);
+        syncStatus = "synced";
+        await planRepository.update({ ...localRecord, sync_status: syncStatus });
+      } catch {
+        setMessage("Copie enregistrée localement ; synchronisation à reprendre.");
+      }
+    }
+
+    const created = isPersistent
+      ? planFromRecord({ ...storedRecord!, sync_status: syncStatus })
+      : planFromHotspotPlan(await service.createHotspotPlan(draft), 0);
     const copy = {
-      ...planFromHotspotPlan(created, 0),
+      ...created,
       idleTimeout: plan.idleTimeout,
       keepaliveTimeout: plan.keepaliveTimeout,
       rateLimit: plan.rateLimit,
@@ -164,7 +319,18 @@ export function PlansPage() {
   };
 
   const disable = async (plan: PlanViewModel) => {
-    const updated = await service.updateHotspotPlan(plan.id, { status: "disabled" });
+    const draft = formValuesToPlanDraft({ ...planToFormValues(plan), status: "disabled" });
+    if (isPersistent && persistedService) {
+      try {
+        await persistedService.updateHotspotPlan(plan.profileName, draft);
+      } catch {
+        setMessage("Plan désactivé localement ; synchronisation à reprendre.");
+      }
+    }
+
+    const updated = isPersistent
+      ? planFromRecord(await planRepository.update({ ...planRecordFromDraft(draft, routerId, plan.id, persistedService ? "synced" : "pending") }), plan.linkedTickets)
+      : planFromHotspotPlan(await service.updateHotspotPlan(plan.id, { status: "disabled" }), plan.linkedTickets);
     setPlans((current) =>
       current.map((item) => (item.id === plan.id ? { ...item, status: updated.status } : item))
     );
@@ -177,7 +343,19 @@ export function PlansPage() {
       return;
     }
 
-    await service.deleteHotspotPlan(plan.id);
+    if (isPersistent) {
+      if (persistedService) {
+        try {
+          await persistedService.deleteHotspotPlan(plan.profileName);
+        } catch {
+          setMessage("Suppression distante impossible ; le plan reste conservé localement.");
+          return;
+        }
+      }
+      await planRepository.remove(plan.id);
+    } else {
+      await service.deleteHotspotPlan(plan.id);
+    }
     setPlans((current) => current.filter((item) => item.id !== plan.id));
     setMessage(`${plan.name} supprimé.`);
   };
@@ -308,6 +486,9 @@ function PlanCard({ canManage, onDelete, onDisable, onDuplicate, onEdit, onSync,
       <div className="plan-card__status">
         <Badge status={plan.status === "active" ? "success" : "offline"}>
           {plan.status === "active" ? "Actif" : "Inactif"}
+        </Badge>
+        <Badge status={plan.syncStatus === "synced" ? "success" : plan.syncStatus === "conflict" ? "error" : "warning"}>
+          {plan.syncStatus === "synced" ? "Synchronisé" : plan.syncStatus === "conflict" ? "Conflit" : "À synchroniser"}
         </Badge>
         <span>{plan.priceHint ? `${plan.priceHint} CFA` : "Prix non défini"}</span>
         <span>{plan.linkedTickets} ticket(s)</span>

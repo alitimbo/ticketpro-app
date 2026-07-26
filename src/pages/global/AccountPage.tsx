@@ -1,15 +1,19 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Building2, CalendarDays, KeyRound, LogOut, Mail, Phone, Router, ShieldCheck, UserRound } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../app/auth/AuthProvider";
+import { AccountRepository, AppLogRepository, useAppDatabase } from "../../services/database";
+import { AuditLogService } from "../../services/logging";
 import {
   appendAccountSecurityLog,
   changeMainAccountPassword,
+  hashMainAccountPassword,
   readAccountSecurityLogs,
   readMainAccountRecord,
   refreshMainAccountSession,
   storeMainAccountSession,
-  updateMainAccountDetails
+  updateMainAccountDetails,
+  type MainAccountSecurityLog
 } from "../../services/auth";
 import { Badge, Button, Card, DataListItem, PageHeader, PasswordField, StatCard } from "../../shared/ui";
 import { demoRouters, listRoutersForAccount } from "./routerPageModel";
@@ -37,7 +41,11 @@ const emptyPasswordForm: PasswordFormState = {
 export function AccountPage() {
   const navigate = useNavigate();
   const { accountSession, logoutAccount, refreshAccountSession, session } = useAuth();
-  const account = readMainAccountRecord(accountSession?.email ?? "");
+  const { database, isInitialized, isPersistent } = useAppDatabase();
+  const [account, setAccount] = useState(() => readMainAccountRecord(accountSession?.email ?? ""));
+  const accountRepository = useMemo(() => new AccountRepository(database), [database]);
+  const auditLogService = useMemo(() => new AuditLogService(database), [database]);
+  const appLogRepository = useMemo(() => new AppLogRepository(database), [database]);
   const accountRouters = useMemo(
     () => listRoutersForAccount(demoRouters, accountSession?.accountId ?? null),
     [accountSession?.accountId]
@@ -52,12 +60,64 @@ export function AccountPage() {
     phone: account?.phone ?? ""
   });
   const [passwordForm, setPasswordForm] = useState<PasswordFormState>(emptyPasswordForm);
+  const [persistentSecurityLogs, setPersistentSecurityLogs] = useState<MainAccountSecurityLog[]>([]);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const securityLogs = useMemo(
+  const localSecurityLogs = useMemo(
     () => readAccountSecurityLogs().filter((log) => log.accountId === accountSession?.accountId).slice(0, 5),
     [accountSession?.accountId, message]
   );
+  const securityLogs = isPersistent ? persistentSecurityLogs : localSecurityLogs;
+
+  useEffect(() => {
+    if (!isPersistent || !isInitialized || !accountSession) {
+      return;
+    }
+
+    void accountRepository.findById(accountSession.accountId).then((record) => {
+      if (record) {
+        const nextAccount = {
+          companyName: record.company_name ?? "",
+          createdAt: record.created_at,
+          displayName: record.display_name ?? "",
+          email: record.email,
+          id: record.id,
+          lastLoginAt: record.last_login_at,
+          passwordHash: record.password_hash,
+          phone: record.phone ?? "",
+          status: record.status,
+          updatedAt: record.updated_at
+        };
+        setAccount(nextAccount);
+        setDetailsForm({
+          companyName: nextAccount.companyName,
+          displayName: nextAccount.displayName,
+          phone: nextAccount.phone
+        });
+      }
+    });
+  }, [accountRepository, accountSession, isInitialized, isPersistent]);
+
+  useEffect(() => {
+    if (!isPersistent || !isInitialized || !accountSession) {
+      return;
+    }
+
+    void appLogRepository.listByAccount(accountSession.accountId).then((records) => {
+      setPersistentSecurityLogs(
+        records
+          .filter((record) => record.category === "authentification")
+          .slice(0, 5)
+          .map((record) => ({
+            accountId: accountSession.accountId,
+            createdAt: record.created_at,
+            id: record.id,
+            internalProfileId: record.internal_profile_id,
+            message: record.user_message
+          }))
+      );
+    });
+  }, [accountSession, appLogRepository, isInitialized, isPersistent, message]);
 
   if (!account || !accountSession) {
     return (
@@ -70,7 +130,7 @@ export function AccountPage() {
     );
   }
 
-  const updateDetails = () => {
+  const updateDetails = async () => {
     const validationError = validateAccountDetails({
       ...account,
       companyName: detailsForm.companyName,
@@ -90,6 +150,23 @@ export function AccountPage() {
       email: account.email,
       phone: detailsForm.phone
     });
+    if (isPersistent) {
+      await accountRepository.updateDetails({
+        companyName: updated.companyName,
+        displayName: updated.displayName,
+        email: updated.email,
+        id: updated.id,
+        phone: updated.phone
+      });
+      await auditLogService.write({
+        accountId: account.id,
+        action: "account.details_updated",
+        category: "authentification",
+        internalProfileId: session?.internal_profile_id ?? null,
+        message: "Informations du compte principal mises à jour."
+      });
+    }
+    setAccount(updated);
     const refreshedSession = refreshMainAccountSession({
       ...accountSession,
       companyLabel: updated.companyName || updated.displayName || updated.email
@@ -98,7 +175,7 @@ export function AccountPage() {
     storeMainAccountSession(refreshedSession);
     refreshAccountSession();
     setError(null);
-    setMessage("Informations du compte mises à jour.");
+    setMessage(isPersistent ? "Informations du compte mises à jour dans SQLite." : "Informations du compte mises à jour.");
   };
 
   const updatePassword = async () => {
@@ -120,6 +197,17 @@ export function AccountPage() {
       setError(result.message);
       setMessage(null);
       return;
+    }
+
+    if (isPersistent) {
+      await accountRepository.updatePassword(account.id, await hashMainAccountPassword(account.email, passwordForm.newPassword));
+      await auditLogService.write({
+        accountId: account.id,
+        action: "account.password_changed",
+        category: "authentification",
+        internalProfileId: session?.internal_profile_id ?? null,
+        message: "Mot de passe principal modifié."
+      });
     }
 
     appendAccountSecurityLog({
@@ -205,7 +293,7 @@ export function AccountPage() {
           </label>
         </div>
         <div className="confirm-dialog__actions">
-          <Button icon={UserRound} onClick={updateDetails} variant="primary">
+          <Button icon={UserRound} onClick={() => void updateDetails()} variant="primary">
             Enregistrer
           </Button>
         </div>

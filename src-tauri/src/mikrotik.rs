@@ -1,3 +1,4 @@
+use native_tls::{TlsConnector, TlsStream};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -21,12 +22,38 @@ pub struct MikroTikApiRequest {
 
 pub type ApiRow = HashMap<String, String>;
 
-#[tauri::command]
-pub fn mikrotik_api_call(request: MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
-    if request.use_ssl {
-        return Err("api disabled: API-SSL transport is not enabled in this build".to_string());
+enum ApiStream {
+    Tcp(TcpStream),
+    Tls(TlsStream<TcpStream>),
+}
+
+impl Read for ApiStream {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => stream.read(buffer),
+            Self::Tls(stream) => stream.read(buffer)
+        }
+    }
+}
+
+impl Write for ApiStream {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => stream.write(buffer),
+            Self::Tls(stream) => stream.write(buffer)
+        }
     }
 
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.flush(),
+            Self::Tls(stream) => stream.flush()
+        }
+    }
+}
+
+#[tauri::command]
+pub fn mikrotik_api_call(request: MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
     let retries = request.retries.unwrap_or(1);
     let mut last_error = "router offline".to_string();
 
@@ -53,7 +80,7 @@ fn execute_once(request: &MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
         .map_err(|_| "router offline: address unavailable".to_string())?
         .next()
         .ok_or_else(|| "router offline: address unavailable".to_string())?;
-    let mut stream = TcpStream::connect_timeout(&address, timeout).map_err(map_io_error)?;
+    let stream = TcpStream::connect_timeout(&address, timeout).map_err(map_io_error)?;
 
     stream
         .set_read_timeout(Some(timeout))
@@ -62,15 +89,30 @@ fn execute_once(request: &MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
         .set_write_timeout(Some(timeout))
         .map_err(|_| "timeout: write timeout unavailable".to_string())?;
 
+    if request.use_ssl {
+        let connector = TlsConnector::new().map_err(|_| "api ssl: TLS indisponible".to_string())?;
+        let mut stream = ApiStream::Tls(
+            connector
+                .connect(&request.host, stream)
+                .map_err(|_| "api ssl: négociation TLS échouée".to_string())?,
+        );
+        execute_session(&mut stream, request)
+    } else {
+        let mut stream = ApiStream::Tcp(stream);
+        execute_session(&mut stream, request)
+    }
+}
+
+fn execute_session<S: Read + Write>(stream: &mut S, request: &MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
     send_sentence(
-        &mut stream,
+        stream,
         &[
             "/login".to_string(),
             format!("=name={}", request.username),
             format!("=password={}", request.password),
         ],
     )?;
-    read_response(&mut stream)?;
+    read_response(stream)?;
 
     let mut words = vec![request.command.clone()];
 
@@ -91,11 +133,11 @@ fn execute_once(request: &MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
         }
     }
 
-    send_sentence(&mut stream, &words)?;
-    read_response(&mut stream)
+    send_sentence(stream, &words)?;
+    read_response(stream)
 }
 
-fn send_sentence(stream: &mut TcpStream, words: &[String]) -> Result<(), String> {
+fn send_sentence<S: Read + Write>(stream: &mut S, words: &[String]) -> Result<(), String> {
     for word in words {
         write_word(stream, word.as_bytes())?;
     }
@@ -104,7 +146,7 @@ fn send_sentence(stream: &mut TcpStream, words: &[String]) -> Result<(), String>
     stream.flush().map_err(map_io_error)
 }
 
-fn read_response(stream: &mut TcpStream) -> Result<Vec<ApiRow>, String> {
+fn read_response<S: Read + Write>(stream: &mut S) -> Result<Vec<ApiRow>, String> {
     let mut rows = Vec::new();
 
     loop {
@@ -124,7 +166,7 @@ fn read_response(stream: &mut TcpStream) -> Result<Vec<ApiRow>, String> {
     }
 }
 
-fn read_sentence(stream: &mut TcpStream) -> Result<Vec<String>, String> {
+fn read_sentence<S: Read + Write>(stream: &mut S) -> Result<Vec<String>, String> {
     let mut words = Vec::new();
 
     loop {
@@ -138,12 +180,12 @@ fn read_sentence(stream: &mut TcpStream) -> Result<Vec<String>, String> {
     }
 }
 
-fn write_word(stream: &mut TcpStream, word: &[u8]) -> Result<(), String> {
+fn write_word<S: Read + Write>(stream: &mut S, word: &[u8]) -> Result<(), String> {
     write_length(stream, word.len())?;
     stream.write_all(word).map_err(map_io_error)
 }
 
-fn read_word(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
+fn read_word<S: Read + Write>(stream: &mut S) -> Result<Vec<u8>, String> {
     let length = read_length(stream)?;
     let mut buffer = vec![0_u8; length];
 
@@ -154,7 +196,7 @@ fn read_word(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
     Ok(buffer)
 }
 
-fn write_length(stream: &mut TcpStream, length: usize) -> Result<(), String> {
+fn write_length<S: Read + Write>(stream: &mut S, length: usize) -> Result<(), String> {
     let bytes = if length < 0x80 {
         vec![length as u8]
     } else if length < 0x4000 {
@@ -185,7 +227,7 @@ fn write_length(stream: &mut TcpStream, length: usize) -> Result<(), String> {
     stream.write_all(&bytes).map_err(map_io_error)
 }
 
-fn read_length(stream: &mut TcpStream) -> Result<usize, String> {
+fn read_length<S: Read + Write>(stream: &mut S) -> Result<usize, String> {
     let first = read_byte(stream)?;
 
     if first & 0x80 == 0 {
@@ -224,7 +266,7 @@ fn read_length(stream: &mut TcpStream) -> Result<usize, String> {
         + fifth as usize)
 }
 
-fn read_byte(stream: &mut TcpStream) -> Result<u8, String> {
+fn read_byte<S: Read + Write>(stream: &mut S) -> Result<u8, String> {
     let mut buffer = [0_u8; 1];
     stream.read_exact(&mut buffer).map_err(map_io_error)?;
     Ok(buffer[0])

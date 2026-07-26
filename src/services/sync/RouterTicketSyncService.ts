@@ -19,6 +19,7 @@ export type SyncableLocalTicket = {
   mikrotikId: string | null;
   passwordSecretRef: string;
   planId: string;
+  planProfileName?: string;
   routerId: string;
   status: string;
   syncStatus: RouterTicketSyncStatus;
@@ -37,6 +38,7 @@ export type SyncedTicketUpdate = {
 export type RouterOnlyTicket = {
   code: string;
   mikrotikId: string;
+  passwordSecretRef: string;
   planId: string;
   profileName: string;
   syncStatus: "local_missing";
@@ -66,7 +68,10 @@ export type TicketSyncSummary = {
 };
 
 export class RouterTicketSyncService {
-  constructor(private readonly routerService: Pick<RouterService, "createHotspotUser" | "listActiveUsers" | "listHotspotUsers">) {}
+  constructor(
+    private readonly routerService: Pick<RouterService, "createHotspotUser" | "listActiveUsers" | "listHotspotUsers"> &
+      Partial<Pick<RouterService, "removeHotspotUser" | "updateHotspotUser">>
+  ) {}
 
   async compareTickets(localTickets: SyncableLocalTicket[]): Promise<TicketSyncReport> {
     const [routerUsers, activeUsers] = await Promise.all([
@@ -111,6 +116,22 @@ export class RouterTicketSyncService {
         updates
       };
     } catch {
+      const reconciled = await this.reconcileAfterWriteFailure(ticket);
+
+      if (reconciled) {
+        return {
+          ...reconciled,
+          logs: [
+            {
+              level: "warning",
+              message: "Le ticket était déjà présent après la reprise réseau.",
+              ticketCode: ticket.code
+            },
+            ...reconciled.logs
+          ]
+        };
+      }
+
       const updates = report.updates.map((item) =>
         item.id === ticket.id ? { ...item, status: "erreur_sync", syncStatus: "error" as const } : item
       );
@@ -139,6 +160,71 @@ export class RouterTicketSyncService {
     return this.resyncMany(localTickets);
   }
 
+  private async reconcileAfterWriteFailure(ticket: SyncableLocalTicket): Promise<TicketSyncReport | null> {
+    try {
+      const report = await this.compareTickets([ticket]);
+      return report.updates.some((update) => update.id === ticket.id && update.syncStatus !== "router_missing")
+        ? report
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async resolveConflict(ticket: SyncableLocalTicket): Promise<TicketSyncReport> {
+    if (!ticket.planProfileName) {
+      return {
+        localMissing: [],
+        logs: [{ level: "error", message: "Le plan local n'a pas de profil MikroTik exploitable.", ticketCode: ticket.code }],
+        summary: buildSummary([], []),
+        updates: [{ id: ticket.id, status: "erreur_sync", syncStatus: "error" }]
+      };
+    }
+
+    try {
+      if (!this.routerService.updateHotspotUser) {
+        throw new Error("La mise à jour des tickets n'est pas disponible.");
+      }
+      await this.routerService.updateHotspotUser(ticket.code, ticket.planProfileName);
+      return this.compareTickets([ticket]);
+    } catch {
+      return {
+        localMissing: [],
+        logs: [{ level: "error", message: "Le conflit n'a pas pu être résolu sur le routeur.", ticketCode: ticket.code }],
+        summary: buildSummary([{ id: ticket.id, status: "erreur_sync", syncStatus: "error" }], []),
+        updates: [{ id: ticket.id, status: "erreur_sync", syncStatus: "error" }]
+      };
+    }
+  }
+
+  async removeTicket(ticket: SyncableLocalTicket): Promise<TicketSyncReport> {
+    if (!this.routerService.removeHotspotUser) {
+      return {
+        localMissing: [],
+        logs: [{ level: "error", message: "La suppression distante n'est pas disponible.", ticketCode: ticket.code }],
+        summary: buildSummary([{ id: ticket.id, status: "erreur_sync", syncStatus: "error" }], []),
+        updates: [{ id: ticket.id, status: "erreur_sync", syncStatus: "error" }]
+      };
+    }
+
+    try {
+      await this.routerService.removeHotspotUser(ticket.code);
+      return {
+        localMissing: [],
+        logs: [{ level: "info", message: "Ticket supprimé du routeur.", ticketCode: ticket.code }],
+        summary: buildSummary([{ id: ticket.id, status: "supprimé", syncStatus: "router_synced" }], []),
+        updates: [{ id: ticket.id, status: "supprimé", syncStatus: "router_synced" }]
+      };
+    } catch {
+      return {
+        localMissing: [],
+        logs: [{ level: "error", message: "Suppression impossible sur le routeur.", ticketCode: ticket.code }],
+        summary: buildSummary([{ id: ticket.id, status: "erreur_sync", syncStatus: "error" }], []),
+        updates: [{ id: ticket.id, status: "erreur_sync", syncStatus: "error" }]
+      };
+    }
+  }
+
   private async resyncMany(localTickets: SyncableLocalTicket[]): Promise<TicketSyncReport> {
     const initialReport = await this.compareTickets(localTickets);
     const missingTickets = localTickets.filter((ticket) =>
@@ -158,6 +244,24 @@ export class RouterTicketSyncService {
 
         logs.unshift({ level: "info", message: "Ticket recréé sur le routeur.", ticketCode: ticket.code });
       } catch {
+        const reconciled = await this.reconcileAfterWriteFailure(ticket);
+        const reconciledUpdate = reconciled?.updates.find((update) => update.id === ticket.id);
+
+        if (reconciledUpdate && reconciledUpdate.syncStatus !== "router_missing") {
+          const reconciledIndex = updates.findIndex((update) => update.id === ticket.id);
+
+          if (reconciledIndex >= 0) {
+            updates[reconciledIndex] = reconciledUpdate;
+          }
+
+          logs.unshift({
+            level: "warning",
+            message: "Le ticket était déjà présent après la reprise réseau.",
+            ticketCode: ticket.code
+          });
+          continue;
+        }
+
         const index = updates.findIndex((update) => update.id === ticket.id);
 
         if (index >= 0) {
@@ -203,7 +307,9 @@ export function compareLocalAndRouterTickets(
       return;
     }
 
-    const hasConflict = Boolean(ticket.planId && routerUser.planId && ticket.planId !== routerUser.planId);
+    const hasConflict = ticket.planProfileName
+      ? ticket.planProfileName !== routerUser.profileName
+      : Boolean(ticket.planId && routerUser.planId && ticket.planId !== routerUser.planId);
 
     updates.push({
       activatedAt: activeUser ? ticket.activatedAt ?? new Date().toISOString() : ticket.activatedAt,
@@ -211,7 +317,14 @@ export function compareLocalAndRouterTickets(
       ipAddress: activeUser?.ipAddress ?? ticket.ipAddress,
       macAddress: activeUser?.macAddress ?? ticket.macAddress,
       mikrotikId: routerUser.id,
-      status: activeUser ? "activé" : ticket.status === "erreur_sync" ? "disponible" : ticket.status,
+      status:
+        activeUser
+          ? "activé"
+          : routerUser.status === "disabled" || routerUser.status === "expired"
+            ? "expiré"
+            : ticket.status === "erreur_sync"
+              ? "disponible"
+              : ticket.status,
       syncStatus: hasConflict ? "conflict" : "router_synced"
     });
 
@@ -232,6 +345,7 @@ export function compareLocalAndRouterTickets(
     localMissing.push({
       code: user.username,
       mikrotikId: user.id,
+      passwordSecretRef: user.passwordSecretRef,
       planId: user.planId,
       profileName: user.profileName,
       syncStatus: "local_missing"
@@ -268,7 +382,7 @@ function localTicketToDraft(ticket: SyncableLocalTicket): HotspotUserDraft {
   return {
     comment: `Resynchronisation lot ${ticket.batchId}`,
     passwordSecretRef: ticket.passwordSecretRef,
-    planId: ticket.planId,
+    planId: ticket.planProfileName ?? ticket.planId,
     username: ticket.code
   };
 }

@@ -22,6 +22,7 @@ export interface RouterAdapter {
   updateHotspotPlan(planId: string, updates: Partial<HotspotPlanDraft>): Promise<HotspotPlan>;
   deleteHotspotPlan(planId: string): Promise<void>;
   listHotspotUsers(): Promise<HotspotUser[]>;
+  updateHotspotUser(username: string, planId: string): Promise<HotspotUser>;
   createHotspotUser(user: HotspotUserDraft): Promise<HotspotUser>;
   createHotspotUsersBatch(batch: HotspotUsersBatchDraft): Promise<HotspotUser[]>;
   disableHotspotUser(username: string): Promise<HotspotUser>;
@@ -31,4 +32,6 @@ export interface RouterAdapter {
   getRouterHealth(): Promise<RouterHealth>;
   getInterfaceTraffic(): Promise<InterfaceTraffic[]>;
   getRouterDateTime(): Promise<RouterDateTime>;
+  provisionWireGuard(config: import("../../domain/router").RouterWireGuardConfig): Promise<void>;
+  removeWireGuardPeer(reference: import("../../domain/router").RouterWireGuardPeerReference): Promise<void>;
 }

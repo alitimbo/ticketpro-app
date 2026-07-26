@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { LogIn, LogOut, ShieldCheck, UserCheck, UserCog, UserRound } from "lucide-react";
 import type { UserRole } from "../../domain/auth";
 import { useAuth } from "../../app/auth/AuthProvider";
+import { InternalProfileRepository, useAppDatabase } from "../../services/database";
 import {
   getDefaultPathForRole,
   hasProfilePasswordConfigured,
@@ -38,12 +39,15 @@ export function LoginPage() {
     logoutAccount,
     session
   } = useAuth();
+  const { database, isInitialized, isPersistent } = useAppDatabase();
   const [email, setEmail] = useState("doumacorporation@gmail.com");
   const [accountPassword, setAccountPassword] = useState("");
   const [profilePassword, setProfilePassword] = useState("");
   const [profileToUnlock, setProfileToUnlock] = useState<UserRole | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<InternalProfileConfig[]>(() => loadInternalProfiles());
+  const [persistentPasswordRoles, setPersistentPasswordRoles] = useState<UserRole[]>([]);
+  const internalProfileRepository = useMemo(() => new InternalProfileRepository(database), [database]);
   const selectedProfile = useMemo(
     () => profiles.find((profile) => profile.role === profileToUnlock) ?? null,
     [profileToUnlock]
@@ -93,7 +97,7 @@ export function LoginPage() {
       return;
     }
 
-    if (hasProfilePasswordConfigured(profile.role, accountSession?.accountId)) {
+    if (isPersistent ? persistentPasswordRoles.includes(profile.role) : hasProfilePasswordConfigured(profile.role, accountSession?.accountId)) {
       setProfileToUnlock(profile.role);
       return;
     }
@@ -131,6 +135,24 @@ export function LoginPage() {
       setProfiles(loadInternalProfiles(accountSession?.accountId));
     }
   }, [isMainAuthenticated]);
+
+  useEffect(() => {
+    if (!isPersistent || !isInitialized || !accountSession) {
+      return;
+    }
+
+    void internalProfileRepository.listByAccount(accountSession.accountId).then((records) => {
+      setPersistentPasswordRoles(records.filter((record) => Boolean(record.password_hash)).map((record) => record.role));
+      setProfiles((current) =>
+        current.map((profile) => {
+          const record = records.find((item) => item.role === profile.role);
+          return record
+            ? { ...profile, displayName: record.display_name, id: record.id, isEnabled: record.is_enabled === 1 }
+            : profile;
+        })
+      );
+    });
+  }, [accountSession, internalProfileRepository, isInitialized, isPersistent]);
 
   if (!isMainAuthenticated) {
     return (
@@ -194,7 +216,9 @@ export function LoginPage() {
           <div className="profile-choice-grid" aria-label="Profils internes">
             {profiles.map((profile) => {
               const Icon = profileIcons.find((item) => item.role === profile.role)?.icon ?? UserRound;
-              const hasPassword = hasProfilePasswordConfigured(profile.role, accountSession?.accountId);
+              const hasPassword = isPersistent
+                ? persistentPasswordRoles.includes(profile.role)
+                : hasProfilePasswordConfigured(profile.role, accountSession?.accountId);
 
               return (
                 <button

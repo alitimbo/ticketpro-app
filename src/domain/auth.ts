@@ -10,6 +10,7 @@ export type Permission =
   | "global.routers.delete"
   | "global.subscription"
   | "global.invoices"
+  | "global.vpn"
   | "global.settings"
   | "global.settings.profiles"
   | "router.home"

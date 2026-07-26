@@ -1,3 +1,5 @@
+import type { TauriFileService } from "../files";
+
 export type PrintPaperFormat = "a4" | "thermal58" | "thermal80";
 
 export type PrinterStatus = "available" | "missing" | "unknown";
@@ -53,7 +55,25 @@ export type PrintResult = {
 };
 
 export class LocalPrintService {
+  constructor(private readonly nativeFileService?: Pick<TauriFileService, "listPrinters" | "printFile">) {}
+
   async detectPrinters(): Promise<LocalPrinter[]> {
+    if (this.nativeFileService) {
+      try {
+        const systemPrinters = await this.nativeFileService.listPrinters();
+
+        return systemPrinters.map((printer) => ({
+          id: printer.id,
+          isDefault: printer.is_default,
+          name: printer.name,
+          paperFormats: ["a4", "thermal58", "thermal80"],
+          status: printer.status === "available" ? "available" : "unknown"
+        }));
+      } catch {
+        return [];
+      }
+    }
+
     const hasBrowserPrint = typeof window !== "undefined" && typeof window.print === "function";
 
     return [
@@ -102,8 +122,10 @@ export class LocalPrintService {
     printers: LocalPrinter[];
     settings: PrintSettings;
     tickets: PrintTicketInput[];
+    filePath?: string;
   }): Promise<PrintResult> {
     return this.preparePrint({
+      filePath: input.filePath,
       mode: "batch",
       printers: input.printers,
       settings: input.settings,
@@ -134,6 +156,7 @@ export class LocalPrintService {
   }
 
   private async preparePrint(input: {
+    filePath?: string;
     mode: PrintHistoryEntry["mode"];
     printers: LocalPrinter[];
     settings: PrintSettings;
@@ -147,6 +170,66 @@ export class LocalPrintService {
         ? "Test imprimante préparé."
         : `${ticketCount} ticket(s) préparé(s) pour impression.`
       : "Aucune imprimante compatible détectée. L’export PDF reste disponible.";
+
+    if (this.nativeFileService && input.mode === "test") {
+      const nativeMessage = canPrint
+        ? `Imprimante ${printer?.name} détectée. Un lot PDF sera envoyé directement à Windows.`
+        : "Aucune imprimante Windows compatible détectée.";
+
+      return {
+        historyEntry: {
+          createdAt: new Date().toISOString(),
+          format: input.settings.format,
+          id: `print-${Date.now()}`,
+          mode: input.mode,
+          printerName: printer?.name ?? "Aucune imprimante",
+          status: canPrint ? "prepared" : "failed",
+          ticketCount,
+          userMessage: nativeMessage
+        },
+        ok: canPrint,
+        printedTicketIds: [],
+        userMessage: nativeMessage
+      };
+    }
+
+    if (this.nativeFileService && input.mode === "batch" && canPrint && input.filePath) {
+      try {
+        await this.nativeFileService.printFile(input.filePath, printer?.name ?? "");
+
+        return {
+          historyEntry: {
+            createdAt: new Date().toISOString(),
+            format: input.settings.format,
+            id: `print-${Date.now()}`,
+            mode: input.mode,
+            printerName: printer?.name ?? "Aucune imprimante",
+            status: "printed",
+            ticketCount,
+            userMessage: `${ticketCount} ticket(s) envoyé(s) à ${printer?.name}.`
+          },
+          ok: true,
+          printedTicketIds: input.tickets.map((ticket) => ticket.id),
+          userMessage: `${ticketCount} ticket(s) envoyé(s) à ${printer?.name}.`
+        };
+      } catch {
+        return {
+          historyEntry: {
+            createdAt: new Date().toISOString(),
+            format: input.settings.format,
+            id: `print-${Date.now()}`,
+            mode: input.mode,
+            printerName: printer?.name ?? "Aucune imprimante",
+            status: "failed",
+            ticketCount,
+            userMessage: "Windows n'a pas pu envoyer le PDF à l'imprimante."
+          },
+          ok: false,
+          printedTicketIds: [],
+          userMessage: "Windows n'a pas pu envoyer le PDF à l'imprimante."
+        };
+      }
+    }
 
     return {
       historyEntry: {

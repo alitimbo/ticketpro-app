@@ -16,6 +16,38 @@ export type PaymentStatus = "manual" | "paid" | "pending" | "unpaid";
 
 export type BillingInvoiceStatus = "cancelled" | "draft" | "issued" | "overdue" | "paid";
 
+export type VpnNetworkStatus = "active" | "draft" | "suspended";
+export type VpnPeerStatus = "active" | "draft" | "revoked";
+export type VpnPeerType = "operator" | "router";
+
+export type LicenseStatus = "issued" | "active" | "expired" | "revoked";
+
+export type LicenseStateRecord = {
+  id: "current";
+  account_id: string;
+  license_id: string;
+  activation_id: string | null;
+  activation_token_encrypted: string;
+  install_id: string;
+  device_id: string;
+  status: LicenseStatus;
+  expires_at: string | null;
+  duration_days: number;
+  router_limit: number;
+  router_count: number;
+  max_devices: number;
+  device_count: number;
+  plan_id: string | null;
+  plan_code: string | null;
+  plan_name: string | null;
+  plan_description: string | null;
+  price_cfa: number | null;
+  billing_period: string;
+  last_validated_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type AccountRecord = {
   id: string;
   email: string;
@@ -86,6 +118,40 @@ export type BillingInvoiceRecord = {
   updated_at: string;
 };
 
+export type VpnNetworkRecord = {
+  id: string;
+  account_id: string;
+  name: string;
+  server_endpoint: string;
+  server_public_key: string;
+  server_port: number;
+  address_pool: string;
+  provisioning_api_url: string;
+  provisioning_api_token_encrypted: string | null;
+  status: VpnNetworkStatus;
+  created_at: string;
+  updated_at: string;
+};
+
+export type VpnPeerRecord = {
+  id: string;
+  account_id: string;
+  network_id: string;
+  router_id: string | null;
+  peer_type: VpnPeerType;
+  name: string;
+  public_key: string;
+  private_key_encrypted: string | null;
+  assigned_address: string;
+  allowed_ips: string;
+  endpoint_address: string | null;
+  endpoint_port: number | null;
+  status: VpnPeerStatus;
+  last_handshake_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type RouterRecord = {
   id: string;
   account_id: string;
@@ -97,6 +163,7 @@ export type RouterRecord = {
   serial_number: string | null;
   routeros_version: string | null;
   local_ip: string;
+  notes: string | null;
   api_port: number;
   api_ssl_port: number;
   username: string;
@@ -106,6 +173,22 @@ export type RouterRecord = {
   last_seen_at: string | null;
   subscription_counted: number;
   created_by_profile_id: string;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+  sync_status: SyncStatus;
+};
+
+export type RouterConnectionRecord = {
+  id: string;
+  router_id: string;
+  mode: RouterConnectionMode;
+  host: string;
+  port: number;
+  use_ssl: number;
+  status: string;
+  last_error: string | null;
+  last_connected_at: string | null;
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
@@ -193,16 +276,86 @@ export type GeneratedFileRecord = {
   sync_status: SyncStatus;
 };
 
+export type PrintHistoryRecord = {
+  id: string;
+  account_id: string;
+  router_id: string | null;
+  batch_id: string | null;
+  printer_id: string | null;
+  printer_name: string;
+  mode: string;
+  format: string;
+  status: string;
+  ticket_count: number;
+  user_message: string;
+  created_by_profile: string;
+  created_by_profile_id: string;
+  created_at: string;
+};
+
+export type ActiveSessionCacheRecord = {
+  id: string;
+  router_id: string;
+  username: string;
+  ip_address: string | null;
+  mac_address: string | null;
+  uptime: string | null;
+  session_time_left: string | null;
+  downloaded_bytes: number;
+  uploaded_bytes: number;
+  cached_at: string;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+  sync_status: SyncStatus;
+};
+
+export type RouterSnapshotRecord = {
+  id: string;
+  router_id: string;
+  cpu_load: number | null;
+  memory_used: number | null;
+  memory_total: number | null;
+  uptime: string | null;
+  active_clients_count: number;
+  tickets_count: number;
+  plans_count: number;
+  captured_at: string;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+  sync_status: SyncStatus;
+};
+
+export type AppLogRecord = {
+  id: string;
+  account_id: string | null;
+  level: "critical" | "error" | "info" | "warning";
+  category: string;
+  user_message: string;
+  technical_message: string | null;
+  router_id: string | null;
+  created_by_profile: string | null;
+  internal_profile_id: string | null;
+  created_at: string;
+};
+
 export type CreateRouterInput = Omit<
   RouterRecord,
-  "created_at" | "deleted_at" | "subscription_counted" | "sync_status" | "updated_at"
+  "created_at" | "deleted_at" | "notes" | "subscription_counted" | "sync_status" | "updated_at"
 > &
   Partial<
     Pick<
       RouterRecord,
-      "created_at" | "deleted_at" | "subscription_counted" | "sync_status" | "updated_at"
+      "created_at" | "deleted_at" | "notes" | "subscription_counted" | "sync_status" | "updated_at"
     >
   >;
+
+export type CreateRouterConnectionInput = Omit<
+  RouterConnectionRecord,
+  "created_at" | "deleted_at" | "sync_status" | "updated_at"
+> &
+  Partial<Pick<RouterConnectionRecord, "created_at" | "deleted_at" | "sync_status" | "updated_at">>;
 
 export type CreateAccountInput = Omit<AccountRecord, "created_at" | "updated_at" | "last_login_at"> &
   Partial<Pick<AccountRecord, "created_at" | "updated_at" | "last_login_at">>;
@@ -252,3 +405,14 @@ export type CreateGeneratedFileInput = Omit<
       "created_at" | "updated_at" | "deleted_at" | "sync_status"
     >
   >;
+
+export type CreatePrintHistoryInput = Omit<PrintHistoryRecord, "created_at"> &
+  Partial<Pick<PrintHistoryRecord, "created_at">>;
+
+export type CreateRouterSnapshotInput = Omit<
+  RouterSnapshotRecord,
+  "created_at" | "updated_at" | "deleted_at" | "sync_status"
+> &
+  Partial<Pick<RouterSnapshotRecord, "created_at" | "updated_at" | "deleted_at" | "sync_status">>;
+
+export type CreateAppLogInput = Omit<AppLogRecord, "created_at"> & Partial<Pick<AppLogRecord, "created_at">>;

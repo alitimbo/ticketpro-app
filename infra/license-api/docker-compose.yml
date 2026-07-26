@@ -1,0 +1,40 @@
+services:
+  license-api:
+    build: .
+    container_name: ticketpro-license-api
+    init: true
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      LICENSE_BIND: 127.0.0.1
+      VPN_HUB_URL: ${VPN_HUB_URL:-http://127.0.0.1:8788}
+      VPN_HUB_MASTER_TOKEN: ${VPN_HUB_MASTER_TOKEN}
+    volumes:
+      - license-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8787/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  license-data:

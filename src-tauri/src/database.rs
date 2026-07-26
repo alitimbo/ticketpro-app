@@ -52,9 +52,45 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "canonical_account_profile_identity",
         include_str!("../migrations/009_canonical_account_profile_identity.sql"),
     ),
+    (
+        10,
+        "router_notes",
+        include_str!("../migrations/010_router_notes.sql"),
+    ),
+    (
+        11,
+        "print_history",
+        include_str!("../migrations/011_print_history.sql"),
+    ),
+    (
+        12,
+        "vpn_networks_peers",
+        include_str!("../migrations/012_vpn_networks_peers.sql"),
+    ),
+    (
+        13,
+        "vpn_permission",
+        include_str!("../migrations/013_vpn_permission.sql"),
+    ),
+    (
+        14,
+        "vpn_hub_provisioning",
+        include_str!("../migrations/014_vpn_hub_provisioning.sql"),
+    ),
+    (
+        15,
+        "license_state",
+        include_str!("../migrations/015_license_state.sql"),
+    ),
+    (
+        16,
+        "license_multi_device_plan",
+        include_str!("../migrations/016_license_multi_device_plan.sql"),
+    ),
 ];
 
 const DATABASE_FILE_NAME: &str = "hotspot-manager.sqlite";
+const BACKUPS_DIRECTORY: &str = "backups";
 const LEGACY_IDENTIFIER: &str = "com.local.hotspotmanager";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -72,6 +108,19 @@ pub struct DbExecuteResult {
     pub rows_affected: usize,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct DbStatement {
+    pub sql: String,
+    pub params: Vec<DbParam>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DatabaseBackup {
+    pub absolute_path: String,
+    pub file_name: String,
+    pub size_bytes: u64,
+}
+
 fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
     let data_dir = app
         .path()
@@ -79,6 +128,29 @@ fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| error.to_string())?;
     fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
     Ok(data_dir.join(DATABASE_FILE_NAME))
+}
+
+fn backups_directory(app: &AppHandle) -> Result<PathBuf, String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    let directory = data_dir.join(BACKUPS_DIRECTORY);
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    Ok(directory)
+}
+
+fn backup_path(app: &AppHandle, file_name: &str) -> Result<PathBuf, String> {
+    let path = Path::new(file_name);
+    if file_name.trim().is_empty()
+        || path.is_absolute()
+        || path.components().count() != 1
+        || path.extension().and_then(|value| value.to_str()) != Some("sqlite")
+    {
+        return Err("Nom de sauvegarde invalide.".to_string());
+    }
+
+    Ok(backups_directory(app)?.join(path))
 }
 
 fn legacy_sibling_directory(current: &Path) -> Option<PathBuf> {
@@ -241,6 +313,32 @@ pub fn db_execute(
 }
 
 #[tauri::command]
+pub fn db_transaction(
+    app: AppHandle,
+    statements: Vec<DbStatement>,
+) -> Result<Vec<DbExecuteResult>, String> {
+    let mut connection = open_connection(&app)?;
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let mut results = Vec::with_capacity(statements.len());
+
+    for statement in statements {
+        let values: Vec<SqliteValue> = statement
+            .params
+            .into_iter()
+            .map(db_param_to_sqlite_value)
+            .collect();
+        let rows_affected = transaction
+            .execute(&statement.sql, params_from_iter(values.iter()))
+            .map_err(|error| error.to_string())?;
+
+        results.push(DbExecuteResult { rows_affected });
+    }
+
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(results)
+}
+
+#[tauri::command]
 pub fn db_query(
     app: AppHandle,
     sql: String,
@@ -275,4 +373,61 @@ pub fn db_query(
     }
 
     Ok(result)
+}
+
+#[tauri::command]
+pub fn db_list_backups(app: AppHandle) -> Result<Vec<DatabaseBackup>, String> {
+    let directory = backups_directory(&app)?;
+    let mut backups = Vec::new();
+
+    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("sqlite") {
+            continue;
+        }
+        let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
+        backups.push(DatabaseBackup {
+            absolute_path: path.to_string_lossy().to_string(),
+            file_name: path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_string(),
+            size_bytes: metadata.len(),
+        });
+    }
+
+    backups.sort_by(|left, right| right.file_name.cmp(&left.file_name));
+    Ok(backups)
+}
+
+#[tauri::command]
+pub fn db_backup(app: AppHandle, file_name: String) -> Result<DatabaseBackup, String> {
+    let source = database_path(&app)?;
+    if !source.is_file() {
+        return Err("La base locale n'existe pas encore.".to_string());
+    }
+    let target = backup_path(&app, &file_name)?;
+    fs::copy(&source, &target).map_err(|error| error.to_string())?;
+    let size_bytes = fs::metadata(&target).map_err(|error| error.to_string())?.len();
+    Ok(DatabaseBackup {
+        absolute_path: target.to_string_lossy().to_string(),
+        file_name,
+        size_bytes,
+    })
+}
+
+#[tauri::command]
+pub fn db_restore(app: AppHandle, file_name: String) -> Result<(), String> {
+    let source = backup_path(&app, &file_name)?;
+    if !source.is_file() {
+        return Err("Sauvegarde introuvable.".to_string());
+    }
+    let target = database_path(&app)?;
+    let temporary = target.with_extension("sqlite.restore.tmp");
+    fs::copy(&source, &temporary).map_err(|error| error.to_string())?;
+    fs::copy(&temporary, &target).map_err(|error| error.to_string())?;
+    let _ = fs::remove_file(temporary);
+    initialize_database(&app)
 }

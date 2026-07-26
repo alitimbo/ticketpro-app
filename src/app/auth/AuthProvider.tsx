@@ -1,12 +1,17 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import type { AuthSession, MainAccountSession, Permission, UserRole } from "../../domain/auth";
+import type { AuthSession, MainAccountRecord, MainAccountSession, Permission, UserRole } from "../../domain/auth";
+import type { InternalProfileRecord } from "../../domain/database";
+import { AccountRepository, InternalProfileRepository, useAppDatabase } from "../../services/database";
+import { AuditLogService } from "../../services/logging";
 import {
   clearMainAccountSession,
   clearStoredSession,
   createMainAccountSession,
   createSession,
   getFirstLaunchRequired,
+  hashMainAccountPassword,
+  hashProfilePassword,
   hasProfilePasswordConfigured,
   findInternalProfile,
   isInternalProfileEnabled,
@@ -18,6 +23,7 @@ import {
   recordInternalProfileUsed,
   refreshMainAccountSession,
   refreshSession,
+  saveMainAccountRecord,
   storeMainAccountSession,
   storeSession,
   verifyMainAccount,
@@ -49,6 +55,10 @@ type AuthContextValue = {
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const { database, isInitialized, isPersistent } = useAppDatabase();
+  const accountRepository = useMemo(() => new AccountRepository(database), [database]);
+  const internalProfileRepository = useMemo(() => new InternalProfileRepository(database), [database]);
+  const auditLogService = useMemo(() => new AuditLogService(database), [database]);
   const [accountSession, setAccountSession] = useState<MainAccountSession | null>(() => readMainAccountSession());
   const [session, setSession] = useState<AuthSession | null>(() => {
     const account = readMainAccountSession();
@@ -118,13 +128,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return { ok: false, message: "Entrez l'email et le mot de passe." };
     }
 
-    const isValid = await verifyMainAccount(email, password);
+    if (isPersistent && !isInitialized) {
+      return { ok: false, message: "La base locale est encore en cours d'initialisation." };
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const persistentAccount = isPersistent ? await accountRepository.findByEmail(normalizedEmail) : null;
+    const isValid = persistentAccount
+      ? persistentAccount.status !== "suspended" &&
+        persistentAccount.status !== "expired" &&
+        (await hashMainAccountPassword(normalizedEmail, password)) === persistentAccount.password_hash
+      : await verifyMainAccount(email, password);
 
     if (!isValid) {
       return { ok: false, message: "Compte principal ou mot de passe incorrect." };
     }
 
-    recordMainAccountLogin(email);
+    if (persistentAccount) {
+      saveMainAccountRecord(mainAccountRecordFromDatabase(persistentAccount));
+      await accountRepository.recordLogin(persistentAccount.id);
+      await auditLogService.write({
+        accountId: persistentAccount.id,
+        action: "auth.account_login",
+        category: "authentification",
+        internalProfileId: null,
+        message: "Connexion au compte principal réussie."
+      });
+    } else {
+      recordMainAccountLogin(email);
+    }
     const nextAccountSession = createMainAccountSession(email);
     storeMainAccountSession(nextAccountSession);
     setAccountSession(nextAccountSession);
@@ -132,19 +164,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setSession(null);
 
     return { ok: true };
-  }, []);
+  }, [accountRepository, auditLogService, isInitialized, isPersistent]);
 
   const loginProfile = useCallback(async (role: UserRole, password: string): Promise<LoginResult> => {
     if (!accountSession) {
       return { ok: false, message: "Connectez d'abord le compte principal." };
     }
 
-    if (!isInternalProfileEnabled(role, accountSession.accountId)) {
+    if (isPersistent && !isInitialized) {
+      return { ok: false, message: "La base locale est encore en cours d'initialisation." };
+    }
+
+    const persistentProfile = isPersistent
+      ? (await internalProfileRepository.listByAccount(accountSession.accountId)).find((item) => item.role === role)
+      : null;
+    const localProfile = findInternalProfile(role, accountSession.accountId);
+    const profile = persistentProfile ? profileConfigFromDatabase(persistentProfile, accountSession.accountId) : localProfile;
+
+    if (!(persistentProfile ? persistentProfile.is_enabled === 1 : isInternalProfileEnabled(role, accountSession.accountId))) {
       return { ok: false, message: "Ce profil est désactivé." };
     }
 
-    const profile = findInternalProfile(role, accountSession.accountId);
-    const profileHasPassword = hasProfilePasswordConfigured(role, accountSession.accountId);
+    const profileHasPassword = persistentProfile
+      ? Boolean(persistentProfile.password_hash)
+      : hasProfilePasswordConfigured(role, accountSession.accountId);
 
     if (!profileHasPassword && firstLaunchRequired) {
       const nextSession = createSession(
@@ -157,6 +200,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       );
       storeSession(nextSession);
       recordInternalProfileUsed(role, undefined, accountSession.accountId);
+      if (persistentProfile) {
+        await internalProfileRepository.recordUsed(accountSession.accountId, persistentProfile.id);
+        await auditLogService.write({
+          accountId: accountSession.accountId,
+          action: "auth.profile_login",
+          category: "authentification",
+          internalProfileId: persistentProfile.id,
+          message: `Connexion du profil ${role} réussie.`
+        });
+      }
       setSession(nextSession);
 
       return { ok: true };
@@ -170,7 +223,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return { ok: false, message: "Entrez le mot de passe du profil." };
     }
 
-    const isValid = await verifyDevelopmentPassword(role, password, accountSession.accountId);
+    const isValid = persistentProfile
+      ? (await hashProfilePassword(role, password)) === persistentProfile.password_hash
+      : await verifyDevelopmentPassword(role, password, accountSession.accountId);
 
     if (!isValid) {
       return { ok: false, message: "Mot de passe incorrect." };
@@ -186,10 +241,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     );
     storeSession(nextSession);
     recordInternalProfileUsed(role, undefined, accountSession.accountId);
+    if (persistentProfile) {
+      await internalProfileRepository.recordUsed(accountSession.accountId, persistentProfile.id);
+      await auditLogService.write({
+        accountId: accountSession.accountId,
+        action: "auth.profile_login",
+        category: "authentification",
+        internalProfileId: persistentProfile.id,
+        message: `Connexion du profil ${role} réussie.`
+      });
+    }
     setSession(nextSession);
 
     return { ok: true };
-  }, [accountSession, firstLaunchRequired]);
+  }, [accountSession, auditLogService, firstLaunchRequired, internalProfileRepository, isInitialized, isPersistent]);
 
   useEffect(() => {
     if (!accountSession && !session) {
@@ -259,4 +324,52 @@ export function useAuth() {
   }
 
   return context;
+}
+
+function mainAccountRecordFromDatabase(record: {
+  company_name: string | null;
+  created_at: string;
+  display_name: string | null;
+  email: string;
+  id: string;
+  last_login_at: string | null;
+  password_hash: string;
+  phone: string | null;
+  status: MainAccountRecord["status"];
+  updated_at: string;
+}): MainAccountRecord {
+  return {
+    companyName: record.company_name ?? "",
+    createdAt: record.created_at,
+    displayName: record.display_name ?? "",
+    email: record.email,
+    id: record.id,
+    lastLoginAt: record.last_login_at,
+    passwordHash: record.password_hash,
+    phone: record.phone ?? "",
+    status: record.status,
+    updatedAt: record.updated_at
+  };
+}
+
+function profileConfigFromDatabase(record: InternalProfileRecord, accountId: string) {
+  let permissions: Permission[] = [];
+  try {
+    const parsed = JSON.parse(record.permissions_json) as unknown;
+    if (Array.isArray(parsed)) {
+      permissions = parsed.filter((item): item is Permission => typeof item === "string");
+    }
+  } catch {
+    permissions = [];
+  }
+
+  return {
+    accountId,
+    displayName: record.display_name,
+    id: record.id,
+    isEnabled: record.is_enabled === 1,
+    lastUsedAt: record.last_used_at,
+    permissions,
+    role: record.role
+  };
 }

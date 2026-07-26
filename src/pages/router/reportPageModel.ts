@@ -209,6 +209,23 @@ export function internalProfileLabel(profileId: string): string {
   return labels[canonicalId] ?? profileId;
 }
 
+export function buildReportCsv(tickets: ReportTicket[]): string {
+  const header = ["Code", "Plan", "Statut", "Routeur", "Profil", "Créé le", "Activé le", "Terminé le", "Prix théorique CFA"];
+  const rows = tickets.map((ticket) => [
+    ticket.code,
+    ticket.planName,
+    ticket.status,
+    ticket.routerName,
+    internalProfileLabel(ticket.createdByProfileId),
+    ticket.createdAt,
+    ticket.activatedAt ?? "",
+    ticket.completedAt ?? "",
+    ticket.priceHint === null ? "" : String(ticket.priceHint)
+  ]);
+
+  return `\uFEFF${[header, ...rows].map((row) => row.map(escapeCsvCell).join(";")).join("\r\n")}\r\n`;
+}
+
 function buildMetric(
   id: ReportMetricId,
   label: string,
@@ -226,6 +243,10 @@ function buildMetric(
     totalCfa,
     value: metricTickets.length
   };
+}
+
+function escapeCsvCell(value: string): string {
+  return /[";\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 }
 
 function buildGroupRows(

@@ -12,6 +12,7 @@ import {
   readMainAccountRecord,
   verifyMainAccount
 } from "../../services/auth";
+import { InMemoryDatabaseClient } from "../../services/database";
 
 describe("firstLaunchModel", () => {
   afterEach(() => {
@@ -75,5 +76,75 @@ describe("firstLaunchModel", () => {
     expect(hasProfilePasswordConfigured("operator", accountId)).toBe(true);
     expect(hasProfilePasswordConfigured("agent", accountId)).toBe(false);
     expect(localStorage.getItem(firstLaunchFlagKey)).toBe("false");
+  });
+
+  it("initialise aussi les comptes, profils et abonnement dans SQLite", async () => {
+    const database = new InMemoryDatabaseClient();
+    await database.initialize();
+
+    await completeFirstLaunch(
+      {
+        ...defaultFirstLaunchState,
+        account: {
+          companyName: "SQLite WiFi",
+          confirmPassword: "secret123",
+          email: "sqlite@douma.test",
+          password: "secret123",
+          phone: "70000000"
+        },
+        profilePasswords: { admin: "admin123", agent: "", guest: "", operator: "" }
+      },
+      database
+    );
+
+    await expect(database.query("SELECT * FROM accounts WHERE id = ?1", ["account-sqlite@douma.test"])).resolves.toMatchObject([
+      expect.objectContaining({ company_name: "SQLite WiFi", email: "sqlite@douma.test" })
+    ]);
+    await expect(database.query("SELECT * FROM internal_profiles WHERE account_id = ?1", ["account-sqlite@douma.test"])).resolves.toHaveLength(4);
+    await expect(database.query("SELECT * FROM account_subscriptions WHERE account_id = ?1", ["account-sqlite@douma.test"])).resolves.toHaveLength(1);
+  });
+
+  it("enregistre exactement l'offre renvoyée par le serveur de licences", async () => {
+    const database = new InMemoryDatabaseClient();
+    await database.initialize();
+
+    await completeFirstLaunch(
+      {
+        ...defaultFirstLaunchState,
+        account: {
+          companyName: "Revendeur WiFi",
+          confirmPassword: "secret123",
+          email: "reseller@douma.test",
+          password: "secret123",
+          phone: ""
+        },
+        profilePasswords: { admin: "admin123", agent: "", guest: "", operator: "" },
+        selectedPlanId: "reseller-dynamic",
+        subscriptionStatus: "active_manual"
+      },
+      database,
+      {
+        billingPeriod: "monthly",
+        description: "Offre administrée depuis le VPS",
+        durationDays: 90,
+        maxDevices: 25,
+        planCode: "RESELLER-DYNAMIC",
+        planId: "reseller-dynamic",
+        planName: "Revendeur dynamique",
+        priceCfa: 55000,
+        routerLimit: 100
+      }
+    );
+
+    await expect(database.query("SELECT * FROM subscription_plans WHERE id = ?1", ["reseller-dynamic"]))
+      .resolves.toMatchObject([expect.objectContaining({ name: "Revendeur dynamique", router_limit: 100 })]);
+    await expect(database.query("SELECT * FROM account_subscriptions WHERE account_id = ?1", ["account-reseller@douma.test"]))
+      .resolves.toMatchObject([
+        expect.objectContaining({
+          router_limit_snapshot: 100,
+          price_cfa_snapshot: 55000,
+          subscription_plan_id: "reseller-dynamic"
+        })
+      ]);
   });
 });

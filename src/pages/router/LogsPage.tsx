@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -12,6 +12,9 @@ import {
   Trash2
 } from "lucide-react";
 import { useAuth } from "../../app/auth/AuthProvider";
+import type { AppLogRecord } from "../../domain/database";
+import { useAppDatabase } from "../../services/database";
+import { AppLogRepository, RouterRepository } from "../../services/database/repositories";
 import {
   ActionMenu,
   Badge,
@@ -44,12 +47,33 @@ import {
 
 export function LogsPage() {
   const { session } = useAuth();
-  const [logs, setLogs] = useState<AppLogEntry[]>(() => createDemoLogs());
+  const { database, isInitialized, isPersistent } = useAppDatabase();
+  const [logs, setLogs] = useState<AppLogEntry[]>(() => (isPersistent ? [] : createDemoLogs()));
   const [filters, setFilters] = useState<LogFilters>(emptyLogFilters);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [cleanDialogOpen, setCleanDialogOpen] = useState(false);
+
+  const appLogRepository = useMemo(() => new AppLogRepository(database), [database]);
+  const routerRepository = useMemo(() => new RouterRepository(database), [database]);
+
+  const loadPersistedLogs = async () => {
+    if (!isPersistent || !isInitialized || !session) {
+      return;
+    }
+
+    const [records, routers] = await Promise.all([
+      appLogRepository.listByAccount(session.account_id),
+      routerRepository.listByAccount(session.account_id)
+    ]);
+    const routerNames = new Map(routers.map((router) => [router.id, router.name]));
+    setLogs(records.map((record) => appLogFromRecord(record, routerNames)));
+  };
+
+  useEffect(() => {
+    void loadPersistedLogs();
+  }, [appLogRepository, database, isInitialized, isPersistent, routerRepository, session]);
 
   const scopedLogs = useMemo(() => scopeLogsForSession(logs, session), [logs, session]);
   const filteredLogs = useMemo(() => filterLogs(scopedLogs, filters), [scopedLogs, filters]);
@@ -93,7 +117,18 @@ export function LogsPage() {
     }
   };
 
-  const cleanOldLogs = () => {
+  const cleanOldLogs = async () => {
+    if (isPersistent && session) {
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - 30);
+      const removedCount = await appLogRepository.deleteBefore(session.account_id, cutoff.toISOString());
+      await loadPersistedLogs();
+      setCleanDialogOpen(false);
+      setExpandedId(null);
+      setMessage(`${removedCount} ancien(s) log(s) nettoyé(s).`);
+      return;
+    }
+
     const cutoff = new Date("2026-07-09T10:00:00.000Z").getTime();
     const removableIds = new Set(
       scopedLogs.filter((log) => new Date(log.createdAt).getTime() < cutoff).map((log) => log.id)
@@ -327,4 +362,21 @@ function logIcon(level: AppLogEntry["level"]): IconComponent {
   }
 
   return AlertTriangle;
+}
+
+function appLogFromRecord(record: AppLogRecord, routerNames: Map<string, string>): AppLogEntry {
+  return {
+    accountId: record.account_id ?? "",
+    action: record.technical_message,
+    category: record.category as AppLogEntry["category"],
+    createdAt: record.created_at,
+    id: record.id,
+    internalProfileId: record.internal_profile_id,
+    level: record.level,
+    routerId: record.router_id,
+    routerName: record.router_id ? routerNames.get(record.router_id) ?? record.router_id : null,
+    technicalDetail: record.technical_message,
+    userMessage: record.user_message,
+    userProfile: record.created_by_profile as AppLogEntry["userProfile"]
+  };
 }

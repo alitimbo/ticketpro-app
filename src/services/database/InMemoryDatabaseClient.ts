@@ -1,5 +1,11 @@
 import type { LocalTableName } from "./repositories/TableRepository";
-import type { DatabaseClient, DatabaseExecuteResult, DatabaseRow, DatabaseValue } from "./DatabaseClient";
+import type {
+  DatabaseClient,
+  DatabaseExecuteResult,
+  DatabaseRow,
+  DatabaseStatement,
+  DatabaseValue
+} from "./DatabaseClient";
 
 const tableNames: LocalTableName[] = [
   "active_sessions_cache",
@@ -11,13 +17,16 @@ const tableNames: LocalTableName[] = [
   "generated_files",
   "hotspot_plans",
   "internal_profiles",
+  "license_state",
   "printers",
   "router_connections",
   "router_snapshots",
   "routers",
   "subscription_plans",
   "ticket_batches",
-  "tickets"
+  "tickets",
+  "vpn_networks",
+  "vpn_peers"
 ];
 
 export class InMemoryDatabaseClient implements DatabaseClient {
@@ -33,7 +42,42 @@ export class InMemoryDatabaseClient implements DatabaseClient {
     return undefined;
   }
 
+  async transaction(statements: DatabaseStatement[]): Promise<DatabaseExecuteResult[]> {
+    const snapshot = tableNames.reduce<Record<LocalTableName, DatabaseRow[]>>(
+      (accumulator, tableName) => {
+        accumulator[tableName] = this.tables[tableName].map((row) => ({ ...row }));
+        return accumulator;
+      },
+      {} as Record<LocalTableName, DatabaseRow[]>
+    );
+
+    try {
+      const results: DatabaseExecuteResult[] = [];
+
+      for (const statement of statements) {
+        results.push(await this.execute(statement.sql, statement.params ?? []));
+      }
+
+      return results;
+    } catch (error) {
+      tableNames.forEach((tableName) => {
+        this.tables[tableName].splice(0, this.tables[tableName].length, ...snapshot[tableName]);
+      });
+      throw error;
+    }
+  }
+
   async execute(sql: string, params: DatabaseValue[] = []): Promise<DatabaseExecuteResult> {
+    const normalized = sql.trim().toLowerCase();
+
+    if (normalized.startsWith("update ")) {
+      return this.executeUpdate(sql, params);
+    }
+
+    if (normalized.startsWith("delete ")) {
+      return this.executeDelete(sql, params);
+    }
+
     const tableName = this.extractInsertTable(sql);
     const columns = this.extractInsertColumns(sql);
     const now = new Date(0).toISOString();
@@ -51,17 +95,75 @@ export class InMemoryDatabaseClient implements DatabaseClient {
     return { rowsAffected: 1 };
   }
 
+  private executeUpdate(sql: string, params: DatabaseValue[]): DatabaseExecuteResult {
+    const match = sql.match(/update\s+([a-z_]+)\s+set\s+(.+)\s+where\s+(.+)$/is);
+
+    if (!match || !this.isTableName(match[1])) {
+      throw new Error("Requête de mise à jour inconnue.");
+    }
+
+    const assignments = match[2].split(",").map((part) => part.trim());
+    const conditions = match[3];
+    const idCondition = conditions.match(/id\s*=\s*\?(\d+)/i);
+    const accountCondition = conditions.match(/account_id\s*=\s*\?(\d+)/i);
+
+    if (!idCondition) {
+      throw new Error("Mise à jour sans identifiant refusée.");
+    }
+
+    const id = params[Number(idCondition[1]) - 1];
+    const accountId = accountCondition ? params[Number(accountCondition[1]) - 1] : undefined;
+    const rows = this.tables[match[1]].filter(
+      (row) => row.id === id && (accountId === undefined || row.account_id === accountId)
+    );
+
+    assignments.forEach((assignment) => {
+      const assignmentMatch = assignment.match(/^([a-z_]+)\s*=\s*\?(\d+)$/i);
+
+      if (!assignmentMatch) {
+        throw new Error("Affectation de mise à jour inconnue.");
+      }
+
+      const column = assignmentMatch[1];
+      const value = params[Number(assignmentMatch[2]) - 1] ?? null;
+      rows.forEach((row) => {
+        row[column] = value;
+      });
+    });
+
+    return { rowsAffected: rows.length };
+  }
+
+  private executeDelete(sql: string, params: DatabaseValue[]): DatabaseExecuteResult {
+    const match = sql.match(/delete\s+from\s+([a-z_]+)\s+where\s+([a-z_]+)\s*=\s*\?(\d+)/i);
+
+    if (!match || !this.isTableName(match[1])) {
+      throw new Error("Requête de suppression inconnue.");
+    }
+
+    const column = match[2];
+    const value = params[Number(match[3]) - 1];
+    const remaining = this.tables[match[1]].filter((row) => row[column] !== value);
+    const rowsAffected = this.tables[match[1]].length - remaining.length;
+    this.tables[match[1]].splice(0, this.tables[match[1]].length, ...remaining);
+
+    return { rowsAffected };
+  }
+
   async query<T = DatabaseRow>(sql: string, params: DatabaseValue[] = []): Promise<T[]> {
     const normalized = sql.toLowerCase();
     const tableName = this.extractSelectTable(sql);
     const rows = this.tables[tableName];
+    const visibleRows = normalized.includes("deleted_at is null")
+      ? rows.filter((row) => row.deleted_at === null || row.deleted_at === undefined)
+      : rows;
 
     if (normalized.includes("where id = ?1")) {
-      return rows.filter((row) => row.id === params[0]) as T[];
+      return visibleRows.filter((row) => row.id === params[0]) as T[];
     }
 
     if (normalized.includes("where router_id = ?1")) {
-      return rows.filter((row) => row.router_id === params[0]) as T[];
+      return visibleRows.filter((row) => row.router_id === params[0]) as T[];
     }
 
     if (normalized.includes("where batch_id = ?1")) {
@@ -72,7 +174,7 @@ export class InMemoryDatabaseClient implements DatabaseClient {
       normalized.includes("where account_id = ?1 and created_by_profile_id = ?2") ||
       normalized.includes("where account_id = ?1 and internal_profile_id = ?2")
     ) {
-      return rows.filter(
+      return visibleRows.filter(
         (row) =>
           row.account_id === params[0] &&
           (row.created_by_profile_id === params[1] || row.internal_profile_id === params[1]) &&
@@ -83,7 +185,7 @@ export class InMemoryDatabaseClient implements DatabaseClient {
     if (normalized.includes("count(*) as count") && normalized.includes("where account_id = ?1")) {
       return [
         {
-          count: rows.filter(
+          count: visibleRows.filter(
             (row) => row.account_id === params[0] && row.subscription_counted === 1 && row.deleted_at === null
           ).length
         }
@@ -91,10 +193,10 @@ export class InMemoryDatabaseClient implements DatabaseClient {
     }
 
     if (normalized.includes("where account_id = ?1")) {
-      return rows.filter((row) => row.account_id === params[0] && row.deleted_at === null) as T[];
+      return visibleRows.filter((row) => row.account_id === params[0]) as T[];
     }
 
-    return rows as T[];
+    return visibleRows as T[];
   }
 
   private extractInsertTable(sql: string): LocalTableName {

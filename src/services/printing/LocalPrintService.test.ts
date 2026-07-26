@@ -61,4 +61,44 @@ describe("LocalPrintService", () => {
     expect(result.printedTicketIds).toEqual([]);
     expect(result.userMessage).toContain("export PDF");
   });
+
+  it("utilise l'impression native quand un PDF persistant est fourni", async () => {
+    const printed: string[] = [];
+    const service = new LocalPrintService({
+      listPrinters: async () => [{ id: "windows:Thermique 80", is_default: true, name: "Thermique 80", status: "available" }],
+      printFile: async (path, printerName) => {
+        printed.push(`${path}:${printerName}`);
+      }
+    });
+    const detected = await service.detectPrinters();
+    const result = await service.printBatch({
+      filePath: "files/tickets-batch-1.pdf",
+      printers: detected,
+      settings: { economical: false, format: "thermal80", printerId: detected[0].id },
+      tickets: [ticket]
+    });
+
+    expect(printed).toEqual(["files/tickets-batch-1.pdf:Thermique 80"]);
+    expect(result.ok).toBe(true);
+    expect(result.historyEntry.status).toBe("printed");
+  });
+
+  it("retourne un échec quand Windows refuse l'envoi", async () => {
+    const service = new LocalPrintService({
+      listPrinters: async () => [{ id: "windows:Thermique 80", is_default: true, name: "Thermique 80", status: "available" }],
+      printFile: async () => {
+        throw new Error("spooler indisponible");
+      }
+    });
+    const detected = await service.detectPrinters();
+    const result = await service.printBatch({
+      filePath: "files/tickets-batch-1.pdf",
+      printers: detected,
+      settings: { economical: false, format: "thermal80", printerId: detected[0].id },
+      tickets: [ticket]
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.historyEntry.status).toBe("failed");
+  });
 });

@@ -309,6 +309,8 @@ export function userToTicketRecord(input: {
   batchId: string;
   createdByProfileId: string;
   createdByProfile: UserRole;
+  passwordSecretRef?: string;
+  planId?: string;
   routerId: string;
   user: HotspotUser;
 }): CreateTicketInput {
@@ -318,8 +320,8 @@ export function userToTicketRecord(input: {
     createdByProfileId: input.createdByProfileId,
     createdByProfile: input.createdByProfile,
     mikrotikId: input.user.id,
-    passwordSecretRef: input.user.passwordSecretRef,
-    planId: input.user.planId,
+    passwordSecretRef: input.passwordSecretRef ?? input.user.passwordSecretRef,
+    planId: input.planId ?? input.user.planId,
     routerId: input.routerId,
     status: "disponible",
     syncStatus: "synced",

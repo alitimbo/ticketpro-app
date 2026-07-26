@@ -2,21 +2,24 @@ import type { DatabaseClient, DatabaseRow, DatabaseValue } from "../DatabaseClie
 
 export type LocalTableName =
   | "active_sessions_cache"
+  | "app_logs"
   | "account_subscriptions"
   | "accounts"
-  | "app_logs"
   | "app_settings"
   | "billing_invoices"
   | "generated_files"
   | "hotspot_plans"
   | "internal_profiles"
+  | "license_state"
   | "printers"
   | "router_connections"
   | "router_snapshots"
   | "routers"
   | "subscription_plans"
   | "ticket_batches"
-  | "tickets";
+  | "tickets"
+  | "vpn_networks"
+  | "vpn_peers";
 
 const tableColumns: Record<LocalTableName, string[]> = {
   active_sessions_cache: [
@@ -116,6 +119,29 @@ const tableColumns: Record<LocalTableName, string[]> = {
     "permissions_json",
     "last_used_at"
   ],
+  license_state: [
+    "id",
+    "account_id",
+    "license_id",
+    "activation_id",
+    "activation_token_encrypted",
+    "install_id",
+    "device_id",
+    "status",
+    "expires_at",
+    "duration_days",
+    "router_limit",
+    "router_count",
+    "max_devices",
+    "device_count",
+    "plan_id",
+    "plan_code",
+    "plan_name",
+    "plan_description",
+    "price_cfa",
+    "billing_period",
+    "last_validated_at"
+  ],
   printers: ["id", "name", "type", "paper_width_mm", "status", "sync_status"],
   router_connections: [
     "id",
@@ -153,6 +179,7 @@ const tableColumns: Record<LocalTableName, string[]> = {
     "serial_number",
     "routeros_version",
     "local_ip",
+    "notes",
     "api_port",
     "api_ssl_port",
     "username",
@@ -212,6 +239,34 @@ const tableColumns: Record<LocalTableName, string[]> = {
     "created_by_profile",
     "created_by_profile_id",
     "sync_status"
+  ],
+  vpn_networks: [
+    "id",
+    "account_id",
+    "name",
+    "server_endpoint",
+    "server_public_key",
+    "server_port",
+    "address_pool",
+    "provisioning_api_url",
+    "provisioning_api_token_encrypted",
+    "status"
+  ],
+  vpn_peers: [
+    "id",
+    "account_id",
+    "network_id",
+    "router_id",
+    "peer_type",
+    "name",
+    "public_key",
+    "private_key_encrypted",
+    "assigned_address",
+    "allowed_ips",
+    "endpoint_address",
+    "endpoint_port",
+    "status",
+    "last_handshake_at"
   ]
 };
 
@@ -238,6 +293,32 @@ export class TableRepository<T extends DatabaseRow = DatabaseRow> {
     }
 
     return created;
+  }
+
+  async createMany(rows: T[]): Promise<T[]> {
+    if (rows.length === 0) {
+      return [];
+    }
+
+    await this.database.transaction(
+      rows.map((row) => {
+        const columns = tableColumns[this.tableName].filter((column) => column in row);
+        const placeholders = columns.map((_, index) => `?${index + 1}`);
+
+        return {
+          params: columns.map((column) => row[column] as DatabaseValue),
+          sql: `INSERT INTO ${this.tableName} (${columns.join(", ")}) VALUES (${placeholders.join(", ")})`
+        };
+      })
+    );
+
+    const created = await Promise.all(rows.map((row) => this.findById(String(row.id))));
+
+    if (created.some((row) => !row)) {
+      throw new Error("Les enregistrements locaux n'ont pas pu être créés.");
+    }
+
+    return created as T[];
   }
 
   async findById(id: string): Promise<T | null> {

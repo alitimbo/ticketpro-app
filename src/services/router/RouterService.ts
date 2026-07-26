@@ -141,6 +141,10 @@ export class RouterService {
     return this.run("listHotspotUsers", () => this.adapter.listHotspotUsers());
   }
 
+  updateHotspotUser(username: string, planId: string) {
+    return this.run("updateHotspotUser", () => this.adapter.updateHotspotUser(username, planId), "router.tickets.generate");
+  }
+
   createHotspotUser(user: HotspotUserDraft) {
     return this.run("createHotspotUser", () => this.adapter.createHotspotUser(user), "router.tickets.generate");
   }
@@ -193,6 +197,14 @@ export class RouterService {
 
   getRouterDateTime() {
     return this.run("getRouterDateTime", () => this.adapter.getRouterDateTime());
+  }
+
+  provisionWireGuard(config: import("../../domain/router").RouterWireGuardConfig) {
+    return this.run("provisionWireGuard", () => this.adapter.provisionWireGuard(config));
+  }
+
+  removeWireGuardPeer(reference: import("../../domain/router").RouterWireGuardPeerReference) {
+    return this.run("removeWireGuardPeer", () => this.adapter.removeWireGuardPeer(reference));
   }
 
   private createAdapter(mode: RouterAdapterMode, mikrotikOptions?: MikroTikRouterAdapterOptions): RouterAdapter {

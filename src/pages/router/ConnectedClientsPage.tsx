@@ -18,7 +18,21 @@ import {
   WifiOff
 } from "lucide-react";
 import { useAuth } from "../../app/auth/AuthProvider";
-import { FakeRouterAdapter, RouterService, RouterServiceError, type RouterActionLog } from "../../services/router";
+import type { ActiveSessionCacheRecord } from "../../domain/database";
+import {
+  FakeRouterAdapter,
+  RouterService,
+  RouterServiceError,
+  createPersistedRouterService,
+  type RouterActionLog
+} from "../../services/router";
+import { useAppDatabase } from "../../services/database";
+import {
+  ActiveSessionCacheRepository,
+  RouterConnectionRepository,
+  RouterRepository
+} from "../../services/database/repositories";
+import { DatabaseRouterActionLogger } from "../../services/logging";
 import {
   ActionMenu,
   Badge,
@@ -54,6 +68,7 @@ type Notice = {
 export function ConnectedClientsPage() {
   const { routerId = "routeur-demo" } = useParams();
   const { session } = useAuth();
+  const { database, isInitialized, isPersistent } = useAppDatabase();
   const canManage = session?.internal_profile_role === "admin";
   const [clients, setClients] = useState<ConnectedClientViewModel[]>([]);
   const [filters, setFilters] = useState<ConnectedClientFilters>(emptyConnectedClientFilters);
@@ -64,33 +79,74 @@ export function ConnectedClientsPage() {
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [selectedClient, setSelectedClient] = useState<ConnectedClientViewModel | null>(null);
 
-  const service = useMemo(
-    () =>
-      new RouterService({
+  const routerRepository = useMemo(() => new RouterRepository(database), [database]);
+  const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
+  const activeSessionCacheRepository = useMemo(() => new ActiveSessionCacheRepository(database), [database]);
+
+  const createService = async () => {
+    if (!isPersistent) {
+      return new RouterService({
         adapter: new FakeRouterAdapter({ latencyMs: 0 }),
-        logger: {
-          write: (log) => setLogs((current) => [...current, log])
-        }
-      }),
-    []
-  );
+        logger: { write: (log) => setLogs((current) => [...current, log]) }
+      });
+    }
+
+    if (!isInitialized || !session) {
+      throw new Error("La base locale n'est pas encore prête.");
+    }
+
+    const router = await routerRepository.findById(routerId);
+    if (!router) {
+      throw new Error("Routeur introuvable dans la base locale.");
+    }
+
+    return createPersistedRouterService({
+      authSession: session,
+      connections: await connectionRepository.listByRouter(routerId),
+      logger: new DatabaseRouterActionLogger(database),
+      router
+    });
+  };
 
   const loadClients = async () => {
+    if (isPersistent && (!isInitialized || !session)) {
+      return;
+    }
+
     setIsLoading(true);
     setNotice(null);
 
     try {
+      const service = await createService();
       const [activeUsers, hotspotUsers, plans, routers] = await Promise.all([
         service.listActiveUsers(),
         service.listHotspotUsers(),
         service.getHotspotPlans(),
-        service.listRouters()
+        isPersistent ? Promise.resolve([]) : service.listRouters()
       ]);
-      const router = routers.find((item) => item.id === routerId) ?? routers[0] ?? { id: routerId, name: "Routeur" };
+      const persistedRouter = isPersistent ? await routerRepository.findById(routerId) : null;
+      const router = persistedRouter ?? routers.find((item) => item.id === routerId) ?? routers[0] ?? { id: routerId, name: "Routeur" };
 
+      if (isPersistent) {
+        await activeSessionCacheRepository.replaceForRouter(routerId, activeUsers);
+      }
       setClients(buildConnectedClientViewModels(activeUsers, hotspotUsers, plans, router));
       setLastRefreshAt(formatRefreshDate(new Date()));
     } catch (error) {
+      if (isPersistent) {
+        const [router, cachedUsers] = await Promise.all([
+          routerRepository.findById(routerId),
+          activeSessionCacheRepository.listByRouter(routerId)
+        ]);
+
+        if (router && cachedUsers.length > 0) {
+          setClients(buildConnectedClientViewModels(cachedUsers.map(activeUserFromCache), [], [], router));
+          setLastRefreshAt(formatRefreshDate(new Date(cachedUsers[0].cached_at)));
+          setNotice({ status: "error", text: "Routeur hors ligne : affichage du dernier cache local." });
+          setIsLoading(false);
+          return;
+        }
+      }
       setNotice({
         status: "error",
         text: error instanceof RouterServiceError ? error.message : "Impossible de charger les clients connectés."
@@ -102,7 +158,7 @@ export function ConnectedClientsPage() {
 
   useEffect(() => {
     void loadClients();
-  }, []);
+  }, [activeSessionCacheRepository, connectionRepository, database, isInitialized, isPersistent, routerId, routerRepository, session]);
 
   const filteredClients = useMemo(() => filterConnectedClients(clients, filters), [clients, filters]);
   const planOptions = useMemo(() => getConnectedClientPlanOptions(clients), [clients]);
@@ -132,6 +188,7 @@ export function ConnectedClientsPage() {
     setNotice(null);
 
     try {
+      const service = await createService();
       if (type === "disable") {
         await service.disableHotspotUser(client.username);
       }
@@ -438,4 +495,17 @@ function formatRefreshDate(date: Date): string {
     minute: "2-digit",
     second: "2-digit"
   });
+}
+
+function activeUserFromCache(record: ActiveSessionCacheRecord) {
+  return {
+    downloadedBytes: record.downloaded_bytes,
+    id: record.id,
+    ipAddress: record.ip_address ?? "",
+    macAddress: record.mac_address ?? "",
+    sessionTimeLeft: record.session_time_left ?? "Non disponible",
+    uploadedBytes: record.uploaded_bytes,
+    uptime: record.uptime ?? "0s",
+    username: record.username
+  };
 }

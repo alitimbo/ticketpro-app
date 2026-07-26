@@ -1,53 +1,171 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, CalendarDays, CheckCircle2, CreditCard, FileText, Package, Router, ShieldCheck } from "lucide-react";
+import type { AccountSubscriptionStatus } from "../../domain/database";
 import { useAuth } from "../../app/auth/AuthProvider";
+import { useAppDatabase } from "../../services/database";
+import { AuditLogService } from "../../services/logging";
+import { routerLicenseFingerprint, validateStoredLicense } from "../../services/licensing";
+import {
+  AccountSubscriptionRepository,
+  BillingInvoiceRepository,
+  RouterRepository,
+  SubscriptionPlanRepository
+} from "../../services/database/repositories";
 import { Badge, Button, Card, DataListItem, PageHeader, StatCard } from "../../shared/ui";
 import { demoRouters } from "./routerPageModel";
 import {
   billingPeriodLabel,
+  buildSubscriptionOverview,
   changeSubscriptionPlan,
   countRoutersForSubscription,
   formatCfa,
   formatDate,
   formatSubscriptionPeriod,
   getSubscriptionOverview,
+  invoiceFromRecord,
   markSubscriptionPaymentManual,
+  subscriptionFromRecord,
+  subscriptionPlanFromRecord,
   type SubscriptionOverview
 } from "./subscriptionPageModel";
 
 export function SubscriptionPage() {
   const { session } = useAuth();
+  const { database, isInitialized, isPersistent } = useAppDatabase();
   const isAdmin = session?.internal_profile_role === "admin";
   const routersUsed = countRoutersForSubscription(demoRouters);
   const [message, setMessage] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const overview = useMemo<SubscriptionOverview>(
-    () => getSubscriptionOverview(routersUsed),
-    [refreshKey, routersUsed]
-  );
+  const [overview, setOverview] = useState<SubscriptionOverview>(() => getSubscriptionOverview(routersUsed));
+  const routerRepository = useMemo(() => new RouterRepository(database), [database]);
+  const planRepository = useMemo(() => new SubscriptionPlanRepository(database), [database]);
+  const subscriptionRepository = useMemo(() => new AccountSubscriptionRepository(database), [database]);
+  const invoiceRepository = useMemo(() => new BillingInvoiceRepository(database), [database]);
+  const auditLogService = useMemo(() => new AuditLogService(database), [database]);
 
-  const refresh = () => setRefreshKey((current) => current + 1);
-
-  const changePlan = (planId: string) => {
-    if (!isAdmin) {
-      setMessage("Vous n'avez pas la permission de modifier l'abonnement.");
+  const loadPersistentOverview = async () => {
+    if (!isPersistent || !isInitialized || !session) {
       return;
     }
 
-    changeSubscriptionPlan(planId);
-    refresh();
-    setMessage("Pack mis à jour en mode développement.");
+    const [routers, planRecords, subscriptionRecord, invoiceRecords] = await Promise.all([
+      routerRepository.listByAccount(session.account_id),
+      planRepository.listActive(),
+      subscriptionRepository.findCurrentByAccount(session.account_id),
+      invoiceRepository.listByAccount(session.account_id)
+    ]);
+
+    if (!subscriptionRecord) {
+      throw new Error("Aucun abonnement persistant trouvé pour ce compte.");
+    }
+
+    const remoteLicense = await validateStoredLicense(
+      database,
+      session.account_id,
+      routers.map(routerLicenseFingerprint)
+    );
+    const licensedStatus: AccountSubscriptionStatus = remoteLicense?.status === "active"
+      ? "active"
+      : remoteLicense?.status === "expired"
+        ? "expired"
+        : "suspended";
+    const effectiveSubscriptionRecord = remoteLicense
+      ? {
+          ...subscriptionRecord,
+          current_period_end: remoteLicense.expires_at ?? subscriptionRecord.current_period_end,
+          router_limit_snapshot: remoteLicense.router_limit,
+          status: licensedStatus
+        }
+      : subscriptionRecord;
+    const subscription = subscriptionFromRecord(effectiveSubscriptionRecord);
+    const plans = planRecords.map(subscriptionPlanFromRecord);
+    const plan = plans.find((item) => item.id === subscription.planId) ?? plans[0];
+    const invoices = invoiceRecords.map((invoice) => invoiceFromRecord(invoice, plan?.name ?? "Pack", subscription.routerLimitSnapshot));
+    setOverview(buildSubscriptionOverview(subscription, plans, invoices, routers.filter((router) => router.subscription_counted === 1).length));
   };
 
-  const markManualPayment = () => {
+  useEffect(() => {
+    void loadPersistentOverview().catch((error) => setMessage(error instanceof Error ? error.message : "Impossible de charger l'abonnement."));
+  }, [database, isInitialized, isPersistent, invoiceRepository, planRepository, routerRepository, session, subscriptionRepository]);
+
+  const refresh = () => {
+    if (isPersistent) {
+      void loadPersistentOverview().catch((error) => setMessage(error instanceof Error ? error.message : "Actualisation impossible."));
+      return;
+    }
+    setRefreshKey((current) => current + 1);
+    setOverview(getSubscriptionOverview(routersUsed));
+  };
+
+  const changePlan = async (planId: string) => {
     if (!isAdmin) {
       setMessage("Vous n'avez pas la permission de modifier l'abonnement.");
       return;
     }
 
-    markSubscriptionPaymentManual();
+    if (isPersistent && session) {
+      const [current, plan] = await Promise.all([
+        subscriptionRepository.findCurrentByAccount(session.account_id),
+        planRepository.findById(planId)
+      ]);
+      if (!current || !plan) {
+        setMessage("Pack ou abonnement introuvable.");
+        return;
+      }
+      await subscriptionRepository.update({
+        ...current,
+        payment_status: "manual",
+        price_cfa_snapshot: plan.price_cfa,
+        price_per_router_cfa_snapshot: plan.price_per_router_cfa,
+        router_limit_snapshot: plan.router_limit,
+        status: "active",
+        subscription_plan_id: plan.id,
+        updated_at: new Date().toISOString()
+      });
+      await auditLogService.write({
+        accountId: session.account_id,
+        action: "subscription.plan_changed",
+        category: "systeme",
+        internalProfileId: session.internal_profile_id,
+        message: `Pack d'abonnement changé vers ${plan.name}.`
+      });
+    } else {
+      changeSubscriptionPlan(planId);
+    }
     refresh();
-    setMessage("Paiement manuel enregistré.");
+    setMessage(isPersistent ? "Pack mis à jour dans SQLite." : "Pack mis à jour en mode développement.");
+  };
+
+  const markManualPayment = async () => {
+    if (!isAdmin) {
+      setMessage("Vous n'avez pas la permission de modifier l'abonnement.");
+      return;
+    }
+
+    if (isPersistent && session) {
+      const current = await subscriptionRepository.findCurrentByAccount(session.account_id);
+      if (!current) {
+        setMessage("Abonnement introuvable.");
+        return;
+      }
+      await subscriptionRepository.update({
+        ...current,
+        payment_status: "manual",
+        status: "active",
+        updated_at: new Date().toISOString()
+      });
+      await auditLogService.write({
+        accountId: session.account_id,
+        action: "subscription.manual_payment",
+        category: "systeme",
+        internalProfileId: session.internal_profile_id,
+        message: "Paiement manuel de l'abonnement enregistré."
+      });
+    } else {
+      markSubscriptionPaymentManual();
+    }
+    refresh();
+    setMessage(isPersistent ? "Paiement manuel enregistré dans SQLite." : "Paiement manuel enregistré.");
   };
 
   return (
@@ -55,7 +173,7 @@ export function SubscriptionPage() {
       <PageHeader
         actions={
           isAdmin ? (
-            <Button icon={CheckCircle2} onClick={markManualPayment} variant="primary">
+            <Button icon={CheckCircle2} onClick={() => void markManualPayment()} variant="primary">
               Marquer paiement manuel
             </Button>
           ) : null
@@ -140,7 +258,7 @@ export function SubscriptionPage() {
                 </p>
                 <span>{formatCfa(plan.pricePerRouterCfa)} / routeur</span>
                 <span>{plan.description}</span>
-                <Button disabled={!isAdmin || isCurrent} onClick={() => changePlan(plan.id)} variant={isCurrent ? "ghost" : "secondary"}>
+                <Button disabled={!isAdmin || isCurrent} onClick={() => void changePlan(plan.id)} variant={isCurrent ? "ghost" : "secondary"}>
                   {isCurrent ? "Pack actuel" : "Changer de pack"}
                 </Button>
               </article>

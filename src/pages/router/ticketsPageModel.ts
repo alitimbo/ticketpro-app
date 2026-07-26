@@ -1,5 +1,6 @@
 import type { AppStatus } from "../../shared/ui";
 import type { AuthSession } from "../../domain/auth";
+import type { HotspotPlanRecord, TicketRecord } from "../../domain/database";
 import type { RouterTicketSyncStatus } from "../../services/sync";
 
 export type TicketListStatus =
@@ -33,6 +34,7 @@ export type TicketListItem = {
   planDurationMinutes: number;
   planValidityMinutes: number;
   planId: string;
+  planProfileName?: string;
   planName: string;
   printedCount: number;
   routerId: string;
@@ -48,6 +50,45 @@ export type TicketLifecycleLog = {
   level: "info" | "warning" | "error";
   message: string;
 };
+
+export function ticketFromRecord(
+  record: TicketRecord,
+  plan: HotspotPlanRecord | null,
+  routerName: string,
+  generatedFileName: string | null = null
+): TicketListItem {
+  return {
+    accountId: record.account_id,
+    activatedAt: record.activated_at,
+    batchId: record.batch_id,
+    code: record.username,
+    completedAt: record.completed_at,
+    createdAt: record.created_at,
+    dataLimitMb: plan?.data_limit_mb ?? null,
+    downloadedBytes: record.downloaded_bytes,
+    expiresAt: record.expires_at,
+    generatedFileName,
+    hasPdf: Boolean(generatedFileName),
+    id: record.id,
+    ipAddress: record.ip_address,
+    macAddress: record.mac_address,
+    mikrotikId: record.mikrotik_id,
+    operatorProfile: record.created_by_profile,
+    passwordSecretRef: record.password_encrypted,
+    createdByProfileId: record.created_by_profile_id,
+    planDurationMinutes: plan?.duration_minutes ?? 0,
+    planValidityMinutes: plan?.validity_minutes ?? plan?.duration_minutes ?? 0,
+    planId: record.plan_id,
+    planProfileName: plan?.mikrotik_profile_name ?? undefined,
+    planName: plan?.name ?? "Plan supprimé",
+    printedCount: record.printed_count,
+    routerId: record.router_id,
+    routerName,
+    status: record.status as TicketListStatus,
+    syncStatus: databaseSyncStatusToTicketSyncStatus(record.sync_status),
+    uploadedBytes: record.uploaded_bytes
+  };
+}
 
 export type TicketFilters = {
   batchId: string;
@@ -400,4 +441,20 @@ function endOfDay(date: string): number {
 
 function padDatePart(value: number): string {
   return String(value).padStart(2, "0");
+}
+
+function databaseSyncStatusToTicketSyncStatus(status: TicketRecord["sync_status"]): RouterTicketSyncStatus {
+  if (status === "synced") {
+    return "router_synced";
+  }
+
+  if (status === "conflict") {
+    return "conflict";
+  }
+
+  if (status === "pending") {
+    return "local_only";
+  }
+
+  return "local_only";
 }

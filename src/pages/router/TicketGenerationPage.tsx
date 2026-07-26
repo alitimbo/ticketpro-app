@@ -1,13 +1,27 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { CheckCircle2, ChevronLeft, ChevronRight, FileText, Hash, Printer, QrCode, Ticket } from "lucide-react";
-import type { HotspotPlan, RouterSummary } from "../../domain/router";
-import type { CreateGeneratedFileInput, CreateTicketInput, SyncStatus } from "../../domain/database";
+import type { HotspotPlan, HotspotUser, RouterSummary } from "../../domain/router";
+import type { CreateGeneratedFileInput, CreateTicketInput, PrintHistoryRecord, SyncStatus } from "../../domain/database";
 import type { UserRole } from "../../domain/auth";
 import { useAuth } from "../../app/auth/AuthProvider";
 import { AuthorizationError, requireProfilePermission } from "../../services/auth";
-import { FakeRouterAdapter, RouterService, RouterServiceError, type RouterActionLog } from "../../services/router";
-import { GeneratedFileRepository, InMemoryDatabaseClient } from "../../services/database";
+import {
+  createPersistedRouterService,
+  FakeRouterAdapter,
+  RouterService,
+  RouterServiceError,
+  type RouterActionLog
+} from "../../services/router";
+import {
+  GeneratedFileRepository,
+  HotspotPlanRepository,
+  PrintHistoryRepository,
+  RouterConnectionRepository,
+  RouterRepository,
+  TicketBatchRepository,
+  useAppDatabase
+} from "../../services/database";
 import { buildGeneratedTicketPdfRecord, generateTicketPdf, resolveTicketPdfPassword } from "../../services/pdf";
 import {
   LocalPrintService,
@@ -45,7 +59,9 @@ import {
   type TicketGenerationStep,
   type TicketStatus
 } from "./ticketGenerationModel";
+import { planFromRecord } from "./plansPageModel";
 import { TicketCodeGenerator } from "../../services/tickets";
+import { TauriFileService } from "../../services/files";
 
 const stepLabels = [
   "Routeur",
@@ -59,6 +75,7 @@ const stepLabels = [
 export function TicketGenerationPage() {
   const { routerId = "routeur-demo" } = useParams();
   const { session } = useAuth();
+  const { database, isInitialized, isPersistent } = useAppDatabase();
   const [state, setState] = useState<TicketGenerationState>(() => createInitialTicketGenerationState(routerId));
   const [routers, setRouters] = useState<RouterSummary[]>([]);
   const [plans, setPlans] = useState<HotspotPlan[]>([]);
@@ -76,6 +93,10 @@ export function TicketGenerationPage() {
     printerId: "pdf-export"
   });
   const [printHistory, setPrintHistory] = useState<PrintHistoryEntry[]>([]);
+  const batchRepository = useMemo(() => new TicketBatchRepository(database), [database]);
+  const planRepository = useMemo(() => new HotspotPlanRepository(database), [database]);
+  const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
+  const routerRepository = useMemo(() => new RouterRepository(database), [database]);
 
   const service = useMemo(
     () =>
@@ -88,23 +109,84 @@ export function TicketGenerationPage() {
       }),
     [session]
   );
+  const [persistedRouterService, setPersistedRouterService] = useState<RouterService | null>(null);
+  const fileService = useMemo(() => new TauriFileService(), []);
+  const printService = useMemo(
+    () => new LocalPrintService(isPersistent ? fileService : undefined),
+    [fileService, isPersistent]
+  );
   const codeGenerator = useMemo(() => new TicketCodeGenerator(), []);
-  const printService = useMemo(() => new LocalPrintService(), []);
-  const generatedFiles = useMemo(() => {
-    const database = new InMemoryDatabaseClient();
-    void database.initialize();
-    return new GeneratedFileRepository(database);
-  }, []);
+  const generatedFiles = useMemo(() => new GeneratedFileRepository(database), [database]);
+  const printHistoryRepository = useMemo(() => new PrintHistoryRepository(database), [database]);
 
   useEffect(() => {
+    if (!isPersistent || !isInitialized || !session) {
+      setPersistedRouterService(null);
+      return undefined;
+    }
+
+    let mounted = true;
+    const currentSession = session;
+
+    async function prepareRouterService() {
+      const router = await routerRepository.findById(routerId);
+
+      if (!router || router.account_id !== currentSession.account_id) {
+        throw new Error("Le routeur sélectionné est introuvable pour ce compte.");
+      }
+
+      const serviceForRouter = await createPersistedRouterService({
+        authSession: currentSession,
+        connections: await connectionRepository.listByRouter(routerId),
+        database,
+        logger: { write: (log) => setLogs((current) => [...current, log]) },
+        router
+      });
+
+      if (mounted) {
+        setPersistedRouterService(serviceForRouter);
+      }
+    }
+
+    void prepareRouterService().catch((preparationError) => {
+      if (mounted) {
+        setPersistedRouterService(null);
+        setError(preparationError instanceof Error ? preparationError.message : "Connexion au routeur indisponible.");
+      }
+    });
+
+    return () => {
+      mounted = false;
+    };
+  }, [connectionRepository, isInitialized, isPersistent, routerId, routerRepository, session]);
+
+  useEffect(() => {
+    if (isPersistent && (!isInitialized || !session)) {
+      return undefined;
+    }
+
     let mounted = true;
 
     async function loadData() {
-      const [routerList, planList, printerList] = await Promise.all([
-        service.listRouters(),
-        service.getHotspotPlans(),
-        printService.detectPrinters()
-      ]);
+      const [routerList, planList, printerList] = isPersistent
+        ? await Promise.all([
+            routerRepository.findById(routerId),
+            planRepository.listByRouter(routerId),
+            printService.detectPrinters()
+          ]).then(([routerRecord, planRecords, printerList]) => [
+            routerRecord && routerRecord.account_id === session?.account_id
+              ? [{
+                  connectionMode: routerRecord.connection_mode,
+                  host: routerRecord.local_ip,
+                  id: routerRecord.id,
+                  isReachable: routerRecord.status === "active",
+                  name: routerRecord.name
+                } satisfies RouterSummary]
+              : [],
+            planRecords.map((record) => planFromRecord(record)),
+            printerList
+          ] as [RouterSummary[], HotspotPlan[], LocalPrinter[]])
+        : await Promise.all([service.listRouters(), service.getHotspotPlans(), printService.detectPrinters()]);
 
       if (!mounted) {
         return;
@@ -129,7 +211,28 @@ export function TicketGenerationPage() {
     return () => {
       mounted = false;
     };
-  }, [printService, service]);
+  }, [isInitialized, isPersistent, planRepository, printService, routerId, routerRepository, service, session]);
+
+  useEffect(() => {
+    if (!isPersistent || !isInitialized || !session || !result?.batch.id) {
+      return undefined;
+    }
+
+    let mounted = true;
+
+    void printHistoryRepository
+      .listByAccount(session.account_id, result.batch.id)
+      .then((records) => {
+        if (mounted) {
+          setPrintHistory(records.map(printHistoryFromRecord));
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      mounted = false;
+    };
+  }, [isInitialized, isPersistent, printHistoryRepository, result?.batch.id, session]);
 
   const selectedRouter = routers.find((router) => router.id === state.selectedRouterId) ?? routers[0] ?? null;
   const selectedPlan = plans.find((plan) => plan.id === state.selectedPlanId) ?? null;
@@ -190,6 +293,16 @@ export function TicketGenerationPage() {
       return;
     }
 
+    if (isPersistent && !persistedRouterService) {
+      setError("Le routeur n'est pas prêt ou son mot de passe doit être ressaisi.");
+      return;
+    }
+
+    if (isPersistent && !state.options.usernameEqualsPassword) {
+      setError("La génération distante exige pour l'instant que le mot de passe soit égal au nom d'utilisateur.");
+      return;
+    }
+
     setIsGenerating(true);
     setError(null);
     setMessage(null);
@@ -200,7 +313,8 @@ export function TicketGenerationPage() {
     const failedTickets: CreateTicketInput[] = [];
 
     try {
-      const existingUsers = await service.listHotspotUsers();
+      const generationService = persistedRouterService ?? service;
+      const existingUsers: HotspotUser[] = await generationService.listHotspotUsers();
       const generatedCredentials = codeGenerator.generate({
         alphabet: "numeric",
         codeLength: state.options.codeLength,
@@ -214,7 +328,7 @@ export function TicketGenerationPage() {
 
       for (const credential of generatedCredentials) {
         try {
-          const createdUser = await service.createHotspotUser({
+          const createdUser = await generationService.createHotspotUser({
             comment: `Lot ${batchId}`,
             passwordSecretRef: credential.passwordSecretRef,
             planId: state.selectedPlanId,
@@ -228,10 +342,40 @@ export function TicketGenerationPage() {
               createdByProfileId: session.internal_profile_id,
               createdByProfile: session.internal_profile_role,
               routerId: state.selectedRouterId,
+              passwordSecretRef: credential.passwordSecretRef,
+              planId: state.selectedPlanId,
               user: createdUser
             })
           );
         } catch (creationError) {
+          let recoveredUser: HotspotUser | null = null;
+
+          if (isPersistent) {
+            try {
+              recoveredUser = (await generationService.listHotspotUsers()).find(
+                (user) => user.username === credential.username
+              ) ?? null;
+            } catch {
+              recoveredUser = null;
+            }
+          }
+
+          if (recoveredUser) {
+            succeededTickets.push(
+              userToTicketRecord({
+                accountId: session.account_id,
+                batchId,
+                createdByProfileId: session.internal_profile_id,
+                createdByProfile: session.internal_profile_role,
+                passwordSecretRef: credential.passwordSecretRef,
+                planId: state.selectedPlanId,
+                routerId: state.selectedRouterId,
+                user: recoveredUser
+              })
+            );
+            continue;
+          }
+
           failedTickets.push(
             buildTicketRecord({
               accountId: session.account_id,
@@ -243,7 +387,7 @@ export function TicketGenerationPage() {
               planId: state.selectedPlanId,
               routerId: state.selectedRouterId,
               status: "erreur_sync",
-              syncStatus: "conflict",
+              syncStatus: "pending",
               username: credential.username
             })
           );
@@ -254,7 +398,7 @@ export function TicketGenerationPage() {
         }
       }
 
-      const syncStatus: SyncStatus = failedTickets.length > 0 ? "conflict" : "synced";
+      const syncStatus: SyncStatus = failedTickets.length > 0 ? "pending" : "synced";
       const batch = buildTicketBatch({
         accountId: session.account_id,
         id: batchId,
@@ -267,6 +411,10 @@ export function TicketGenerationPage() {
         syncStatus
       });
       const fileName = state.options.createPdf ? buildFileName(batchId) : null;
+
+      if (isPersistent) {
+        await batchRepository.createWithTickets(batch, [...succeededTickets, ...failedTickets]);
+      }
 
       setTickets([...succeededTickets, ...failedTickets]);
       setGeneratedFile(null);
@@ -282,7 +430,7 @@ export function TicketGenerationPage() {
       setState((current) => ({ ...current, step: 6 }));
       setMessage(
         failedTickets.length > 0
-          ? `${succeededTickets.length} ticket(s) créés, ${failedTickets.length} en erreur.`
+          ? `${succeededTickets.length} ticket(s) créés, ${failedTickets.length} en attente de reprise depuis Tickets.`
           : `${succeededTickets.length} ticket(s) créés avec succès.`
       );
     } catch (generationError) {
@@ -299,10 +447,10 @@ export function TicketGenerationPage() {
   const primaryActionLabel =
     state.step === 5 ? `Créer ${Number.isFinite(quantity) ? quantity : 0} tickets` : "Continuer";
 
-  const generatePdf = async () => {
+  const generatePdf = async (): Promise<CreateGeneratedFileInput | null> => {
     if (!result || !selectedPlan || !selectedRouter || !result.fileName) {
       setMessage("Aucun PDF à générer pour ce lot.");
-      return;
+      return null;
     }
 
     const pdfInput = buildTicketPdfInputFromOptions({
@@ -315,12 +463,19 @@ export function TicketGenerationPage() {
       tickets
     });
     const pdfBytes = generateTicketPdf(pdfInput);
-    const fileRecord = buildGeneratedTicketPdfRecord(pdfInput);
+    let fileRecord = buildGeneratedTicketPdfRecord(pdfInput);
+
+    if (isPersistent) {
+      const savedFile = await fileService.writeBytes(fileRecord.file_path, pdfBytes);
+      fileRecord = { ...fileRecord, file_path: savedFile.relative_path };
+    } else {
+      downloadPdf(pdfInput.fileName, pdfBytes);
+    }
 
     await generatedFiles.create(fileRecord);
-    downloadPdf(pdfInput.fileName, pdfBytes);
     setGeneratedFile(fileRecord);
     setMessage(`${pdfInput.fileName} généré et enregistré dans les fichiers.`);
+    return fileRecord;
   };
 
   const printBatch = async () => {
@@ -329,12 +484,47 @@ export function TicketGenerationPage() {
       return;
     }
 
+    let fileToPrint = generatedFile;
+
+    if (!fileToPrint && result.fileName) {
+      fileToPrint = await generatePdf();
+    }
+
+    if (isPersistent && !fileToPrint) {
+      setMessage("Le PDF doit être généré avant l'impression.");
+      return;
+    }
+
     const printTickets = tickets.map((ticket) =>
       buildPrintTicketFromGeneratedTicket(ticket, selectedPlan, selectedRouter.name, result.batch.id)
     );
-    const printResult = await printService.printBatch({ printers, settings: printSettings, tickets: printTickets });
+    const printResult = await printService.printBatch({
+      filePath: fileToPrint?.file_path,
+      printers,
+      settings: printSettings,
+      tickets: printTickets
+    });
 
     setPrintHistory((current) => [printResult.historyEntry, ...current]);
+    if (isPersistent && session) {
+      void printHistoryRepository
+        .create({
+          account_id: session.account_id,
+          batch_id: result.batch.id,
+          created_by_profile: session.internal_profile_role,
+          created_by_profile_id: session.internal_profile_id,
+          format: printResult.historyEntry.format,
+          id: printResult.historyEntry.id,
+          mode: printResult.historyEntry.mode,
+          printer_id: printSettings.printerId,
+          printer_name: printResult.historyEntry.printerName,
+          router_id: result.batch.router_id,
+          status: printResult.historyEntry.status,
+          ticket_count: printResult.historyEntry.ticketCount,
+          user_message: printResult.historyEntry.userMessage
+        })
+        .catch(() => setMessage("Impression effectuée, mais son historique n'a pas pu être enregistré."));
+    }
     setMessage(printResult.userMessage);
 
     if (!printResult.ok) {
@@ -354,6 +544,25 @@ export function TicketGenerationPage() {
   const testPrinter = async () => {
     const printResult = await printService.testPrinter({ printers, settings: printSettings });
     setPrintHistory((current) => [printResult.historyEntry, ...current]);
+    if (isPersistent && session && result) {
+      void printHistoryRepository
+        .create({
+          account_id: session.account_id,
+          batch_id: result.batch.id,
+          created_by_profile: session.internal_profile_role,
+          created_by_profile_id: session.internal_profile_id,
+          format: printResult.historyEntry.format,
+          id: printResult.historyEntry.id,
+          mode: printResult.historyEntry.mode,
+          printer_id: printSettings.printerId,
+          printer_name: printResult.historyEntry.printerName,
+          router_id: result.batch.router_id,
+          status: printResult.historyEntry.status,
+          ticket_count: printResult.historyEntry.ticketCount,
+          user_message: printResult.historyEntry.userMessage
+        })
+        .catch(() => setMessage("Le test est terminé, mais son historique n'a pas pu être enregistré."));
+    }
     setMessage(printResult.userMessage);
   };
 
@@ -895,6 +1104,19 @@ function downloadPdf(fileName: string, bytes: Uint8Array) {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+}
+
+function printHistoryFromRecord(record: PrintHistoryRecord): PrintHistoryEntry {
+  return {
+    createdAt: record.created_at,
+    format: record.format as PrintPaperFormat,
+    id: record.id,
+    mode: record.mode as PrintHistoryEntry["mode"],
+    printerName: record.printer_name,
+    status: record.status as PrintHistoryEntry["status"],
+    ticketCount: record.ticket_count,
+    userMessage: record.user_message
+  };
 }
 
 function buildPrintTicketFromGeneratedTicket(

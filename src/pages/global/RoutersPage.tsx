@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Edit3,
@@ -19,7 +19,9 @@ import {
 import type { RouterErrorCode, RouterSystemInfo } from "../../domain/router";
 import { useAuth } from "../../app/auth/AuthProvider";
 import { AuthorizationError, requireProfilePermission } from "../../services/auth";
-import { encryptLocalSecret } from "../../services/security/localSecrets";
+import { decryptLocalSecret, encryptLocalSecret } from "../../services/security/localSecrets";
+import { routerLicenseFingerprint, validateStoredLicense } from "../../services/licensing";
+import { RouterConnectionRepository, RouterRepository, useAppDatabase } from "../../services/database";
 import {
   FakeRouterAdapter,
   remoteSecurityWarnings,
@@ -51,6 +53,9 @@ import {
   isRemoteConnectionMode,
   listRoutersForAccount,
   mapRouterErrorToTestStatus,
+  routerCardFromRecord,
+  routerConnectionInputsFromCard,
+  routerRecordFromCard,
   routerTestMessage,
   type RouterCardData,
   type RouterConnectionTestStatus,
@@ -87,12 +92,13 @@ type ScanState = {
 export function RoutersPage() {
   const navigate = useNavigate();
   const { accountSession, session, userCan } = useAuth();
+  const { database, isInitialized, isPersistent } = useAppDatabase();
   const accountId = accountSession?.accountId ?? session?.account_id ?? null;
   const canAddRouter = userCan("global.routers.add");
   const canEditRouter = userCan("global.routers.edit");
   const canDeleteRouter = userCan("global.routers.delete");
   const canViewSubscription = userCan("global.subscription");
-  const [routers, setRouters] = useState<RouterCardData[]>(demoRouters);
+  const [routers, setRouters] = useState<RouterCardData[]>(() => (isPersistent ? [] : demoRouters));
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<RouterFilter>("all");
   const [selectedRouter, setSelectedRouter] = useState<RouterCardData | null>(null);
@@ -105,6 +111,51 @@ export function RoutersPage() {
     isScanning: false,
     results: []
   });
+  const routerRepository = useMemo(() => new RouterRepository(database), [database]);
+  const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
+
+  useEffect(() => {
+    if (!isInitialized || !accountId) {
+      return undefined;
+    }
+
+    const scopedAccountId = accountId;
+    let mounted = true;
+
+    async function loadRouters() {
+      try {
+        const records = await routerRepository.listByAccount(scopedAccountId);
+        const cards = await Promise.all(
+          records.map(async (record) =>
+            routerCardFromRecord(record, await connectionRepository.listByRouter(record.id))
+          )
+        );
+
+        if (!mounted) {
+          return;
+        }
+
+        setRouters(cards.length > 0 || isPersistent ? cards : demoRouters);
+      } catch (error) {
+        if (!mounted) {
+          return;
+        }
+
+        setMessage(error instanceof Error ? error.message : "Impossible de charger les routeurs.");
+
+        if (!isPersistent) {
+          setRouters(demoRouters);
+        }
+      }
+    }
+
+    void loadRouters();
+
+    return () => {
+      mounted = false;
+    };
+  }, [accountId, connectionRepository, isInitialized, isPersistent, routerRepository]);
+
   const accountRouters = useMemo(() => listRoutersForAccount(routers, accountId), [accountId, routers]);
   const visibleRouters = useMemo(() => filterRouters(accountRouters, query, filter), [accountRouters, filter, query]);
   const subscriptionOverview = useMemo(
@@ -119,7 +170,7 @@ export function RoutersPage() {
     setSelectedRouter(router);
   };
 
-  const openAddForm = () => {
+  const openAddForm = async () => {
     try {
       requireProfilePermission(session, "global.routers.add");
     } catch (permissionError) {
@@ -129,6 +180,13 @@ export function RoutersPage() {
 
     if (!subscriptionOverview.canAddRouter) {
       setMessage(quotaMessage);
+      return;
+    }
+
+    try {
+      await validateStoredLicense(database, accountId ?? "", accountRouters.map(routerLicenseFingerprint));
+    } catch (licenseError) {
+      setMessage(licenseError instanceof Error ? licenseError.message : "Licence TicketPro non valide.");
       return;
     }
 
@@ -143,7 +201,7 @@ export function RoutersPage() {
     });
   };
 
-  const openScan = () => {
+  const openScan = async () => {
     try {
       requireProfilePermission(session, "global.routers.add");
     } catch (permissionError) {
@@ -153,6 +211,13 @@ export function RoutersPage() {
 
     if (!subscriptionOverview.canAddRouter) {
       setMessage(quotaMessage);
+      return;
+    }
+
+    try {
+      await validateStoredLicense(database, accountId ?? "", accountRouters.map(routerLicenseFingerprint));
+    } catch (licenseError) {
+      setMessage(licenseError instanceof Error ? licenseError.message : "Licence TicketPro non valide.");
       return;
     }
 
@@ -234,14 +299,34 @@ export function RoutersPage() {
 
   const testConnection = async (router: RouterCardData) => {
     const result = await runRouterConnectionTest({
+      apiPort: router.apiPort,
+      apiSslPort: router.apiSslPort,
+      encryptedPassword: router.encryptedPassword,
       ipAddress: router.ipAddress,
       mode: router.preferredMode,
       password: "",
       remoteHost: router.remoteHost,
       remotePort: String(router.remotePort),
       remoteUseSsl: router.remoteUseSsl,
-      statusHint: router.status
+      statusHint: router.status,
+      username: router.username
     });
+
+    if (isPersistent && accountId && session) {
+      try {
+        await routerRepository.recordConnectionTest({
+          accountId,
+          checkedAt: new Date().toISOString(),
+          errorMessage: result.status === "connected" ? null : result.message,
+          mode: router.preferredMode,
+          internalProfileId: session.internal_profile_id,
+          routerId: router.id,
+          status: result.status === "connected" ? "connected" : result.status === "offline" ? "offline" : "warning"
+        });
+      } catch {
+        setMessage("Connexion testée, mais le résultat n'a pas pu être enregistré.");
+      }
+    }
 
     setRouters((current) =>
       current.map((item) => (item.id === router.id ? applyTestResult(item, result.status, result.message, result.systemInfo) : item))
@@ -296,8 +381,25 @@ export function RoutersPage() {
         formState.testMessage,
         formState.detectedInfo
       );
-      setRouters((current) => [created, ...current]);
+      try {
+        await validateStoredLicense(database, accountId, [
+          ...accountRouters.map(routerLicenseFingerprint),
+          routerLicenseFingerprint(created)
+        ]);
+        await routerRepository.createWithConnections(
+          routerRecordFromCard(created),
+          routerConnectionInputsFromCard(created)
+        );
+
+        setRouters((current) => [created, ...current]);
       setMessage(`${created.zoneName} ajouté.`);
+      } catch (error) {
+        setFormState({
+          ...formState,
+          error: error instanceof Error ? error.message : "Le routeur n'a pas pu être enregistré."
+        });
+        return;
+      }
     } else if (formState.router) {
       try {
         requireProfilePermission(session, "global.routers.edit");
@@ -305,6 +407,44 @@ export function RoutersPage() {
         setFormState({
           ...formState,
           error: permissionError instanceof AuthorizationError ? permissionError.message : "Vous n'avez pas la permission de modifier ce routeur."
+        });
+        return;
+      }
+
+      const persistedRouter = applyTestResult(
+        {
+          ...formState.router,
+          apiPort: Number(formState.values.apiPort),
+          apiSslPort: Number(formState.values.apiSslPort),
+          boardName: formState.detectedInfo?.boardName ?? formState.router.boardName,
+          encryptedPassword,
+          ipAddress: formState.values.ipAddress,
+          model: formState.values.model || formState.router.model,
+          notes: formState.values.notes,
+          preferredMode: formState.values.preferredMode,
+          remoteHost: formState.values.remoteHost,
+          remotePort: Number(formState.values.remotePort),
+          remoteUseSsl: formState.values.remoteUseSsl,
+          routerOsVersion: formState.detectedInfo?.routerOsVersion ?? formState.router.routerOsVersion,
+          serialNumber: formState.detectedInfo?.serialNumber ?? formState.router.serialNumber,
+          username: formState.values.username,
+          zoneName: formState.values.name
+        },
+        formState.testStatus,
+        formState.testMessage,
+        formState.detectedInfo
+      );
+
+      try {
+        await routerRepository.update(routerRecordFromCard(persistedRouter));
+        await connectionRepository.replaceForRouter(
+          persistedRouter.id,
+          routerConnectionInputsFromCard(persistedRouter)
+        );
+      } catch (error) {
+        setFormState({
+          ...formState,
+          error: error instanceof Error ? error.message : "Le routeur n'a pas pu être mis à jour."
         });
         return;
       }
@@ -357,13 +497,17 @@ export function RoutersPage() {
     }
 
     const result = await runRouterConnectionTest({
+      apiPort: Number(formState.values.apiPort),
+      apiSslPort: Number(formState.values.apiSslPort),
+      encryptedPassword: formState.router?.encryptedPassword,
       ipAddress: formState.values.ipAddress,
       mode: formState.values.preferredMode,
       password: formState.values.password,
       remoteHost: formState.values.remoteHost,
       remotePort: formState.values.remotePort,
       remoteUseSsl: formState.values.remoteUseSsl,
-      statusHint: formState.router?.status
+      statusHint: formState.router?.status,
+      username: formState.values.username
     });
 
     setFormState({
@@ -382,14 +526,21 @@ export function RoutersPage() {
   };
 
   const runRouterConnectionTest = async ({
+    apiPort,
+    apiSslPort,
+    encryptedPassword,
     ipAddress,
     mode,
     password,
     remoteHost,
     remotePort,
     remoteUseSsl,
-    statusHint
+    statusHint,
+    username
   }: {
+    apiPort: number;
+    apiSslPort: number;
+    encryptedPassword?: string;
     ipAddress: string;
     mode: RouterFormValues["preferredMode"];
     password: string;
@@ -397,23 +548,53 @@ export function RoutersPage() {
     remotePort: string;
     remoteUseSsl: boolean;
     statusHint?: RouterCardData["status"];
+    username: string;
   }): Promise<{ message: string; status: RouterConnectionTestStatus; systemInfo: RouterSystemInfo | null }> => {
     const targetHost = isRemoteConnectionMode(mode) ? remoteHost : ipAddress;
-    const errorMode = inferConnectionError({ host: targetHost, mode, password, statusHint });
-    const service = new RouterService({
-      adapter: new FakeRouterAdapter({
-        connectionMode: mode,
-        errorMode,
-        host: targetHost || ipAddress,
-        latencyMs: 0
-      }),
-      authSession: session,
-      logger: {
-        write: (log) => {
-          setLogs((current) => [...current, log]);
-        }
+    let resolvedPassword = password;
+
+    if (!resolvedPassword.trim() && encryptedPassword) {
+      try {
+        resolvedPassword = await decryptLocalSecret(encryptedPassword);
+      } catch {
+        return {
+          message: "Le mot de passe enregistré ne peut pas être déchiffré. Saisissez-le à nouveau.",
+          status: "authentication_failed",
+          systemInfo: null
+        };
       }
-    });
+    }
+
+    const logger = {
+      write: (log: RouterActionLog) => {
+        setLogs((current) => [...current, log]);
+      }
+    };
+    const service = isPersistent
+      ? new RouterService({
+          authSession: session,
+          logger,
+          mikrotik: {
+            connectionMode: mode,
+            host: targetHost,
+            password: resolvedPassword,
+            port: isRemoteConnectionMode(mode) ? Number(remotePort) : apiPort,
+            timeoutMs: 5000,
+            useSsl: isRemoteConnectionMode(mode) ? remoteUseSsl : false,
+            username
+          },
+          mode: "mikrotik"
+        })
+      : new RouterService({
+          adapter: new FakeRouterAdapter({
+            connectionMode: mode,
+            errorMode: inferConnectionError({ host: targetHost, mode, password: resolvedPassword, statusHint }),
+            host: targetHost || ipAddress,
+            latencyMs: 0
+          }),
+          authSession: session,
+          logger
+        });
 
     try {
       if (isRemoteConnectionMode(mode)) {

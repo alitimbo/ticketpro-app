@@ -1,0 +1,8 @@
+[Interface]
+Address = 10.250.0.1/16
+ListenPort = 51820
+PrivateKey = REMPLACER_PAR_LA_CLE_PRIVEE_DU_SERVEUR
+SaveConfig = true
+
+# Les blocs [Peer] sont ajoutés automatiquement par le hub.
+# Autoriser UDP/51820 dans le pare-feu du VPS.

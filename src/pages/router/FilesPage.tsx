@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Copy,
   Download,
@@ -12,6 +12,14 @@ import {
 } from "lucide-react";
 import { useAuth } from "../../app/auth/AuthProvider";
 import {
+  GeneratedFileRepository,
+  HotspotPlanRepository,
+  RouterRepository,
+  TicketBatchRepository,
+  useAppDatabase
+} from "../../services/database";
+import { TauriFileService } from "../../services/files";
+import {
   ActionMenu,
   Badge,
   Button,
@@ -24,6 +32,7 @@ import {
 import type { AppStatus, IconComponent } from "../../shared/ui";
 import {
   createDemoArchivedFiles,
+  archivedFileFromRecord,
   emptyFileFilters,
   fileStatusLabel,
   fileTypeLabel,
@@ -44,12 +53,68 @@ type FileLog = {
 
 export function FilesPage() {
   const { session } = useAuth();
-  const [files, setFiles] = useState<ArchivedGeneratedFile[]>(() => createDemoArchivedFiles());
+  const { database, isInitialized, isPersistent } = useAppDatabase();
+  const [files, setFiles] = useState<ArchivedGeneratedFile[]>(() => (isPersistent ? [] : createDemoArchivedFiles()));
   const [filters, setFilters] = useState<FileFilters>(emptyFileFilters);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [logs, setLogs] = useState<FileLog[]>([]);
   const [fileToDelete, setFileToDelete] = useState<ArchivedGeneratedFile | null>(null);
+  const generatedFileRepository = useMemo(() => new GeneratedFileRepository(database), [database]);
+  const routerRepository = useMemo(() => new RouterRepository(database), [database]);
+  const planRepository = useMemo(() => new HotspotPlanRepository(database), [database]);
+  const batchRepository = useMemo(() => new TicketBatchRepository(database), [database]);
+  const fileService = useMemo(() => new TauriFileService(), []);
+
+  useEffect(() => {
+    if (!isPersistent || !isInitialized || !session) {
+      return undefined;
+    }
+
+    let mounted = true;
+    const currentSession = session;
+
+    async function loadFiles() {
+      const [records, routers, batches] = await Promise.all([
+        generatedFileRepository.listByAccount(currentSession.account_id),
+        routerRepository.listByAccount(currentSession.account_id),
+        batchRepository.listByAccount(currentSession.account_id)
+      ]);
+      const plans = await Promise.all(routers.map((router) => planRepository.listByRouter(router.id)));
+      const routerById = new Map(routers.map((router) => [router.id, router]));
+      const batchById = new Map(batches.map((batch) => [batch.id, batch]));
+      const planById = new Map(plans.flat().map((plan) => [plan.id, plan]));
+      const archived = await Promise.all(
+        records.map(async (record) => {
+          const metadata = await fileService.metadata(record.file_path).catch(() => ({ exists: false }));
+          const batch = record.batch_id ? batchById.get(record.batch_id) : null;
+          const plan = batch ? planById.get(batch.plan_id) : null;
+
+          return archivedFileFromRecord(record, {
+            fileExists: metadata.exists,
+            planId: plan?.id,
+            planName: plan?.name,
+            routerName: routerById.get(record.router_id)?.name ?? record.router_id,
+            ticketQuantity: batch?.quantity
+          });
+        })
+      );
+
+      if (mounted) {
+        setFiles(archived);
+      }
+    }
+
+    void loadFiles().catch(() => {
+      if (mounted) {
+        setMessage("Les fichiers persistants n'ont pas pu être chargés.");
+      }
+    });
+
+    return () => {
+      mounted = false;
+    };
+  }, [batchRepository, fileService, generatedFileRepository, isInitialized, isPersistent, planRepository, routerRepository, session]);
 
   const scopedFiles = useMemo(() => scopeFilesForSession(files, session), [files, session]);
   const filteredFiles = useMemo(() => filterArchivedFiles(scopedFiles, filters), [scopedFiles, filters]);
@@ -69,15 +134,23 @@ export function FilesPage() {
     ]);
   };
 
-  const openFile = (file: ArchivedGeneratedFile) => {
+  const openFile = async (file: ArchivedGeneratedFile) => {
     if (file.status === "missing") {
       setMessage("Fichier introuvable : impossible de l'ouvrir.");
       writeLog(file, "Ouverture refusée : fichier introuvable.");
       return;
     }
 
-    setMessage(`${file.fileName} prêt à être ouvert depuis son chemin local.`);
-    writeLog(file, "Ouverture demandée.");
+    try {
+      if (isPersistent) {
+        await fileService.open(file.localPath);
+      }
+      setMessage(`${file.fileName} ouvert.`);
+      writeLog(file, "Ouverture demandée.");
+    } catch {
+      setMessage("Le fichier n'a pas pu être ouvert.");
+      writeLog(file, "Ouverture échouée.");
+    }
   };
 
   const copyFile = async (file: ArchivedGeneratedFile) => {
@@ -126,9 +199,18 @@ export function FilesPage() {
     writeLog(file, "Fichier régénéré.");
   };
 
-  const deleteHistory = () => {
+  const deleteHistory = async () => {
     if (!fileToDelete) {
       return;
+    }
+
+    if (isPersistent && session) {
+      try {
+        await generatedFileRepository.remove(fileToDelete.id, session.account_id);
+      } catch {
+        setMessage("Le fichier n'a pas pu être retiré de l'historique.");
+        return;
+      }
     }
 
     setFiles((current) => current.filter((file) => file.id !== fileToDelete.id));
@@ -269,7 +351,7 @@ type FilterOptions = {
   routers: Array<{ id: string; name: string }>;
 };
 
-const fileTypes: GeneratedFileType[] = ["tickets_pdf", "report_pdf", "csv_export"];
+const fileTypes: GeneratedFileType[] = ["tickets_pdf", "report_pdf", "report_csv", "csv_export"];
 
 function FileArchiveRow({
   file,
@@ -286,7 +368,7 @@ function FileArchiveRow({
   onRegenerate: () => void;
   onReprint: () => void;
 }) {
-  const Icon = file.fileType === "csv_export" ? FileDown : FileText;
+  const Icon = file.fileType === "csv_export" || file.fileType === "report_csv" ? FileDown : FileText;
   const status = file.status === "available" ? "success" : "error";
   const menuItems: Array<{ icon: IconComponent; label: string; onSelect: () => void }> = [
     { icon: FolderOpen, label: "Ouvrir", onSelect: onOpen }

@@ -1,4 +1,9 @@
 import type { RouterCardData } from "./routerPageModel";
+import type {
+  AccountSubscriptionRecord,
+  BillingInvoiceRecord,
+  SubscriptionPlanRecord
+} from "../../domain/database";
 
 export type SubscriptionStatus = "active" | "cancelled" | "expired" | "suspended" | "trial";
 export type SubscriptionPaymentStatus = "manual" | "paid" | "pending" | "unpaid";
@@ -262,14 +267,29 @@ export function canAddRouterForSubscription(
 }
 
 export function getSubscriptionOverview(routersUsed: number, accountId?: string, now = Date.now()): SubscriptionOverview {
-  const subscription = loadAccountSubscription(accountId);
-  const plan = subscriptionPlans.find((item) => item.id === subscription.planId) ?? subscriptionPlans[0];
+  return buildSubscriptionOverview(
+    loadAccountSubscription(accountId),
+    subscriptionPlans,
+    loadBillingInvoices(accountId),
+    routersUsed,
+    now
+  );
+}
+
+export function buildSubscriptionOverview(
+  subscription: AccountSubscription,
+  plans: SubscriptionPlan[],
+  invoices: BillingInvoice[],
+  routersUsed: number,
+  now = Date.now()
+): SubscriptionOverview {
+  const plan = plans.find((item) => item.id === subscription.planId) ?? plans[0] ?? subscriptionPlans[0];
   const limit = subscription.routerLimitSnapshot || plan.routerLimit;
   const routerUsagePercent = Math.min(100, Math.round((routersUsed / Math.max(1, limit)) * 100));
 
   return {
     canAddRouter: canAddRouterForSubscription({ ...subscription, routerLimitSnapshot: limit }, routersUsed, now),
-    invoices: loadBillingInvoices(accountId),
+    invoices,
     isOverLimit: routersUsed > limit,
     paymentStatusLabel: paymentStatusLabel(subscription.paymentStatus),
     plan,
@@ -278,6 +298,50 @@ export function getSubscriptionOverview(routersUsed: number, accountId?: string,
     routersUsed,
     statusLabel: subscriptionStatusLabel(subscription.status),
     subscription
+  };
+}
+
+export function subscriptionFromRecord(record: AccountSubscriptionRecord): AccountSubscription {
+  return {
+    currentPeriodEnd: record.current_period_end,
+    currentPeriodStart: record.current_period_start,
+    paymentStatus: record.payment_status,
+    planId: record.subscription_plan_id,
+    priceCfaSnapshot: record.price_cfa_snapshot,
+    pricePerRouterCfaSnapshot: record.price_per_router_cfa_snapshot,
+    routerLimitSnapshot: record.router_limit_snapshot,
+    status: record.status
+  };
+}
+
+export function subscriptionPlanFromRecord(record: SubscriptionPlanRecord): SubscriptionPlan {
+  return {
+    billingPeriod: record.billing_period,
+    description: record.description ?? "",
+    id: record.id,
+    isActive: record.is_active === 1,
+    isRecommended: record.is_recommended === 1,
+    name: record.name,
+    priceCfa: record.price_cfa,
+    pricePerRouterCfa: record.price_per_router_cfa,
+    routerLimit: record.router_limit
+  };
+}
+
+export function invoiceFromRecord(record: BillingInvoiceRecord, packName: string, routerLimit: number): BillingInvoice {
+  return {
+    amountCfa: record.amount_cfa,
+    dueAt: record.due_at ?? record.issued_at ?? record.created_at,
+    id: record.id,
+    invoiceNumber: record.invoice_number,
+    issuedAt: record.issued_at ?? record.created_at,
+    notes: record.notes,
+    packName,
+    paidAt: record.paid_at,
+    periodEnd: record.due_at ?? record.created_at,
+    periodStart: record.issued_at ?? record.created_at,
+    routerLimit,
+    status: record.status
   };
 }
 

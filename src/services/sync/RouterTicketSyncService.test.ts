@@ -117,4 +117,50 @@ describe("RouterTicketSyncService", () => {
     expect(createdUsers).toEqual(["654321"]);
     expect(report.updates[0]).toMatchObject({ mikrotikId: "*created", syncStatus: "router_synced" });
   });
+
+  it("reflète la désactivation distante dans l'état local", () => {
+    const report = compareLocalAndRouterTickets(
+      [localTickets[0]],
+      [{ ...routerUsers[0], status: "disabled" }],
+      []
+    );
+
+    expect(report.updates[0]).toMatchObject({ id: "ticket-1", status: "expiré", syncStatus: "router_synced" });
+  });
+
+  it("supprime un ticket sur le routeur avant sa suppression locale", async () => {
+    const removedUsers: string[] = [];
+    const service = new RouterTicketSyncService({
+      createHotspotUser: async () => routerUsers[0],
+      listActiveUsers: async () => [],
+      listHotspotUsers: async () => routerUsers,
+      removeHotspotUser: async (username) => {
+        removedUsers.push(username);
+      }
+    });
+
+    const report = await service.removeTicket(localTickets[0]);
+
+    expect(removedUsers).toEqual(["123456"]);
+    expect(report.updates[0]).toMatchObject({ id: "ticket-1", status: "supprimé", syncStatus: "router_synced" });
+  });
+
+  it("récupère un ticket créé malgré une erreur réseau de confirmation", async () => {
+    let listCalls = 0;
+    const service = new RouterTicketSyncService({
+      createHotspotUser: async () => {
+        throw new Error("timeout après création");
+      },
+      listActiveUsers: async () => [],
+      listHotspotUsers: async () => {
+        listCalls += 1;
+        return listCalls === 1 ? [] : [{ ...routerUsers[1], planId: "plan-1", profileName: "plan-1", username: "654321" }];
+      }
+    });
+
+    const report = await service.resyncTicket(localTickets[1]);
+
+    expect(report.updates[0]).toMatchObject({ id: "ticket-2", syncStatus: "router_synced" });
+    expect(report.logs[0]).toMatchObject({ level: "warning" });
+  });
 });

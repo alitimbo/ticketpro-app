@@ -1,4 +1,10 @@
 import type { RouterConnectionMode, RouterErrorCode, RouterSystemInfo } from "../../domain/router";
+import type {
+  CreateRouterConnectionInput,
+  CreateRouterInput,
+  RouterConnectionRecord,
+  RouterRecord
+} from "../../domain/database";
 import type { DiscoveredRouterCandidate } from "../../services/router";
 
 export type RouterCardStatus = "active" | "offline" | "warning";
@@ -196,6 +202,103 @@ export function getRouterLimitMessage(canAddRouter: boolean): string | null {
   return canAddRouter ? null : "Limite de routeurs atteinte pour votre abonnement.";
 }
 
+export function routerCardFromRecord(
+  record: RouterRecord,
+  connections: RouterConnectionRecord[] = []
+): RouterCardData {
+  const localConnection = connections.find((connection) => connection.mode === "local");
+  const remoteConnection =
+    connections.find((connection) => connection.mode === record.connection_mode && connection.mode !== "local") ??
+    connections.find((connection) => connection.mode !== "local");
+  const lastConnection = remoteConnection ?? localConnection;
+  const status = routerRecordStatusToCardStatus(record.status);
+
+  return {
+    accountId: record.account_id,
+    apiPort: record.api_port,
+    apiSslPort: record.api_ssl_port,
+    boardName: record.board_name ?? "Non détecté",
+    createdByProfileId: record.created_by_profile_id,
+    encryptedPassword: record.encrypted_password,
+    id: record.id,
+    ipAddress: localConnection?.host || record.local_ip,
+    lastSeenAt: record.last_seen_at ?? "Jamais",
+    lastTestMessage: lastConnection?.last_error ?? routerStatusMessage(status),
+    lastTestStatus: routerStatusToTestStatus(record.status),
+    lastTestedAt: lastConnection?.last_connected_at ?? null,
+    model: record.model ?? "Modèle non renseigné",
+    notes: record.notes ?? "",
+    preferredMode: record.connection_mode,
+    remoteEnabled: Boolean(remoteConnection),
+    remoteHost: remoteConnection?.host ?? "",
+    remotePort: remoteConnection?.port ?? record.api_ssl_port,
+    remoteUseSsl: remoteConnection ? remoteConnection.use_ssl === 1 : true,
+    routerOsVersion: record.routeros_version ?? "Non détectée",
+    serialNumber: record.serial_number ?? "Non détecté",
+    status,
+    subscriptionCounted: record.subscription_counted === 1,
+    username: record.username,
+    zoneName: record.name
+  };
+}
+
+export function routerRecordFromCard(router: RouterCardData): CreateRouterInput {
+  return {
+    account_id: router.accountId,
+    api_port: router.apiPort,
+    api_ssl_port: router.apiSslPort,
+    board_name: router.boardName,
+    connection_mode: router.preferredMode,
+    created_by_profile_id: router.createdByProfileId ?? "",
+    encrypted_password: router.encryptedPassword,
+    id: router.id,
+    label: router.zoneName,
+    last_seen_at: null,
+    local_ip: router.ipAddress,
+    model: router.model,
+    name: router.zoneName,
+    notes: router.notes,
+    routeros_version: router.routerOsVersion,
+    serial_number: router.serialNumber,
+    status: routerCardStatusToRecordStatus(router.status),
+    subscription_counted: router.subscriptionCounted === false ? 0 : 1,
+    username: router.username,
+    zone_id: null
+  };
+}
+
+export function routerConnectionInputsFromCard(router: RouterCardData): CreateRouterConnectionInput[] {
+  const connections: CreateRouterConnectionInput[] = [
+    {
+      host: router.ipAddress,
+      id: `${router.id}:local`,
+      last_connected_at: router.lastTestStatus === "connected" ? router.lastTestedAt : null,
+      last_error: router.lastTestStatus === "connected" ? null : router.lastTestMessage,
+      mode: "local",
+      port: router.apiPort,
+      router_id: router.id,
+      status: router.preferredMode === "local" && router.status === "active" ? "active" : "inactive",
+      use_ssl: 0
+    }
+  ];
+
+  if (router.remoteHost.trim()) {
+    connections.push({
+      host: router.remoteHost.trim(),
+      id: `${router.id}:remote`,
+      last_connected_at: router.preferredMode !== "local" ? router.lastTestedAt : null,
+      last_error: router.preferredMode !== "local" ? router.lastTestMessage : null,
+      mode: router.preferredMode === "local" ? "distant_ip" : router.preferredMode,
+      port: router.remotePort,
+      router_id: router.id,
+      status: router.preferredMode !== "local" && router.status === "active" ? "active" : "inactive",
+      use_ssl: router.remoteUseSsl ? 1 : 0
+    });
+  }
+
+  return connections;
+}
+
 export function createRouterFromForm(
   values: RouterFormValues,
   encryptedPassword: string,
@@ -222,7 +325,7 @@ export function createRouterFromForm(
     remoteHost: values.remoteHost,
     remotePort: Number(values.remotePort),
     remoteUseSsl: values.remoteUseSsl,
-    remoteEnabled: false,
+    remoteEnabled: isRemoteConnectionMode(values.preferredMode) && values.remoteHost.trim().length > 0,
     routerOsVersion: systemInfo?.routerOsVersion ?? "Non détectée",
     serialNumber: systemInfo?.serialNumber ?? "Non détecté",
     status: "warning",
@@ -230,6 +333,22 @@ export function createRouterFromForm(
     username: values.username,
     zoneName: values.name
   };
+}
+
+function routerRecordStatusToCardStatus(status: RouterRecord["status"]): RouterCardStatus {
+  return status === "active" ? "active" : status === "offline" ? "offline" : "warning";
+}
+
+function routerCardStatusToRecordStatus(status: RouterCardStatus): RouterRecord["status"] {
+  return status === "active" ? "active" : status === "offline" ? "offline" : "warning";
+}
+
+function routerStatusToTestStatus(status: RouterRecord["status"]): RouterConnectionTestStatus {
+  return status === "active" ? "connected" : status === "offline" ? "offline" : "not_tested";
+}
+
+function routerStatusMessage(status: RouterCardStatus): string {
+  return status === "active" ? "Routeur connecté" : status === "offline" ? "Routeur hors ligne" : "À vérifier";
 }
 
 export function formValuesFromRouter(router: RouterCardData): RouterFormValues {

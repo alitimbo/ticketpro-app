@@ -1,6 +1,7 @@
 import type { AuthSession } from "../../domain/auth";
+import type { GeneratedFileRecord } from "../../domain/database";
 
-export type GeneratedFileType = "csv_export" | "report_pdf" | "tickets_pdf";
+export type GeneratedFileType = "csv_export" | "report_csv" | "report_pdf" | "tickets_pdf";
 
 export type GeneratedFileStatus = "available" | "missing";
 
@@ -32,6 +33,37 @@ export type FileFilters = {
   planId: string;
   routerId: string;
 };
+
+export function archivedFileFromRecord(
+  record: GeneratedFileRecord,
+  input: {
+    fileExists: boolean;
+    planId?: string | null;
+    planName?: string | null;
+    routerName: string;
+    ticketQuantity?: number | null;
+  }
+): ArchivedGeneratedFile {
+  return {
+    accountId: record.account_id,
+    batchId: record.batch_id,
+    canRegenerate: !["csv_export", "report_csv", "report_pdf"].includes(record.type) || Boolean(record.batch_id),
+    createdByProfileId: record.created_by_profile_id,
+    createdAt: record.created_at,
+    fileName: record.file_name,
+    fileType: record.type as GeneratedFileType,
+    format: record.format,
+    id: record.id,
+    localPath: record.file_path,
+    operatorProfile: record.created_by_profile,
+    planId: input.planId ?? null,
+    planName: input.planName ?? null,
+    routerId: record.router_id,
+    routerName: input.routerName,
+    status: input.fileExists ? "available" : "missing",
+    ticketQuantity: input.ticketQuantity ?? null
+  };
+}
 
 export const emptyFileFilters: FileFilters = {
   dateFrom: "",
@@ -182,6 +214,7 @@ export function filterArchivedFiles(files: ArchivedGeneratedFile[], filters: Fil
 export function fileTypeLabel(type: GeneratedFileType): string {
   const labels: Record<GeneratedFileType, string> = {
     csv_export: "Export CSV",
+    report_csv: "Rapport CSV",
     report_pdf: "Rapport PDF",
     tickets_pdf: "Lot tickets PDF"
   };

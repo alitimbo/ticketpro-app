@@ -27,6 +27,21 @@ export type RouterConnectionTest = {
   checkedAt: string;
 };
 
+export type RouterWireGuardConfig = {
+  assignedAddress: string;
+  interfaceName: string;
+  privateKey: string;
+  serverAllowedIps: string;
+  serverEndpoint: string;
+  serverPort: number;
+  serverPublicKey: string;
+};
+
+export type RouterWireGuardPeerReference = {
+  interfaceName: string;
+  serverPublicKey: string;
+};
+
 export type RouterSystemInfo = {
   identity: string;
   model: string;

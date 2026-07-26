@@ -43,21 +43,28 @@ export class GeneratedFileRepository {
 
   async listByBatch(batchId: string): Promise<GeneratedFileRecord[]> {
     return this.database.query<GeneratedFileRecord>(
-      "SELECT * FROM generated_files WHERE batch_id = ?1 ORDER BY created_at DESC",
+      "SELECT * FROM generated_files WHERE batch_id = ?1 AND deleted_at IS NULL ORDER BY created_at DESC",
       [batchId]
+    );
+  }
+
+  async remove(id: string, accountId: string): Promise<void> {
+    await this.database.execute(
+      "UPDATE generated_files SET deleted_at = ?1, updated_at = ?2 WHERE id = ?3 AND account_id = ?4",
+      [new Date().toISOString(), new Date().toISOString(), id, accountId]
     );
   }
 
   async listByAccount(accountId: string, profileId?: string): Promise<GeneratedFileRecord[]> {
     if (profileId) {
       return this.database.query<GeneratedFileRecord>(
-        "SELECT * FROM generated_files WHERE account_id = ?1 AND created_by_profile_id = ?2 ORDER BY created_at DESC",
+        "SELECT * FROM generated_files WHERE account_id = ?1 AND created_by_profile_id = ?2 AND deleted_at IS NULL ORDER BY created_at DESC",
         [accountId, profileId]
       );
     }
 
     return this.database.query<GeneratedFileRecord>(
-      "SELECT * FROM generated_files WHERE account_id = ?1 ORDER BY created_at DESC",
+      "SELECT * FROM generated_files WHERE account_id = ?1 AND deleted_at IS NULL ORDER BY created_at DESC",
       [accountId]
     );
   }

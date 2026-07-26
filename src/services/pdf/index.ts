@@ -8,3 +8,4 @@ export {
   type TicketPdfTicket
 } from "./TicketPdfService";
 export { generateInvoicePdf, type InvoicePdfInput } from "./InvoicePdfService";
+export { generateReportPdf, type ReportPdfInput, type ReportPdfRow } from "./ReportPdfService";

@@ -1,4 +1,5 @@
 import type { HotspotPlan, HotspotPlanDraft } from "../../domain/router";
+import type { CreateHotspotPlanInput, HotspotPlanRecord } from "../../domain/database";
 
 export type PlanFormValues = {
   dataAmount: string;
@@ -36,6 +37,7 @@ export type PlanViewModel = HotspotPlan & {
   linkedTickets: number;
   rateLimit: string;
   sessionTimeout: string;
+  syncStatus: HotspotPlanRecord["sync_status"];
 };
 
 export const quickPlanTemplates: PlanTemplate[] = [
@@ -130,7 +132,53 @@ export function planFromHotspotPlan(plan: HotspotPlan, linkedTickets = 0): PlanV
     keepaliveTimeout: "2m",
     linkedTickets,
     rateLimit: [plan.downloadLimit, plan.uploadLimit].filter(Boolean).join("/") || "Non défini",
-    sessionTimeout: `${plan.durationMinutes}m`
+    sessionTimeout: `${plan.durationMinutes}m`,
+    syncStatus: "synced"
+  };
+}
+
+export function planFromRecord(record: HotspotPlanRecord, linkedTickets = 0): PlanViewModel {
+  return {
+    ...planFromHotspotPlan(
+    {
+      dataLimitMb: record.data_limit_mb,
+      downloadLimit: record.download_limit,
+      durationMinutes: record.duration_minutes,
+      id: record.id,
+      name: record.name,
+      profileName: record.mikrotik_profile_name ?? record.name,
+      priceHint: record.price_hint,
+      sharedUsers: record.shared_users,
+      status: record.status === "disabled" ? "disabled" : "active",
+      uploadLimit: record.upload_limit,
+      validityMinutes: record.validity_minutes
+    },
+    linkedTickets
+    ),
+    syncStatus: record.sync_status
+  };
+}
+
+export function planRecordFromDraft(
+  draft: HotspotPlanDraft,
+  routerId: string,
+  id: string,
+  syncStatus: HotspotPlanRecord["sync_status"] = "local"
+): CreateHotspotPlanInput {
+  return {
+    data_limit_mb: draft.dataLimitMb,
+    download_limit: draft.downloadLimit,
+    duration_minutes: draft.durationMinutes,
+    id,
+    mikrotik_profile_name: draft.profileName,
+    name: draft.name,
+    price_hint: draft.priceHint,
+    router_id: routerId,
+    shared_users: draft.sharedUsers,
+    status: draft.status ?? "active",
+    sync_status: syncStatus,
+    upload_limit: draft.uploadLimit,
+    validity_minutes: draft.validityMinutes
   };
 }
 

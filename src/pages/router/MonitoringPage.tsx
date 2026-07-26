@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useParams } from "react-router-dom";
 import {
   Activity,
   AlertTriangle,
@@ -17,7 +18,22 @@ import {
   Users,
   Wifi
 } from "lucide-react";
-import { FakeRouterAdapter, RouterService, RouterServiceError, type RouterActionLog } from "../../services/router";
+import {
+  FakeRouterAdapter,
+  RouterService,
+  RouterServiceError,
+  createPersistedRouterService,
+  type RouterActionLog
+} from "../../services/router";
+import { useAuth } from "../../app/auth/AuthProvider";
+import { useAppDatabase } from "../../services/database";
+import {
+  ActiveSessionCacheRepository,
+  RouterConnectionRepository,
+  RouterRepository,
+  RouterSnapshotRepository
+} from "../../services/database/repositories";
+import { DatabaseRouterActionLogger } from "../../services/logging";
 import { Badge, Button, Card, EmptyState, PageHeader, StatCard, StatusDot } from "../../shared/ui";
 import type { IconComponent } from "../../shared/ui";
 import {
@@ -29,28 +45,55 @@ import {
 } from "./monitoringPageModel";
 
 export function MonitoringPage() {
+  const { routerId = "routeur-demo" } = useParams();
+  const { session } = useAuth();
+  const { database, isInitialized, isPersistent } = useAppDatabase();
   const [model, setModel] = useState<MonitoringViewModel | null>(null);
   const [logs, setLogs] = useState<RouterActionLog[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [showTechnicalLogs, setShowTechnicalLogs] = useState(false);
 
-  const service = useMemo(
-    () =>
-      new RouterService({
+  const routerRepository = useMemo(() => new RouterRepository(database), [database]);
+  const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
+  const snapshotRepository = useMemo(() => new RouterSnapshotRepository(database), [database]);
+  const activeSessionCacheRepository = useMemo(() => new ActiveSessionCacheRepository(database), [database]);
+
+  const createService = async () => {
+    if (!isPersistent) {
+      return new RouterService({
         adapter: new FakeRouterAdapter({ latencyMs: 0 }),
-        logger: {
-          write: (log) => setLogs((current) => [...current, log])
-        }
-      }),
-    []
-  );
+        logger: { write: (log) => setLogs((current) => [...current, log]) }
+      });
+    }
+
+    if (!isInitialized || !session) {
+      throw new Error("La base locale n'est pas encore prête.");
+    }
+
+    const router = await routerRepository.findById(routerId);
+    if (!router) {
+      throw new Error("Routeur introuvable dans la base locale.");
+    }
+
+    return createPersistedRouterService({
+      authSession: session,
+      connections: await connectionRepository.listByRouter(routerId),
+      logger: new DatabaseRouterActionLogger(database),
+      router
+    });
+  };
 
   const refresh = async () => {
+    if (isPersistent && (!isInitialized || !session)) {
+      return;
+    }
+
     setIsLoading(true);
     setError(null);
 
     try {
+      const service = await createService();
       const [connection, servers, health, traffic, dateTime, plans, ticketUsers, activeUsers] = await Promise.all([
         service.testConnection(),
         service.getHotspotServers(),
@@ -62,6 +105,40 @@ export function MonitoringPage() {
         service.listActiveUsers()
       ]);
 
+      const snapshots = isPersistent ? await snapshotRepository.listByRouter(routerId) : [];
+
+      if (isPersistent && session && connection) {
+        const capturedAt = connection.checkedAt;
+        const router = await routerRepository.findById(routerId);
+
+        if (router) {
+          await Promise.all([
+            activeSessionCacheRepository.replaceForRouter(routerId, activeUsers, capturedAt),
+            snapshotRepository.create({
+              active_clients_count: activeUsers.length,
+              captured_at: capturedAt,
+              cpu_load: health.cpuLoad,
+              id: createId("snapshot"),
+              memory_total: health.memoryTotal,
+              memory_used: health.memoryUsed,
+              plans_count: plans.length,
+              router_id: routerId,
+              tickets_count: ticketUsers.length,
+              uptime: health.uptime
+            }),
+            routerRepository.recordConnectionTest({
+              accountId: session.account_id,
+              checkedAt: capturedAt,
+              errorMessage: null,
+              internalProfileId: session.internal_profile_id,
+              mode: router.connection_mode,
+              routerId,
+              status: "connected"
+            })
+          ]);
+        }
+      }
+
       setModel(
         buildMonitoringViewModel({
           activeUsers,
@@ -70,12 +147,29 @@ export function MonitoringPage() {
           dateTime,
           health,
           plans,
+          snapshots,
           servers,
           ticketUsers,
           traffic
         })
       );
     } catch (caught) {
+      if (isPersistent && session) {
+        const router = await routerRepository.findById(routerId);
+        if (router) {
+          await routerRepository
+            .recordConnectionTest({
+              accountId: session.account_id,
+              checkedAt: new Date().toISOString(),
+              errorMessage: caught instanceof Error ? caught.message : String(caught),
+              internalProfileId: session.internal_profile_id,
+              mode: router.connection_mode,
+              routerId,
+              status: "offline"
+            })
+            .catch(() => undefined);
+        }
+      }
       setError(caught instanceof RouterServiceError ? caught.message : "Impossible de lire l’état du routeur.");
     } finally {
       setIsLoading(false);
@@ -84,7 +178,7 @@ export function MonitoringPage() {
 
   useEffect(() => {
     void refresh();
-  }, []);
+  }, [activeSessionCacheRepository, connectionRepository, database, isInitialized, isPersistent, routerId, routerRepository, session, snapshotRepository]);
 
   return (
     <div className="page-stack">
@@ -118,7 +212,7 @@ export function MonitoringPage() {
           </Card>
 
           <div className="stats-grid">
-            <StatCard icon={ServerCog} label="API" value={model.apiStatusLabel} hint="Lecture locale simulée" />
+            <StatCard icon={ServerCog} label="API" value={model.apiStatusLabel} hint={isPersistent ? "Lecture RouterOS réelle" : "Démo locale"} />
             <StatCard icon={Wifi} label="Hotspot" value={model.hotspotStatusLabel} hint="Service clients" />
             <StatCard icon={Cpu} label="CPU" value={`${model.cpuLoad}%`} hint={model.cpuLoad >= 80 ? "Élevé" : "Normal"} />
             <StatCard icon={HardDrive} label="Mémoire" value={`${model.memoryPercent}%`} hint={model.memoryText} />
@@ -129,7 +223,7 @@ export function MonitoringPage() {
           </div>
 
           <div className="monitoring-grid">
-            <Card title="Graphiques 60 secondes" description="Tendance simulée pour lire l’état sans outil externe.">
+            <Card title="Graphiques 60 secondes" description={isPersistent ? "Mesures capturées et conservées localement." : "Tendance de démonstration locale."}>
               <div className="monitoring-chart-grid">
                 <MiniChart color="primary" icon={Cpu} label="CPU" suffix="%" values={model.cpuSeries} />
                 <MiniChart color="green" icon={HardDrive} label="Mémoire" suffix="%" values={model.memorySeries} />
@@ -177,7 +271,7 @@ export function MonitoringPage() {
                 </div>
               ) : (
                 <EmptyState
-                  description="Aucune alerte détectée sur les données simulées."
+                  description={isPersistent ? "Aucune alerte détectée sur les dernières mesures." : "Aucune alerte détectée sur les données de démonstration."}
                   icon={CheckCircle2}
                   title="Aucune erreur récente"
                 />
@@ -274,6 +368,11 @@ function TrafficChart({ download, upload }: { download: number[]; upload: number
       </div>
     </div>
   );
+}
+
+function createId(prefix: string): string {
+  const randomUuid = globalThis.crypto?.randomUUID?.();
+  return randomUuid ? `${prefix}-${randomUuid}` : `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 function DiagnosticRow({ diagnostic }: { diagnostic: MonitoringDiagnostic }) {

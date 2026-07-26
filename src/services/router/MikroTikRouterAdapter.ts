@@ -160,6 +160,86 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     return this.findUserByName(user.username);
   }
 
+  async provisionWireGuard(config: import("../../domain/router").RouterWireGuardConfig): Promise<void> {
+    const interfaces = await this.call("/interface/wireguard/print", { name: config.interfaceName });
+    const interfaceId = pick(firstRow(interfaces), ".id") || config.interfaceName;
+
+    if (!pick(firstRow(interfaces), ".id")) {
+      await this.call("/interface/wireguard/add", {
+        "listen-port": 13231,
+        name: config.interfaceName,
+        "private-key": config.privateKey
+      });
+    } else {
+      await this.call("/interface/wireguard/set", {
+        "listen-port": 13231,
+        numbers: interfaceId,
+        "private-key": config.privateKey
+      });
+    }
+
+    const addresses = await this.call("/ip/address/print", { address: config.assignedAddress, interface: config.interfaceName });
+    if (addresses.length === 0) {
+      await this.call("/ip/address/add", { address: config.assignedAddress, interface: config.interfaceName });
+    }
+
+    const peers = await this.call("/interface/wireguard/peers/print", {
+      interface: config.interfaceName,
+      "public-key": config.serverPublicKey
+    });
+    const peerParams = {
+      "allowed-address": config.serverAllowedIps,
+      "endpoint-address": config.serverEndpoint,
+      "endpoint-port": config.serverPort,
+      interface: config.interfaceName,
+      "persistent-keepalive": 25,
+      "public-key": config.serverPublicKey
+    };
+    if (peers.length === 0) {
+      await this.call("/interface/wireguard/peers/add", peerParams);
+    } else {
+      await this.call("/interface/wireguard/peers/set", { ...peerParams, numbers: pick(firstRow(peers), ".id") });
+    }
+
+    const routes = await this.call("/ip/route/print", { "dst-address": config.serverAllowedIps });
+    if (routes.length === 0) {
+      await this.call("/ip/route/add", { comment: "TicketPro WireGuard", "dst-address": config.serverAllowedIps, gateway: config.interfaceName });
+    }
+
+    const firewallRules = await this.call("/ip/firewall/filter/print", { comment: "TicketPro WireGuard" });
+    if (firewallRules.length === 0) {
+      await this.call("/ip/firewall/filter/add", {
+        action: "accept",
+        chain: "input",
+        comment: "TicketPro WireGuard",
+        "in-interface": config.interfaceName
+      });
+    }
+  }
+
+  async removeWireGuardPeer(reference: import("../../domain/router").RouterWireGuardPeerReference): Promise<void> {
+    const peers = await this.call("/interface/wireguard/peers/print", {
+      interface: reference.interfaceName,
+      "public-key": reference.serverPublicKey
+    });
+    const peerId = pick(firstRow(peers), ".id");
+    if (peerId) {
+      await this.call("/interface/wireguard/peers/remove", { numbers: peerId });
+    }
+  }
+
+  async updateHotspotUser(username: string, planId: string): Promise<HotspotUser> {
+    const user = await this.findUserByName(username);
+    const plan = await this.findPlanById(planId);
+
+    await this.call("/ip/hotspot/user/set", {
+      numbers: user.id,
+      profile: plan.profileName
+    });
+
+    return this.findUserByName(username);
+  }
+
   async createHotspotUsersBatch(batch: HotspotUsersBatchDraft): Promise<HotspotUser[]> {
     const existingUsers = await this.listHotspotUsers();
     const generator = new TicketCodeGenerator();

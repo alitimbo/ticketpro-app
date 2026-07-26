@@ -10,6 +10,7 @@
     "lint": "tsc --noEmit",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:license-api": "node --test infra/license-api/server.integration.mjs",
     "type-check": "tsc --noEmit",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",

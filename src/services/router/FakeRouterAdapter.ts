@@ -27,6 +27,13 @@ type FakeRouterAdapterOptions = {
 };
 
 export class FakeRouterAdapter implements RouterAdapter {
+  async provisionWireGuard(): Promise<void> {
+    return undefined;
+  }
+
+  async removeWireGuardPeer(): Promise<void> {
+    return undefined;
+  }
   private readonly latencyMs: number;
   private errorMode: RouterErrorCode | null;
 
@@ -238,6 +245,16 @@ export class FakeRouterAdapter implements RouterAdapter {
 
     this.users = [...this.users, created];
     return { ...created };
+  }
+
+  async updateHotspotUser(username: string, planId: string): Promise<HotspotUser> {
+    await this.guard("updateHotspotUser");
+    const user = this.findUser(username);
+    const plan = this.findPlan(planId);
+    const updated = { ...user, planId: plan.id, profileName: plan.profileName };
+
+    this.users = this.users.map((item) => (item.username === username ? updated : item));
+    return { ...updated };
   }
 
   async createHotspotUsersBatch(batch: HotspotUsersBatchDraft): Promise<HotspotUser[]> {

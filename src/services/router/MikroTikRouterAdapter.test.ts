@@ -125,4 +125,36 @@ describe("MikroTikRouterAdapter", () => {
     expect(normalizeMikroTikError(new Error("no such item")).code).toBe("hotspot_not_found");
     expect(normalizeMikroTikError(new Error("authentication failed")).code).toBe("authentication_failed");
   });
+
+  it("injecte idempotemment la configuration WireGuard dans RouterOS", async () => {
+    const transport = new MockRouterOsTransport({});
+    const adapter = createAdapter(transport);
+
+    await adapter.provisionWireGuard({
+      assignedAddress: "10.250.0.2/24",
+      interfaceName: "ticketpro-vpn",
+      privateKey: "router-private",
+      serverAllowedIps: "10.250.0.0/24",
+      serverEndpoint: "vpn.example.com",
+      serverPort: 51820,
+      serverPublicKey: "server-public"
+    });
+
+    expect(transport.calls.map((call) => call.command)).toEqual([
+      "/interface/wireguard/print",
+      "/interface/wireguard/add",
+      "/ip/address/print",
+      "/ip/address/add",
+      "/interface/wireguard/peers/print",
+      "/interface/wireguard/peers/add",
+      "/ip/route/print",
+      "/ip/route/add",
+      "/ip/firewall/filter/print",
+      "/ip/firewall/filter/add"
+    ]);
+    expect(transport.calls.find((call) => call.command === "/interface/wireguard/add")?.params).toMatchObject({
+      name: "ticketpro-vpn",
+      "private-key": "router-private"
+    });
+  });
 });

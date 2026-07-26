@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useParams } from "react-router-dom";
 import {
   CalendarDays,
   CheckCircle2,
@@ -13,10 +14,15 @@ import {
   UserRound
 } from "lucide-react";
 import { useAuth } from "../../app/auth/AuthProvider";
+import { useAppDatabase } from "../../services/database";
+import { GeneratedFileRepository, HotspotPlanRepository, RouterRepository, TicketRepository } from "../../services/database/repositories";
+import { TauriFileService } from "../../services/files";
+import { generateReportPdf } from "../../services/pdf";
 import { Badge, Button, Card, EmptyState, PageHeader, StatCard } from "../../shared/ui";
 import type { IconComponent } from "../../shared/ui";
 import {
   buildReportSummary,
+  buildReportCsv,
   createDemoReportTickets,
   emptyReportFilters,
   filterReportTickets,
@@ -32,7 +38,7 @@ import {
   type ReportMetricId,
   type ReportTicket
 } from "./reportPageModel";
-import { ticketStatusLabel, ticketStatusToBadge } from "./ticketsPageModel";
+import { ticketFromRecord, ticketStatusLabel, ticketStatusToBadge } from "./ticketsPageModel";
 
 type SelectedReportTickets = {
   title: string;
@@ -40,12 +46,66 @@ type SelectedReportTickets = {
 };
 
 export function ReportPage() {
+  const { routerId = "routeur-demo" } = useParams();
   const { session } = useAuth();
-  const [tickets] = useState<ReportTicket[]>(() => createDemoReportTickets());
-  const [filters, setFilters] = useState<ReportFilters>(emptyReportFilters);
+  const { database, isInitialized, isPersistent } = useAppDatabase();
+  const [tickets, setTickets] = useState<ReportTicket[]>(() => (isPersistent ? [] : createDemoReportTickets()));
+  const [filters, setFilters] = useState<ReportFilters>(() =>
+    isPersistent ? { ...emptyReportFilters, dateFrom: "", dateTo: "" } : emptyReportFilters
+  );
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [selectedTickets, setSelectedTickets] = useState<SelectedReportTickets | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const ticketRepository = useMemo(() => new TicketRepository(database), [database]);
+  const planRepository = useMemo(() => new HotspotPlanRepository(database), [database]);
+  const routerRepository = useMemo(() => new RouterRepository(database), [database]);
+  const generatedFileRepository = useMemo(() => new GeneratedFileRepository(database), [database]);
+  const fileService = useMemo(() => new TauriFileService(), []);
+
+  const loadReport = async () => {
+    if (!isPersistent || !isInitialized || !session) {
+      return;
+    }
+
+    setIsLoading(true);
+    setMessage(null);
+
+    try {
+      const [router, records, plans] = await Promise.all([
+        routerRepository.findById(routerId),
+        ticketRepository.listByAccount(session.account_id),
+        planRepository.listByRouter(routerId)
+      ]);
+
+      if (!router || router.account_id !== session.account_id) {
+        throw new Error("Routeur introuvable pour ce compte.");
+      }
+
+      const plansById = new Map(plans.map((plan) => [plan.id, plan]));
+      setTickets(
+        records
+          .filter((record) => record.router_id === routerId)
+          .map((record) => {
+            const ticket = ticketFromRecord(record, plansById.get(record.plan_id) ?? null, router.name);
+            return {
+              ...ticket,
+              deletedAt: ticket.status === "supprimé" ? ticket.completedAt : null,
+              priceHint: plansById.get(ticket.planId)?.price_hint ?? null
+            };
+          })
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Impossible de charger le rapport.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadReport();
+  }, [isInitialized, isPersistent, planRepository, routerId, routerRepository, session, ticketRepository]);
 
   const scopedTickets = useMemo(() => scopeReportTicketsForSession(tickets, session), [session, tickets]);
   const filteredTickets = useMemo(() => filterReportTickets(scopedTickets, filters), [filters, scopedTickets]);
@@ -66,7 +126,7 @@ export function ReportPage() {
   };
 
   const resetFilters = () => {
-    setFilters(emptyReportFilters);
+    setFilters(isPersistent ? { ...emptyReportFilters, dateFrom: "", dateTo: "" } : emptyReportFilters);
     setMessage(null);
     setSelectedTickets(null);
   };
@@ -76,13 +136,13 @@ export function ReportPage() {
       <PageHeader
         actions={
           <div className="button-row">
-            <Button icon={FileText} onClick={() => setMessage("Export PDF du rapport préparé.")}>
+            <Button disabled={isLoading || filteredTickets.length === 0} icon={FileText} onClick={() => void exportReport("pdf")}>
               Exporter PDF
             </Button>
-            <Button icon={Download} onClick={() => setMessage("Export CSV du rapport préparé.")}>
+            <Button disabled={isLoading || filteredTickets.length === 0} icon={Download} onClick={() => void exportReport("csv")}>
               Exporter CSV
             </Button>
-            <Button icon={RefreshCw} onClick={() => setMessage("Rapport rafraîchi.")}>
+            <Button disabled={isLoading} icon={RefreshCw} onClick={() => void loadReport()}>
               Rafraîchir
             </Button>
           </div>
@@ -180,6 +240,76 @@ export function ReportPage() {
       ) : null}
     </div>
   );
+
+  async function exportReport(format: "csv" | "pdf") {
+    if (filteredTickets.length === 0) {
+      setMessage("Aucune donnée à exporter.");
+      return;
+    }
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const fileName = `rapport-${routerId}-${stamp}.${format}`;
+    const relativePath = `files/reports/${fileName}`;
+    const bytes =
+      format === "csv"
+        ? new TextEncoder().encode(buildReportCsv(filteredTickets))
+        : generateReportPdf({
+            generatedAt: new Date().toLocaleString("fr-FR"),
+            rows: filteredTickets.map((ticket) => ({
+              code: ticket.code,
+              createdAt: formatReportDate(ticket.createdAt),
+              operator: internalProfileLabel(ticket.createdByProfileId),
+              plan: ticket.planName,
+              priceLabel: formatCfa(ticket.priceHint),
+              router: ticket.routerName,
+              status: ticket.status
+            })),
+            summary: summary.metrics.map((metric) => `${metric.label}: ${metric.value}`),
+            title: "Rapport d'activité TicketPro"
+          });
+
+    try {
+      if (isPersistent && session) {
+        await fileService.writeBytes(relativePath, bytes);
+        await generatedFileRepository.create({
+          account_id: session.account_id,
+          batch_id: null,
+          created_by_profile: session.internal_profile_role,
+          created_by_profile_id: session.internal_profile_id,
+          file_name: fileName,
+          file_path: relativePath,
+          format,
+          id: createId("report"),
+          router_id: routerId,
+          sync_status: "local",
+          type: format === "csv" ? "report_csv" : "report_pdf"
+        });
+      } else {
+        downloadBytes(bytes, fileName, format === "csv" ? "text/csv;charset=utf-8" : "application/pdf");
+      }
+
+      setMessage(`${format.toUpperCase()} du rapport exporté avec succès.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "L'export a échoué.");
+    }
+  }
+}
+
+function downloadBytes(bytes: Uint8Array, fileName: string, mimeType: string): void {
+  const copy = new Uint8Array(bytes.length);
+  copy.set(bytes);
+  const blob = new Blob([copy.buffer], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function createId(prefix: string): string {
+  const randomUuid = globalThis.crypto?.randomUUID?.();
+  return randomUuid ? `${prefix}-${randomUuid}` : `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 type FilterOptions = {
