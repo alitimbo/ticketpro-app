@@ -93,8 +93,13 @@ export type HotspotUser = {
 export type HotspotUserDraft = {
   username: string;
   passwordSecretRef: string;
+  /** RouterOS profile id or profile name, never the local SQLite plan id. */
   planId: string;
   comment?: string | null;
+  /** RouterOS limit-uptime value, for example 3h or 1d. */
+  limitUptime?: string | null;
+  /** RouterOS limit-bytes-total value in bytes. */
+  limitBytesTotal?: number | null;
 };
 
 export type HotspotUsersBatchDraft = {
@@ -103,6 +108,8 @@ export type HotspotUsersBatchDraft = {
   prefix?: string;
   codeLength?: number;
   createdByProfile?: string;
+  limitUptime?: string | null;
+  limitBytesTotal?: number | null;
 };
 
 export type ActiveHotspotUser = {
