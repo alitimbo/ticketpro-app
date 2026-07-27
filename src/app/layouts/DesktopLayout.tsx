@@ -12,7 +12,7 @@ type DesktopLayoutProps = {
 export function DesktopLayout({ scope }: DesktopLayoutProps) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const navigate = useNavigate();
-  const { routerId = "routeur-demo" } = useParams();
+  const { routerId = "" } = useParams();
   const { accountSession, logoutAccount, logoutProfile, session } = useAuth();
   const isRouterScope = scope === "router";
   const navigation = (isRouterScope ? getRouterNavigation(routerId, session?.internal_profile_role) : globalNavigation).filter(
@@ -90,8 +90,8 @@ export function DesktopLayout({ scope }: DesktopLayoutProps) {
             Changer de routeur
           </Button>
         ) : !isRouterScope && canSelectRouter ? (
-          <Button icon={Router} onClick={() => navigate("/routeurs/routeur-demo/maison")} variant="ghost">
-            Ouvrir le routeur démo
+          <Button icon={Router} onClick={() => navigate("/routeurs")} variant="ghost">
+            Choisir un routeur
           </Button>
         ) : null}
 

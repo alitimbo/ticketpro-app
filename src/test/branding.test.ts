@@ -18,15 +18,16 @@ describe("identité TicketPro", () => {
     };
     const cargoToml = read("src-tauri/Cargo.toml");
 
-    expect(packageJson).toMatchObject({ name: "ticketpro", version: "0.1.0" });
+    expect(packageJson.name).toBe("ticketpro");
     expect(tauriConfig).toMatchObject({
       identifier: "solutions.akicorp.ticketpro",
       mainBinaryName: "TicketPro",
-      productName: "TicketPro",
-      version: "0.1.0"
+      productName: "TicketPro"
     });
+    expect(tauriConfig.version).toBe(packageJson.version);
     expect(tauriConfig.bundle).toMatchObject({ publisher: "Akicorp Solutions", targets: ["nsis"] });
     expect(cargoToml).toContain('name = "ticketpro"');
+    expect(cargoToml).toContain(`version = "${packageJson.version}"`);
     expect(cargoToml).toContain('authors = ["Akicorp Solutions"]');
   });
 
