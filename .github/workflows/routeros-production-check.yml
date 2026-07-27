@@ -1,6 +1,9 @@
 name: RouterOS production checks
 
 on:
+  push:
+    branches:
+      - agent/routeros-production-fixes
   pull_request:
     branches:
       - main
