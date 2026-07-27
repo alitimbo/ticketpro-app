@@ -14,6 +14,10 @@ const canonicalAccountProfileIdentityMigrationPath = resolve(
   process.cwd(),
   "src-tauri/migrations/009_canonical_account_profile_identity.sql"
 );
+const disableLegacyDemoAccountMigrationPath = resolve(
+  process.cwd(),
+  "src-tauri/migrations/017_disable_legacy_demo_account.sql"
+);
 
 describe("migration comptes et abonnements", () => {
   const migration = readFileSync(migrationPath, "utf8");
@@ -22,6 +26,7 @@ describe("migration comptes et abonnements", () => {
   const internalProfilePermissionsMigration = readFileSync(internalProfilePermissionsMigrationPath, "utf8");
   const accountProfileActivityScopeMigration = readFileSync(accountProfileActivityScopeMigrationPath, "utf8");
   const canonicalAccountProfileIdentityMigration = readFileSync(canonicalAccountProfileIdentityMigrationPath, "utf8");
+  const disableLegacyDemoAccountMigration = readFileSync(disableLegacyDemoAccountMigrationPath, "utf8");
 
   it("ajoute la grille tarifaire evolutive des abonnements logiciel", () => {
     expect(migration).toContain("price_per_router_cfa");
@@ -81,5 +86,13 @@ describe("migration comptes et abonnements", () => {
     expect(canonicalAccountProfileIdentityMigration).toContain("internal_profile_id");
     expect(canonicalAccountProfileIdentityMigration).not.toContain("DELETE FROM");
     expect(canonicalAccountProfileIdentityMigration).not.toContain("DROP TABLE");
+  });
+
+  it("libère l'adresse historique du compte démo sans supprimer ses données", () => {
+    expect(disableLegacyDemoAccountMigration).toContain("legacy-demo-disabled@ticketpro.local");
+    expect(disableLegacyDemoAccountMigration).toContain("status = 'suspended'");
+    expect(disableLegacyDemoAccountMigration).toContain("id = 'account-douma-demo'");
+    expect(disableLegacyDemoAccountMigration).not.toContain("DELETE FROM");
+    expect(disableLegacyDemoAccountMigration).not.toContain("DROP TABLE");
   });
 });

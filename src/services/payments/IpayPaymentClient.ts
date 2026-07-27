@@ -89,6 +89,21 @@ export async function getPaymentOrderStatus(input: {
   );
 }
 
+export async function abandonPaymentOrder(input: {
+  orderId: string;
+  orderToken: string;
+  resellerSessionToken?: string;
+}): Promise<{ abandoned: boolean; order: PaymentOrder }> {
+  return post(
+    "/v1/payments/orders/abandon",
+    {
+      order_id: input.orderId,
+      order_token: input.orderToken
+    },
+    input.resellerSessionToken
+  );
+}
+
 async function post<T>(
   pathname: string,
   body: Record<string, unknown>,

@@ -20,6 +20,8 @@ const forbiddenFrontendKeys = [
 const packageJson = JSON.parse(await readFile("package.json", "utf8"));
 const tauriConfig = JSON.parse(await readFile("src-tauri/tauri.conf.json", "utf8"));
 const cargoManifest = await readFile("src-tauri/Cargo.toml", "utf8");
+const rustMain = await readFile("src-tauri/src/main.rs", "utf8");
+const databaseModule = await readFile("src-tauri/src/database.rs", "utf8");
 const productionEnv = await readFile(".env.production", "utf8");
 
 const failures = [];
@@ -34,6 +36,14 @@ if (packageJson.version !== tauriConfig.version || packageJson.version !== cargo
 
 if (productionApiUrl !== expectedApiUrl) {
   failures.push(`VITE_LICENSE_API_URL doit valoir exactement ${expectedApiUrl}.`);
+}
+
+if (!rustMain.includes('windows_subsystem = "windows"')) {
+  failures.push("Le binaire Windows de production doit être compilé sans console.");
+}
+
+if (!databaseModule.includes('"disable_legacy_demo_account"')) {
+  failures.push("La migration de neutralisation du compte de démonstration doit être embarquée.");
 }
 
 for (const key of forbiddenFrontendKeys) {

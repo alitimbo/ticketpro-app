@@ -9,10 +9,10 @@ type ProtectedRouteProps = {
 
 export function ProtectedRoute({ permissions = [] }: ProtectedRouteProps) {
   const { routerId } = useParams();
-  const { session, userCanAny } = useAuth();
+  const { accountSession, session, userCanAny } = useAuth();
 
   if (!session) {
-    return <Navigate replace to="/login" />;
+    return <Navigate replace to={accountSession ? "/login" : "/acces"} />;
   }
 
   if (!userCanAny(permissions)) {

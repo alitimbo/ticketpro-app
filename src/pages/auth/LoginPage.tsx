@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
-import { LogIn, LogOut, ShieldCheck, UserCheck, UserCog, UserRound } from "lucide-react";
+import { LogIn, LogOut, ShieldCheck, Store, UserCheck, UserCog, UserRound } from "lucide-react";
 import type { UserRole } from "../../domain/auth";
 import { useAuth } from "../../app/auth/AuthProvider";
 import { InternalProfileRepository, useAppDatabase } from "../../services/database";
@@ -14,6 +14,7 @@ import {
   type InternalProfileConfig
 } from "../../services/auth";
 import { Badge, Button, Card, PasswordField, StatusDot } from "../../shared/ui";
+import { isProductionRuntime } from "../../config/runtime";
 
 type ProfileChoice = {
   icon: typeof UserCog;
@@ -40,7 +41,7 @@ export function LoginPage() {
     session
   } = useAuth();
   const { database, isInitialized, isPersistent } = useAppDatabase();
-  const [email, setEmail] = useState("doumacorporation@gmail.com");
+  const [email, setEmail] = useState(isProductionRuntime ? "" : "doumacorporation@gmail.com");
   const [accountPassword, setAccountPassword] = useState("");
   const [profilePassword, setProfilePassword] = useState("");
   const [profileToUnlock, setProfileToUnlock] = useState<UserRole | null>(null);
@@ -188,14 +189,21 @@ export function LoginPage() {
 
             {error ? <p className="form-error">{error}</p> : null}
 
-            <div className="auth-note">
-              <Badge status="active">Développement</Badge>
-              <p>Compte de test : doumacorporation@gmail.com. Les secrets ne sont jamais affichés.</p>
-            </div>
+            {!isProductionRuntime ? (
+              <div className="auth-note">
+                <Badge status="active">Développement</Badge>
+                <p>Compte de test : doumacorporation@gmail.com. Les secrets ne sont jamais affichés.</p>
+              </div>
+            ) : null}
 
-            <Button icon={LogIn} size="large" type="submit" variant="primary">
-              Se connecter
-            </Button>
+            <div className="confirm-dialog__actions">
+              <Button icon={Store} onClick={() => navigate("/connexion-revendeur")} type="button" variant="ghost">
+                Espace distributeur
+              </Button>
+              <Button icon={LogIn} size="large" type="submit" variant="primary">
+                Se connecter
+              </Button>
+            </div>
           </Card>
         </form>
       </main>

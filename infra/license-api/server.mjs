@@ -271,6 +271,7 @@ db.exec("UPDATE plans SET is_reseller = 1 WHERE code LIKE 'RESELLER-%';");
 
 const statements = {
   listPlans: db.prepare("SELECT * FROM plans WHERE is_active = 1 ORDER BY sort_order ASC, router_limit ASC"),
+  listAllPlans: db.prepare("SELECT * FROM plans ORDER BY sort_order ASC, router_limit ASC"),
   findPlanById: db.prepare("SELECT * FROM plans WHERE id = ?"),
   upsertPlan: db.prepare(`
     INSERT INTO plans (
@@ -469,6 +470,14 @@ const statements = {
     UPDATE payment_orders SET status = ?, last_checked_at = ?, updated_at = ?,
       failure_reason = ? WHERE id = ?
   `),
+  abandonPaymentOrder: db.prepare(`
+    UPDATE payment_orders SET status = 'cancelled', fulfillment_status = 'failed',
+      last_checked_at = ?, updated_at = ?, failure_reason = ? WHERE id = ?
+  `),
+  markLatePayment: db.prepare(`
+    UPDATE payment_orders SET status = 'succeeded', fulfillment_status = 'failed',
+      paid_at = ?, last_checked_at = ?, updated_at = ?, failure_reason = ? WHERE id = ?
+  `),
   fulfillOrganizationPayment: db.prepare(`
     UPDATE payment_orders SET status = 'succeeded', fulfillment_status = 'fulfilled',
       license_id = ?, license_key_encrypted = ?, paid_at = ?, fulfilled_at = ?,
@@ -518,6 +527,15 @@ const statements = {
   completeResellerRegistration: db.prepare(`
     UPDATE reseller_registrations SET status = 'completed', reseller_id = ?,
       completed_at = ? WHERE id = ?
+  `),
+  cancelResellerRegistration: db.prepare(`
+    UPDATE reseller_registrations SET status = 'cancelled'
+    WHERE id = ? AND status = 'pending'
+  `),
+  restartResellerRegistration: db.prepare(`
+    UPDATE reseller_registrations SET name = ?, password_hash = ?, plan_id = ?,
+      status = 'pending', order_id = NULL, reseller_id = NULL, created_at = ?,
+      completed_at = NULL WHERE id = ? AND status = 'cancelled'
   `),
   linkPaymentOrderReseller: db.prepare(`
     UPDATE payment_orders SET reseller_id = ?, updated_at = ? WHERE id = ?
@@ -990,6 +1008,7 @@ function resellerResponse(reseller) {
   const consumed = resellerConsumedCapacity(reseller.id);
   return {
     id: reseller.id,
+    plan_id: reseller.plan_id,
     email: reseller.email ?? null,
     name: reseller.name,
     status: resellerStatus(reseller),
@@ -1108,6 +1127,21 @@ function processVerifiedPayment(request, order, payment) {
     if (current.fulfillment_status === "fulfilled") {
       db.exec("COMMIT");
       return current;
+    }
+    if (current.status === "cancelled") {
+      statements.markLatePayment.run(
+        checkedAt,
+        checkedAt,
+        checkedAt,
+        "Paiement reçu après abandon de la tentative. Réconciliation administrateur requise.",
+        current.id
+      );
+      db.exec("COMMIT");
+      logEvent(request, null, "payment_received_after_abandon", null, null, {
+        order_id: current.id,
+        transaction_id: current.transaction_id
+      });
+      return statements.findPaymentOrderById.get(current.id);
     }
     if (current.purchaser_type === "organization") {
       const planSnapshot = {
@@ -1444,15 +1478,30 @@ const handlers = [
     if (!plan || !Boolean(plan.is_active) || !Boolean(plan.is_reseller)) {
       throw new HttpError(400, "Un pack revendeur actif est requis.");
     }
-    const registrationId = crypto.randomUUID();
-    statements.insertResellerRegistration.run(
-      registrationId,
-      email,
-      requireText(body, "name", 200),
-      hashPassword(password),
-      plan.id,
-      nowIso()
-    );
+    const registrationId = existingRegistration?.status === "cancelled"
+      ? existingRegistration.id
+      : crypto.randomUUID();
+    const registrationName = requireText(body, "name", 200);
+    const passwordHash = hashPassword(password);
+    const registrationCreatedAt = nowIso();
+    if (existingRegistration?.status === "cancelled") {
+      statements.restartResellerRegistration.run(
+        registrationName,
+        passwordHash,
+        plan.id,
+        registrationCreatedAt,
+        registrationId
+      );
+    } else {
+      statements.insertResellerRegistration.run(
+        registrationId,
+        email,
+        registrationName,
+        passwordHash,
+        plan.id,
+        registrationCreatedAt
+      );
+    }
     const registration = statements.findResellerRegistrationById.get(registrationId);
     return createIpayOrder(request, body, "reseller", null, registration);
   }),
@@ -1465,7 +1514,7 @@ const handlers = [
   route("POST", "/v1/payments/orders/status", async (request, body) => {
     const order = authorizePaymentOrder(request, body);
     let current = order;
-    if (order.fulfillment_status !== "fulfilled" && order.status !== "failed") {
+    if (order.fulfillment_status !== "fulfilled" && !["failed", "cancelled"].includes(order.status)) {
       const payment = await getIpayPaymentStatus(order);
       current = processVerifiedPayment(request, order, payment);
     }
@@ -1474,6 +1523,54 @@ const handlers = [
         current,
         current.purchaser_type === "organization" && current.fulfillment_status === "fulfilled"
       )
+    };
+  }),
+
+  route("POST", "/v1/payments/orders/abandon", async (request, body) => {
+    const order = authorizePaymentOrder(request, body);
+    if (order.fulfillment_status === "fulfilled") {
+      return { abandoned: false, order: paymentOrderResponse(order, order.purchaser_type === "organization") };
+    }
+    if (order.status === "cancelled") {
+      return { abandoned: true, order: paymentOrderResponse(order) };
+    }
+
+    const payment = await getIpayPaymentStatus(order);
+    const reconciled = processVerifiedPayment(request, order, payment);
+    if (reconciled.status === "succeeded") {
+      return {
+        abandoned: false,
+        order: paymentOrderResponse(
+          reconciled,
+          reconciled.purchaser_type === "organization" && reconciled.fulfillment_status === "fulfilled"
+        )
+      };
+    }
+
+    const abandonedAt = nowIso();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      statements.abandonPaymentOrder.run(
+        abandonedAt,
+        abandonedAt,
+        "Tentative abandonnée par le client avant confirmation.",
+        order.id
+      );
+      if (order.reseller_registration_id) {
+        statements.cancelResellerRegistration.run(order.reseller_registration_id);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    logEvent(request, null, "payment_abandoned", null, null, {
+      order_id: order.id,
+      transaction_id: order.transaction_id
+    });
+    return {
+      abandoned: true,
+      order: paymentOrderResponse(statements.findPaymentOrderById.get(order.id))
     };
   }),
 
@@ -1991,6 +2088,16 @@ const handlers = [
       now
     );
     return { plan: planResponse(statements.findPlanById.get(planId)) };
+  }),
+
+  route("POST", "/v1/admin/plans/list", async (request) => {
+    requireAdmin(request, ["owner", "admin", "support"]);
+    return {
+      plans: statements.listAllPlans.all().map((plan) => ({
+        ...planResponse(plan),
+        sort_order: Number(plan.sort_order)
+      }))
+    };
   }),
 
   route("POST", "/v1/admin/resellers", async (request, body) => {

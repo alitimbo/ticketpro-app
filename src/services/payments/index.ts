@@ -1,4 +1,5 @@
 export {
+  abandonPaymentOrder,
   getPaymentOrderStatus,
   initiateOrganizationPayment,
   initiateResellerPayment,

@@ -26,7 +26,7 @@ export function DesktopLayout({ scope }: DesktopLayoutProps) {
 
   const handleAccountLogout = () => {
     logoutAccount();
-    navigate("/login", { replace: true });
+    navigate("/acces", { replace: true });
   };
 
   const canSelectRouter = Boolean(session?.permissions.includes("global.routers.select"));
