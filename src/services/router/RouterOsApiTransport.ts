@@ -32,7 +32,7 @@ export class TauriRouterOsApiTransport implements RouterOsApiTransport {
       request: {
         command: request.command,
         host: request.host,
-        params: request.params ?? {},
+        params: normalizeActionParams(request.params ?? {}),
         queries: request.queries ?? {},
         password: request.password,
         port: request.port,
@@ -43,4 +43,14 @@ export class TauriRouterOsApiTransport implements RouterOsApiTransport {
       }
     });
   }
+}
+
+function normalizeActionParams(
+  params: Record<string, RouterOsApiValue>
+): Record<string, RouterOsApiValue> {
+  return Object.fromEntries(
+    Object.entries(params)
+      .filter(([, value]) => value !== false && value !== undefined)
+      .map(([key, value]) => [key, value === true ? "" : value])
+  );
 }
