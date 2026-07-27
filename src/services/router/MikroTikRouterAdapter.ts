@@ -95,7 +95,6 @@ export class MikroTikRouterAdapter implements RouterAdapter {
 
   async getHotspotPlans(): Promise<HotspotPlan[]> {
     const rows = await this.call("/ip/hotspot/user/profile/print");
-
     return rows.map((row) => profileRowToPlan(row));
   }
 
@@ -142,7 +141,6 @@ export class MikroTikRouterAdapter implements RouterAdapter {
 
   async listHotspotUsers(): Promise<HotspotUser[]> {
     const rows = await this.call("/ip/hotspot/user/print");
-
     return rows.map((row) => userRowToHotspotUser(row));
   }
 
@@ -152,6 +150,8 @@ export class MikroTikRouterAdapter implements RouterAdapter {
 
     await this.call("/ip/hotspot/user/add", {
       comment: user.comment ?? "",
+      "limit-bytes-total": user.limitBytesTotal ?? null,
+      "limit-uptime": user.limitUptime ?? null,
       name: user.username,
       password,
       profile: plan.profileName
@@ -161,10 +161,10 @@ export class MikroTikRouterAdapter implements RouterAdapter {
   }
 
   async provisionWireGuard(config: import("../../domain/router").RouterWireGuardConfig): Promise<void> {
-    const interfaces = await this.call("/interface/wireguard/print", { name: config.interfaceName });
-    const interfaceId = pick(firstRow(interfaces), ".id") || config.interfaceName;
+    const interfaces = await this.query("/interface/wireguard/print", { name: config.interfaceName });
+    const existingInterfaceId = pick(firstRow(interfaces), ".id");
 
-    if (!pick(firstRow(interfaces), ".id")) {
+    if (!existingInterfaceId) {
       await this.call("/interface/wireguard/add", {
         "listen-port": 13231,
         name: config.interfaceName,
@@ -173,17 +173,23 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     } else {
       await this.call("/interface/wireguard/set", {
         "listen-port": 13231,
-        numbers: interfaceId,
+        numbers: existingInterfaceId,
         "private-key": config.privateKey
       });
     }
 
-    const addresses = await this.call("/ip/address/print", { address: config.assignedAddress, interface: config.interfaceName });
+    const addresses = await this.query("/ip/address/print", {
+      address: config.assignedAddress,
+      interface: config.interfaceName
+    });
     if (addresses.length === 0) {
-      await this.call("/ip/address/add", { address: config.assignedAddress, interface: config.interfaceName });
+      await this.call("/ip/address/add", {
+        address: config.assignedAddress,
+        interface: config.interfaceName
+      });
     }
 
-    const peers = await this.call("/interface/wireguard/peers/print", {
+    const peers = await this.query("/interface/wireguard/peers/print", {
       interface: config.interfaceName,
       "public-key": config.serverPublicKey
     });
@@ -198,27 +204,44 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     if (peers.length === 0) {
       await this.call("/interface/wireguard/peers/add", peerParams);
     } else {
-      await this.call("/interface/wireguard/peers/set", { ...peerParams, numbers: pick(firstRow(peers), ".id") });
+      await this.call("/interface/wireguard/peers/set", {
+        ...peerParams,
+        numbers: pick(firstRow(peers), ".id")
+      });
     }
 
-    const routes = await this.call("/ip/route/print", { "dst-address": config.serverAllowedIps });
+    const routes = await this.query("/ip/route/print", {
+      "dst-address": config.serverAllowedIps
+    });
     if (routes.length === 0) {
-      await this.call("/ip/route/add", { comment: "TicketPro WireGuard", "dst-address": config.serverAllowedIps, gateway: config.interfaceName });
+      await this.call("/ip/route/add", {
+        comment: "TicketPro WireGuard",
+        "dst-address": config.serverAllowedIps,
+        gateway: config.interfaceName
+      });
     }
 
-    const firewallRules = await this.call("/ip/firewall/filter/print", { comment: "TicketPro WireGuard" });
+    const firewallRules = await this.query("/ip/firewall/filter/print", {
+      comment: "TicketPro WireGuard"
+    });
     if (firewallRules.length === 0) {
+      const inputRules = await this.query("/ip/firewall/filter/print", { chain: "input" });
+      const firstDropId = pick(
+        inputRules.find((rule) => pick(rule, "action") === "drop") ?? {},
+        ".id"
+      );
       await this.call("/ip/firewall/filter/add", {
         action: "accept",
         chain: "input",
         comment: "TicketPro WireGuard",
-        "in-interface": config.interfaceName
+        "in-interface": config.interfaceName,
+        "place-before": firstDropId ?? null
       });
     }
   }
 
   async removeWireGuardPeer(reference: import("../../domain/router").RouterWireGuardPeerReference): Promise<void> {
-    const peers = await this.call("/interface/wireguard/peers/print", {
+    const peers = await this.query("/interface/wireguard/peers/print", {
       interface: reference.interfaceName,
       "public-key": reference.serverPublicKey
     });
@@ -256,6 +279,8 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       createdUsers.push(
         await this.createHotspotUser({
           comment: `Lot créé par ${batch.createdByProfile ?? "operateur"}`,
+          limitBytesTotal: batch.limitBytesTotal,
+          limitUptime: batch.limitUptime,
           passwordSecretRef: generatedCode.passwordSecretRef,
           planId: batch.planId,
           username: generatedCode.username
@@ -386,6 +411,14 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       throw normalizeMikroTikError(error);
     }
   }
+
+  private async query(command: string, queries: RouterOsApiRequest["queries"] = {}): Promise<RouterOsApiRow[]> {
+    try {
+      return await this.transport.call({ ...this.config, command, queries });
+    } catch (error) {
+      throw normalizeMikroTikError(error);
+    }
+  }
 }
 
 export function normalizeMikroTikError(error: unknown): RouterAdapterError {
@@ -413,7 +446,7 @@ export function normalizeMikroTikError(error: unknown): RouterAdapterError {
     code = "router_offline";
   }
 
-  return new RouterAdapterError(code, `RouterOS API error: ${code}`);
+  return new RouterAdapterError(code, `RouterOS API error: ${code}: ${sanitizeRouterMessage(message)}`);
 }
 
 function profileRowToPlan(row: RouterOsApiRow): HotspotPlan {
@@ -431,7 +464,7 @@ function profileRowToPlan(row: RouterOsApiRow): HotspotPlan {
     priceHint: metadata.priceHint ?? null,
     profileName: pick(row, "name") || "default",
     sharedUsers: parseInteger(pick(row, "shared-users")) || 1,
-    status: "active",
+    status: isTruthy(pick(row, "disabled")) ? "disabled" : "active",
     uploadLimit,
     validityMinutes: metadata.validityMinutes ?? durationMinutes
   };
@@ -565,4 +598,8 @@ function slugify(value: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "");
+}
+
+function sanitizeRouterMessage(message: string): string {
+  return message.replace(/[\r\n]+/g, " ").slice(0, 240);
 }
