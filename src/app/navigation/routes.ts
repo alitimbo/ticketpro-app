@@ -31,6 +31,7 @@ export const globalNavigation: NavigationItem[] = [
   { end: true, icon: Home, label: "Maison", permissions: ["global.home"], to: "/" },
   { icon: UserRound, label: "Mon compte", permissions: ["global.home"], to: "/mon-compte" },
   { icon: Router, label: "Routeurs", permissions: ["global.routers.select"], to: "/routeurs" },
+  { icon: Users, label: "Équipe & accès", permissions: ["global.team"], to: "/equipe" },
   { icon: Shield, label: "VPN distant", permissions: ["global.vpn"], to: "/vpn" },
   { icon: CreditCard, label: "Abonnement", permissions: ["global.subscription"], to: "/abonnement" },
   { icon: ReceiptText, label: "Factures", permissions: ["global.invoices"], to: "/factures" },

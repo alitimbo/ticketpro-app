@@ -1,5 +1,7 @@
 FROM node:22-bookworm-slim
 WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 COPY server.mjs ./server.mjs
 COPY backup-db.mjs ./backup-db.mjs
 RUN mkdir -p /data

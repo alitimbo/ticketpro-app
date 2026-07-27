@@ -1,306 +1,252 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, CalendarDays, CheckCircle2, CreditCard, FileText, Package, Router, ShieldCheck } from "lucide-react";
-import type { AccountSubscriptionStatus } from "../../domain/database";
+import { CalendarDays, CheckCircle2, CreditCard, Package, RefreshCw, Router, ShieldCheck } from "lucide-react";
 import { useAuth } from "../../app/auth/AuthProvider";
-import { useAppDatabase } from "../../services/database";
-import { AuditLogService } from "../../services/logging";
-import { routerLicenseFingerprint, validateStoredLicense } from "../../services/licensing";
+import { RouterRepository, useAppDatabase } from "../../services/database";
+import { listLicensePlans, type LicensePlan } from "../../services/licensing";
 import {
-  AccountSubscriptionRepository,
-  BillingInvoiceRepository,
-  RouterRepository,
-  SubscriptionPlanRepository
-} from "../../services/database/repositories";
+  abandonPaymentOrder,
+  getPaymentOrderStatus,
+  type InitiatedPaymentOrder,
+  type IpayPaymentType
+} from "../../services/payments";
+import { purchaseSaasSubscription } from "../../services/saas";
 import { Badge, Button, Card, DataListItem, PageHeader, StatCard } from "../../shared/ui";
-import { demoRouters } from "./routerPageModel";
-import {
-  billingPeriodLabel,
-  buildSubscriptionOverview,
-  changeSubscriptionPlan,
-  countRoutersForSubscription,
-  formatCfa,
-  formatDate,
-  formatSubscriptionPeriod,
-  getSubscriptionOverview,
-  invoiceFromRecord,
-  markSubscriptionPaymentManual,
-  subscriptionFromRecord,
-  subscriptionPlanFromRecord,
-  type SubscriptionOverview
-} from "./subscriptionPageModel";
+import { formatCfa, formatDate } from "./subscriptionPageModel";
 
 export function SubscriptionPage() {
-  const { session } = useAuth();
+  const { refreshSaasAccount, saasAccount, session } = useAuth();
   const { database, isInitialized, isPersistent } = useAppDatabase();
-  const isAdmin = session?.internal_profile_role === "admin";
-  const routersUsed = countRoutersForSubscription(demoRouters);
-  const [message, setMessage] = useState<string | null>(null);
-  const [refreshKey, setRefreshKey] = useState(0);
-  const [overview, setOverview] = useState<SubscriptionOverview>(() => getSubscriptionOverview(routersUsed));
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
-  const planRepository = useMemo(() => new SubscriptionPlanRepository(database), [database]);
-  const subscriptionRepository = useMemo(() => new AccountSubscriptionRepository(database), [database]);
-  const invoiceRepository = useMemo(() => new BillingInvoiceRepository(database), [database]);
-  const auditLogService = useMemo(() => new AuditLogService(database), [database]);
-
-  const loadPersistentOverview = async () => {
-    if (!isPersistent || !isInitialized || !session) {
-      return;
-    }
-
-    const [routers, planRecords, subscriptionRecord, invoiceRecords] = await Promise.all([
-      routerRepository.listByAccount(session.account_id),
-      planRepository.listActive(),
-      subscriptionRepository.findCurrentByAccount(session.account_id),
-      invoiceRepository.listByAccount(session.account_id)
-    ]);
-
-    if (!subscriptionRecord) {
-      throw new Error("Aucun abonnement persistant trouvé pour ce compte.");
-    }
-
-    const remoteLicense = await validateStoredLicense(
-      database,
-      session.account_id,
-      routers.map(routerLicenseFingerprint)
-    );
-    const licensedStatus: AccountSubscriptionStatus = remoteLicense?.status === "active"
-      ? "active"
-      : remoteLicense?.status === "expired"
-        ? "expired"
-        : "suspended";
-    const effectiveSubscriptionRecord = remoteLicense
-      ? {
-          ...subscriptionRecord,
-          current_period_end: remoteLicense.expires_at ?? subscriptionRecord.current_period_end,
-          router_limit_snapshot: remoteLicense.router_limit,
-          status: licensedStatus
-        }
-      : subscriptionRecord;
-    const subscription = subscriptionFromRecord(effectiveSubscriptionRecord);
-    const plans = planRecords.map(subscriptionPlanFromRecord);
-    const plan = plans.find((item) => item.id === subscription.planId) ?? plans[0];
-    const invoices = invoiceRecords.map((invoice) => invoiceFromRecord(invoice, plan?.name ?? "Pack", subscription.routerLimitSnapshot));
-    setOverview(buildSubscriptionOverview(subscription, plans, invoices, routers.filter((router) => router.subscription_counted === 1).length));
-  };
+  const [plans, setPlans] = useState<LicensePlan[]>([]);
+  const [routerCount, setRouterCount] = useState(0);
+  const [selectedPlanId, setSelectedPlanId] = useState("");
+  const [msisdn, setMsisdn] = useState("");
+  const [paymentType, setPaymentType] = useState<IpayPaymentType>("mobile");
+  const [payment, setPayment] = useState<InitiatedPaymentOrder | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const subscription = saasAccount?.subscription ?? null;
+  const selectedPlan = plans.find((plan) => plan.id === selectedPlanId) ?? plans[0] ?? null;
+  const canPay = Boolean(saasAccount?.access.can_manage_billing);
 
   useEffect(() => {
-    void loadPersistentOverview().catch((error) => setMessage(error instanceof Error ? error.message : "Impossible de charger l'abonnement."));
-  }, [database, isInitialized, isPersistent, invoiceRepository, planRepository, routerRepository, session, subscriptionRepository]);
+    void listLicensePlans()
+      .then((catalog) => {
+        const available = catalog.filter((plan) => !plan.is_reseller);
+        setPlans(available);
+        setSelectedPlanId((current) => current || available.find((plan) => plan.is_recommended)?.id || available[0]?.id || "");
+      })
+      .catch((error) => setMessage(errorMessage(error)));
+  }, []);
 
-  const refresh = () => {
-    if (isPersistent) {
-      void loadPersistentOverview().catch((error) => setMessage(error instanceof Error ? error.message : "Actualisation impossible."));
+  useEffect(() => {
+    if (!isPersistent || !isInitialized || !session) return;
+    void routerRepository
+      .listByAccount(session.account_id)
+      .then((routers) => setRouterCount(routers.filter((router) => router.subscription_counted === 1).length))
+      .catch((error) => setMessage(errorMessage(error)));
+  }, [isInitialized, isPersistent, routerRepository, session]);
+
+  const beginPayment = async () => {
+    if (!selectedPlan || !msisdn.trim()) {
+      setMessage("Choisissez un forfait et entrez le numéro qui effectuera le paiement.");
       return;
     }
-    setRefreshKey((current) => current + 1);
-    setOverview(getSubscriptionOverview(routersUsed));
+    setIsLoading(true);
+    setMessage(null);
+    try {
+      setPayment(await purchaseSaasSubscription({
+        planId: selectedPlan.id,
+        msisdn,
+        paymentType
+      }));
+    } catch (error) {
+      setMessage(errorMessage(error));
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  const changePlan = async (planId: string) => {
-    if (!isAdmin) {
-      setMessage("Vous n'avez pas la permission de modifier l'abonnement.");
-      return;
-    }
-
-    if (isPersistent && session) {
-      const [current, plan] = await Promise.all([
-        subscriptionRepository.findCurrentByAccount(session.account_id),
-        planRepository.findById(planId)
-      ]);
-      if (!current || !plan) {
-        setMessage("Pack ou abonnement introuvable.");
+  const confirmPayment = async () => {
+    if (!payment) return;
+    setIsLoading(true);
+    setMessage(null);
+    try {
+      const status = await getPaymentOrderStatus({
+        orderId: payment.order.order_id,
+        orderToken: payment.order_token
+      });
+      if (status.order.status === "pending") {
+        setMessage("Paiement encore en attente. Validez-le sur le téléphone puis réessayez.");
         return;
       }
-      await subscriptionRepository.update({
-        ...current,
-        payment_status: "manual",
-        price_cfa_snapshot: plan.price_cfa,
-        price_per_router_cfa_snapshot: plan.price_per_router_cfa,
-        router_limit_snapshot: plan.router_limit,
-        status: "active",
-        subscription_plan_id: plan.id,
-        updated_at: new Date().toISOString()
-      });
-      await auditLogService.write({
-        accountId: session.account_id,
-        action: "subscription.plan_changed",
-        category: "systeme",
-        internalProfileId: session.internal_profile_id,
-        message: `Pack d'abonnement changé vers ${plan.name}.`
-      });
-    } else {
-      changeSubscriptionPlan(planId);
+      if (status.order.status !== "succeeded" || status.order.fulfillment_status !== "fulfilled") {
+        setMessage(status.order.failure_reason ?? "Le paiement n'a pas abouti.");
+        return;
+      }
+      await refreshSaasAccount();
+      setPayment(null);
+      setMessage("Abonnement activé. Les services TicketPro sont disponibles.");
+    } catch (error) {
+      setMessage(errorMessage(error));
+    } finally {
+      setIsLoading(false);
     }
-    refresh();
-    setMessage(isPersistent ? "Pack mis à jour dans SQLite." : "Pack mis à jour en mode développement.");
   };
 
-  const markManualPayment = async () => {
-    if (!isAdmin) {
-      setMessage("Vous n'avez pas la permission de modifier l'abonnement.");
-      return;
-    }
-
-    if (isPersistent && session) {
-      const current = await subscriptionRepository.findCurrentByAccount(session.account_id);
-      if (!current) {
-        setMessage("Abonnement introuvable.");
+  const restartPayment = async () => {
+    if (!payment) return;
+    setIsLoading(true);
+    try {
+      const result = await abandonPaymentOrder({
+        orderId: payment.order.order_id,
+        orderToken: payment.order_token
+      });
+      if (!result.abandoned && result.order.status === "succeeded") {
+        await confirmPayment();
         return;
       }
-      await subscriptionRepository.update({
-        ...current,
-        payment_status: "manual",
-        status: "active",
-        updated_at: new Date().toISOString()
-      });
-      await auditLogService.write({
-        accountId: session.account_id,
-        action: "subscription.manual_payment",
-        category: "systeme",
-        internalProfileId: session.internal_profile_id,
-        message: "Paiement manuel de l'abonnement enregistré."
-      });
-    } else {
-      markSubscriptionPaymentManual();
+      setPayment(null);
+      setMessage("Tentative annulée. Vous pouvez relancer un paiement.");
+    } catch (error) {
+      setMessage(errorMessage(error));
+    } finally {
+      setIsLoading(false);
     }
-    refresh();
-    setMessage(isPersistent ? "Paiement manuel enregistré dans SQLite." : "Paiement manuel enregistré.");
   };
 
   return (
     <div className="page-stack">
       <PageHeader
-        actions={
-          isAdmin ? (
-            <Button icon={CheckCircle2} onClick={() => void markManualPayment()} variant="primary">
-              Marquer paiement manuel
-            </Button>
-          ) : null
-        }
-        description="Facturation de l'utilisation de l'application. Ne concerne pas la vente de tickets WiFi."
-        eyebrow="Global"
+        description="Votre abonnement contrôle le nombre de routeurs et l'accès aux services TicketPro."
+        eyebrow="Compte SaaS"
         title="Abonnement"
       />
 
-      {message ? <p className="form-error form-error--success">{message}</p> : null}
+      {message ? <p className="form-error">{message}</p> : null}
 
       <div className="stats-grid">
-        <StatCard icon={Package} label="Pack actuel" value={overview.plan.name} hint={`${overview.plan.routerLimit} routeur(s)`} />
-        <StatCard icon={Router} label="Routeurs utilisés" value={`${overview.routersUsed} / ${overview.subscription.routerLimitSnapshot}`} hint="Routeurs comptabilisés" />
-        <StatCard icon={ShieldCheck} label="Statut" value={overview.statusLabel} hint={`Paiement : ${overview.paymentStatusLabel}`} />
         <StatCard
-          icon={CreditCard}
-          label="Prix"
-          value={formatCfa(overview.subscription.priceCfaSnapshot)}
-          hint={`${formatCfa(overview.subscription.pricePerRouterCfaSnapshot)} / routeur`}
+          icon={Package}
+          label="Pack actuel"
+          value={subscription?.plan?.name ?? "Aucun pack actif"}
+          hint={subscription?.is_active ? "Abonnement actif" : "Renouvellement requis"}
+        />
+        <StatCard
+          icon={Router}
+          label="Routeurs utilisés"
+          value={`${routerCount} / ${subscription?.router_limit ?? 0}`}
+          hint="Quota de l'organisation"
+        />
+        <StatCard
+          icon={ShieldCheck}
+          label="Services"
+          value={subscription?.is_active ? "Actifs" : "Suspendus"}
+          hint={subscription?.is_active ? "Gestion distante autorisée" : "Connexion et paiement restent accessibles"}
+        />
+        <StatCard
+          icon={CalendarDays}
+          label="Échéance"
+          value={subscription?.current_period_end ? formatDate(subscription.current_period_end) : "—"}
+          hint="Expiration commune à l'organisation"
         />
       </div>
 
-      <Card title="Abonnement actuel" description="Vue locale de l'abonnement du compte principal.">
+      <Card title="Abonnement actuel" description="Informations vérifiées directement par le serveur TicketPro.">
         <div className="subscription-overview-grid">
           <DataListItem
-            description={overview.plan.name}
+            description={subscription?.plan?.name ?? "Aucun abonnement"}
             icon={Package}
-            meta={<Badge status={overview.subscription.status === "active" ? "success" : "warning"}>{overview.statusLabel}</Badge>}
-            title="Pack actuel"
+            meta={
+              <Badge status={subscription?.is_active ? "success" : "warning"}>
+                {subscription?.is_active ? "Actif" : "Expiré"}
+              </Badge>
+            }
+            title="Forfait"
           />
           <DataListItem
-            description={`${overview.routersUsed} routeur(s) utilisés sur ${overview.subscription.routerLimitSnapshot}`}
+            description={`${subscription?.router_limit ?? 0} routeur(s) maximum`}
             icon={Router}
-            meta={<Badge status={overview.isOverLimit ? "error" : "success"}>{overview.routerUsagePercent}%</Badge>}
-            title="Limite routeurs"
+            title="Quota"
           />
           <DataListItem
-            description={formatSubscriptionPeriod(overview.subscription.currentPeriodStart, overview.subscription.currentPeriodEnd)}
+            description={subscription?.current_period_end ? formatDate(subscription.current_period_end) : "Non définie"}
             icon={CalendarDays}
-            title="Période actuelle"
+            title="Fin de période"
           />
           <DataListItem
-            description={formatDate(overview.subscription.currentPeriodEnd)}
-            icon={CalendarDays}
-            title="Prochain renouvellement"
-          />
-          <DataListItem
-            description={formatCfa(overview.subscription.priceCfaSnapshot)}
+            description={formatCfa(subscription?.plan?.price_cfa ?? null)}
             icon={CreditCard}
-            meta={<Badge status="active">{overview.paymentStatusLabel}</Badge>}
-            title="Montant"
-          />
-          <DataListItem
-            description={`${formatCfa(overview.subscription.pricePerRouterCfaSnapshot)} par routeur / ${billingPeriodLabel(overview.plan.billingPeriod)}`}
-            icon={CreditCard}
-            title="Prix par routeur"
+            title="Dernier montant"
           />
         </div>
-        {overview.isOverLimit ? (
-          <p className="form-error subscription-warning">
-            La limite de routeurs est dépassée. Changez de pack avant d'ajouter un nouveau routeur.
-          </p>
-        ) : null}
       </Card>
 
-      <Card title="Voir les packs" description="Changement de pack réservé à l'Admin. Aucun paiement en ligne n'est intégré.">
-        <div className="subscription-plan-grid">
-          {overview.plans.map((plan) => {
-            const isCurrent = plan.id === overview.plan.id;
-
-            return (
-              <article className={isCurrent ? "subscription-plan-card subscription-plan-card--current" : "subscription-plan-card"} key={plan.id}>
-                <div>
-                  <strong>{plan.name}</strong>
-                  <span>{plan.routerLimit} routeur(s)</span>
-                </div>
-                {plan.isRecommended ? <Badge status="success">Recommandé</Badge> : null}
-                <p>
-                  {formatCfa(plan.priceCfa)}
-                  {plan.priceCfa !== null ? ` / ${billingPeriodLabel(plan.billingPeriod)}` : ""}
-                </p>
-                <span>{formatCfa(plan.pricePerRouterCfa)} / routeur</span>
-                <span>{plan.description}</span>
-                <Button disabled={!isAdmin || isCurrent} onClick={() => void changePlan(plan.id)} variant={isCurrent ? "ghost" : "secondary"}>
-                  {isCurrent ? "Pack actuel" : "Changer de pack"}
-                </Button>
-              </article>
-            );
-          })}
-        </div>
-      </Card>
-
-      <Card title="Factures" description="Historique local de facturation de l'abonnement logiciel.">
-        <div className="data-list">
-          {overview.invoices.map((invoice) => (
-            <DataListItem
-              description={`Émise le ${formatDate(invoice.issuedAt)} · Échéance ${formatDate(invoice.dueAt)}`}
-              icon={FileText}
-              key={invoice.id}
-              meta={<Badge status={invoice.status === "paid" ? "success" : "warning"}>{invoiceStatusLabel(invoice.status)}</Badge>}
-              title={`${invoice.invoiceNumber} · ${formatCfa(invoice.amountCfa)}`}
-            />
-          ))}
-        </div>
-      </Card>
-
-      <Card title="Rappel périmètre">
-        <DataListItem
-          description="Ce module concerne uniquement l'abonnement logiciel et la limite de routeurs du compte principal. La facturation annuelle avec 2 mois offerts est prévue plus tard, mais elle n'est pas activée ici."
-          icon={AlertTriangle}
-          meta={<Badge status="warning">Pas de paiement en ligne</Badge>}
-          title="Aucune vente de tickets WiFi"
-        />
+      <Card title="Souscrire ou renouveler" description="Le paiement est vérifié par iPay avant l'activation des services.">
+        {!payment ? (
+          <>
+            <div className="form-grid">
+              <label className="form-field">
+                Forfait
+                <select onChange={(event) => setSelectedPlanId(event.target.value)} value={selectedPlanId}>
+                  {plans.map((plan) => (
+                    <option key={plan.id} value={plan.id}>
+                      {plan.name} — {plan.router_limit} routeur(s) — {formatCfa(plan.price_cfa)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="form-field">
+                Numéro de paiement
+                <input
+                  inputMode="tel"
+                  onChange={(event) => setMsisdn(event.target.value)}
+                  placeholder="90 90 90 90"
+                  value={msisdn}
+                />
+              </label>
+              <label className="form-field">
+                Moyen de paiement
+                <select onChange={(event) => setPaymentType(event.target.value as IpayPaymentType)} value={paymentType}>
+                  <option value="mobile">Mobile Money (Airtel, Moov, Zamani)</option>
+                  <option value="nita_online">MyNita</option>
+                  <option value="amanata">Amanata</option>
+                </select>
+              </label>
+            </div>
+            <Button
+              disabled={!canPay || isLoading || plans.length === 0}
+              icon={CreditCard}
+              onClick={beginPayment}
+              variant="primary"
+            >
+              {isLoading ? "Préparation…" : "Payer ce forfait"}
+            </Button>
+          </>
+        ) : (
+          <div className="first-launch-form">
+            <div className="auth-note">
+              <CreditCard aria-hidden="true" size={20} />
+              <p>
+                {payment.order.plan.name} — {formatCfa(payment.order.amount)}
+                {payment.payment.meta_data?.code ? ` — Code : ${payment.payment.meta_data.code}` : ""}
+              </p>
+            </div>
+            <div className="confirm-dialog__actions">
+              <Button disabled={isLoading} icon={RefreshCw} onClick={restartPayment} variant="ghost">
+                Annuler et recommencer
+              </Button>
+              <Button disabled={isLoading} icon={CheckCircle2} onClick={confirmPayment} variant="primary">
+                J'ai validé le paiement
+              </Button>
+            </div>
+          </div>
+        )}
       </Card>
     </div>
   );
 }
 
-function invoiceStatusLabel(status: "cancelled" | "draft" | "issued" | "overdue" | "paid"): string {
-  const labels: Record<typeof status, string> = {
-    cancelled: "Annulée",
-    draft: "Brouillon",
-    issued: "Émise",
-    overdue: "En retard",
-    paid: "Payée"
-  };
-
-  return labels[status];
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Une erreur est survenue.";
 }

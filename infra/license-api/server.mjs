@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import nodemailer from "nodemailer";
 
 const PORT = Number(process.env.LICENSE_PORT ?? 8787);
 const HOST = process.env.LICENSE_BIND ?? "127.0.0.1";
@@ -16,10 +17,56 @@ const IPAY_PRIVATE_KEY = process.env.IPAY_PRIVATE_KEY ?? "";
 const IPAY_SECRET_HASH = process.env.IPAY_SECRET_HASH ?? "";
 const VPN_HUB_URL = String(process.env.VPN_HUB_URL ?? "http://127.0.0.1:8788").replace(/\/$/, "");
 const VPN_HUB_MASTER_TOKEN = process.env.VPN_HUB_MASTER_TOKEN ?? "";
+const SAAS_PASSWORD_RESET_URL = String(
+  process.env.SAAS_PASSWORD_RESET_URL ?? "https://ticketpro.autoticket-ne.com/reset-password"
+);
+const SAAS_INVITATION_URL = String(
+  process.env.SAAS_INVITATION_URL ?? "https://ticketpro.autoticket-ne.com/accept-invitation"
+);
+const SMTP_HOST = String(process.env.SMTP_HOST ?? "");
+const SMTP_PORT = Number(process.env.SMTP_PORT ?? 465);
+const SMTP_SECURE = String(process.env.SMTP_SECURE ?? "true") === "true";
+const SMTP_USER = String(process.env.SMTP_USER ?? "");
+const SMTP_PASSWORD = String(process.env.SMTP_PASSWORD ?? "");
+const SMTP_FROM_EMAIL = String(process.env.SMTP_FROM_EMAIL ?? SMTP_USER);
+const SMTP_FROM_NAME = String(process.env.SMTP_FROM_NAME ?? "TicketPro");
+const SAAS_EXPOSE_RESET_TOKEN = process.env.SAAS_EXPOSE_RESET_TOKEN === "true";
 const MAX_BODY_BYTES = 64 * 1024;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = 60;
+const SAAS_TRIAL_DAYS = 7;
+const SAAS_TRIAL_ROUTER_LIMIT = 1;
+const SAAS_TRIAL_PLAN_ID = "ticketpro-trial-7-days";
+const SAAS_TRIAL_PLAN_CODE = "TRIAL-7D";
+const ORGANIZATION_APP_ROLES = new Set(["admin", "operator", "agent", "guest"]);
+const ORGANIZATION_ROLE_PERMISSIONS = {
+  admin: [
+    "global.home", "global.routers", "global.routers.select", "global.routers.manage",
+    "global.routers.add", "global.routers.edit", "global.routers.delete", "global.vpn",
+    "global.settings", "global.team", "router.home", "router.plans.read", "router.plans.write",
+    "router.tickets.read", "router.tickets.generate", "router.tickets.reprint",
+    "router.tickets.disable", "router.tickets.delete", "router.tickets.sync",
+    "router.tickets.revealPassword", "router.files.read", "router.report.read",
+    "router.clients.read", "router.clients.disconnect", "router.network.read",
+    "router.logs.read", "router.logs.clean", "router.settings", "router.settings.manage"
+  ],
+  operator: [
+    "global.home", "global.routers", "global.routers.select", "router.home",
+    "router.plans.read", "router.tickets.read", "router.tickets.generate",
+    "router.tickets.reprint", "router.files.read", "router.report.read",
+    "router.clients.read"
+  ],
+  agent: [
+    "global.home", "global.routers.select", "router.home", "router.tickets.generate",
+    "router.tickets.own", "router.tickets.reprint", "router.files.own", "router.report.own"
+  ],
+  guest: [
+    "global.home", "global.routers.select", "router.home", "router.tickets.read",
+    "router.report.read", "router.network.read"
+  ]
+};
 const rateLimits = new Map();
+let smtpTransporter = null;
 
 if (HASH_SECRET.length < 32) {
   throw new Error("LICENSE_HASH_SECRET doit contenir au moins 32 caractères.");
@@ -154,6 +201,109 @@ db.exec(`
     used_at TEXT
   );
 
+  CREATE TABLE IF NOT EXISTS organizations (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending_payment', 'active', 'suspended')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS organization_users (
+    id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    email TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    phone TEXT,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('owner', 'admin', 'member')),
+    status TEXT NOT NULL CHECK(status IN ('active', 'disabled')),
+    failed_login_count INTEGER NOT NULL DEFAULT 0,
+    locked_until TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_login_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS organization_sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES organization_users(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    ip_address TEXT,
+    user_agent TEXT,
+    revoked_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS organization_password_reset_tokens (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES organization_users(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    used_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS organization_user_router_access (
+    user_id TEXT NOT NULL REFERENCES organization_users(id) ON DELETE CASCADE,
+    router_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, router_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS organization_memberships (
+    id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES organization_users(id) ON DELETE CASCADE,
+    authority_role TEXT NOT NULL CHECK(authority_role IN ('owner', 'member')),
+    app_role TEXT NOT NULL CHECK(app_role IN ('admin', 'operator', 'agent', 'guest')),
+    status TEXT NOT NULL CHECK(status IN ('active', 'disabled')),
+    router_access_mode TEXT NOT NULL CHECK(router_access_mode IN ('all', 'selected')),
+    invitation_status TEXT NOT NULL CHECK(invitation_status IN ('pending', 'accepted')),
+    created_by_user_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    accepted_at TEXT,
+    last_used_at TEXT,
+    UNIQUE (organization_id, user_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS organization_membership_router_access (
+    membership_id TEXT NOT NULL REFERENCES organization_memberships(id) ON DELETE CASCADE,
+    router_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (membership_id, router_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS organization_invitation_tokens (
+    id TEXT PRIMARY KEY,
+    membership_id TEXT NOT NULL REFERENCES organization_memberships(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    requires_password INTEGER NOT NULL DEFAULT 0,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    used_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS organization_subscriptions (
+    id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    plan_id TEXT NOT NULL,
+    plan_code TEXT NOT NULL,
+    plan_name TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('active', 'expired', 'cancelled')),
+    router_limit INTEGER NOT NULL CHECK(router_limit > 0),
+    amount INTEGER NOT NULL,
+    currency TEXT NOT NULL DEFAULT 'XOF',
+    current_period_start TEXT NOT NULL,
+    current_period_end TEXT NOT NULL,
+    payment_order_id TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS reseller_registrations (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL UNIQUE,
@@ -220,6 +370,21 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_auth_sessions_token ON auth_sessions(token_hash);
   CREATE INDEX IF NOT EXISTS idx_auth_sessions_actor ON auth_sessions(actor_type, actor_id);
   CREATE INDEX IF NOT EXISTS idx_password_reset_token ON password_reset_tokens(token_hash);
+  CREATE INDEX IF NOT EXISTS idx_organization_users_email ON organization_users(email);
+  CREATE INDEX IF NOT EXISTS idx_organization_users_organization ON organization_users(organization_id);
+  CREATE INDEX IF NOT EXISTS idx_organization_router_access_user
+    ON organization_user_router_access(user_id);
+  CREATE INDEX IF NOT EXISTS idx_organization_memberships_user
+    ON organization_memberships(user_id, status, invitation_status);
+  CREATE INDEX IF NOT EXISTS idx_organization_memberships_organization
+    ON organization_memberships(organization_id, status);
+  CREATE INDEX IF NOT EXISTS idx_membership_router_access_membership
+    ON organization_membership_router_access(membership_id);
+  CREATE INDEX IF NOT EXISTS idx_organization_invitation_token
+    ON organization_invitation_tokens(token_hash);
+  CREATE INDEX IF NOT EXISTS idx_organization_sessions_token ON organization_sessions(token_hash);
+  CREATE INDEX IF NOT EXISTS idx_organization_subscriptions_organization
+    ON organization_subscriptions(organization_id, current_period_end);
   CREATE INDEX IF NOT EXISTS idx_payment_orders_transaction ON payment_orders(transaction_id);
   CREATE INDEX IF NOT EXISTS idx_payment_orders_reseller ON payment_orders(reseller_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_payment_orders_registration ON payment_orders(reseller_registration_id);
@@ -246,11 +411,59 @@ ensureColumn("reseller_accounts", "locked_until", "TEXT");
 ensureColumn("reseller_accounts", "updated_at", "TEXT");
 ensureColumn("reseller_accounts", "last_login_at", "TEXT");
 ensureColumn("payment_orders", "reseller_registration_id", "TEXT");
+ensureColumn("payment_orders", "organization_id", "TEXT");
+ensureColumn("payment_orders", "organization_user_id", "TEXT");
+ensureColumn("organization_users", "app_role", "TEXT NOT NULL DEFAULT 'operator'");
+ensureColumn("organization_users", "router_access_mode", "TEXT NOT NULL DEFAULT 'selected'");
+ensureColumn("organization_users", "invitation_pending", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("organization_users", "created_by_user_id", "TEXT");
+ensureColumn("organization_sessions", "active_membership_id", "TEXT");
 
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_licenses_reseller ON licenses(reseller_id, status);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_reseller_accounts_email
     ON reseller_accounts(email) WHERE email IS NOT NULL;
+`);
+db.exec(`
+  UPDATE organization_users
+  SET app_role = 'admin', router_access_mode = 'all'
+  WHERE role IN ('owner', 'admin');
+
+  INSERT OR IGNORE INTO organization_memberships (
+    id, organization_id, user_id, authority_role, app_role, status,
+    router_access_mode, invitation_status, created_by_user_id,
+    created_at, updated_at, accepted_at, last_used_at
+  )
+  SELECT
+    'membership:' || organization_id || ':' || id,
+    organization_id,
+    id,
+    CASE WHEN role = 'owner' THEN 'owner' ELSE 'member' END,
+    CASE WHEN role = 'owner' THEN 'admin' ELSE app_role END,
+    status,
+    CASE WHEN role = 'owner' THEN 'all' ELSE router_access_mode END,
+    CASE WHEN invitation_pending = 1 THEN 'pending' ELSE 'accepted' END,
+    created_by_user_id,
+    created_at,
+    updated_at,
+    CASE WHEN invitation_pending = 1 THEN NULL ELSE created_at END,
+    last_login_at
+  FROM organization_users;
+
+  INSERT OR IGNORE INTO organization_membership_router_access (membership_id, router_id, created_at)
+  SELECT membership.id, access.router_id, membership.created_at
+  FROM organization_user_router_access AS access
+  JOIN organization_memberships AS membership ON membership.user_id = access.user_id;
+
+  UPDATE organization_sessions
+  SET active_membership_id = (
+    SELECT membership.id
+    FROM organization_memberships AS membership
+    WHERE membership.user_id = organization_sessions.user_id
+    ORDER BY CASE membership.authority_role WHEN 'owner' THEN 0 ELSE 1 END
+    LIMIT 1
+  )
+  WHERE active_membership_id IS NULL;
 `);
 
 const timestamp = nowIso();
@@ -270,9 +483,14 @@ const seedPlan = db.prepare(`
 db.exec("UPDATE plans SET is_reseller = 1 WHERE code LIKE 'RESELLER-%';");
 
 const statements = {
-  listPlans: db.prepare("SELECT * FROM plans WHERE is_active = 1 ORDER BY sort_order ASC, router_limit ASC"),
-  listAllPlans: db.prepare("SELECT * FROM plans ORDER BY sort_order ASC, router_limit ASC"),
+  listPlans: db.prepare("SELECT * FROM plans WHERE is_active = 1 AND is_reseller = 0 ORDER BY sort_order ASC, router_limit ASC"),
+  listAllPlans: db.prepare(`
+    SELECT * FROM plans WHERE is_reseller = 0 ORDER BY sort_order ASC, router_limit ASC
+  `),
   findPlanById: db.prepare("SELECT * FROM plans WHERE id = ?"),
+  clearRecommendedPlans: db.prepare(`
+    UPDATE plans SET is_recommended = 0, updated_at = ? WHERE id <> ? AND is_reseller = 0
+  `),
   upsertPlan: db.prepare(`
     INSERT INTO plans (
       id, code, name, description, router_limit, max_devices, duration_days,
@@ -445,6 +663,216 @@ const statements = {
     WHERE token_hash = ? AND actor_type = ? AND used_at IS NULL LIMIT 1
   `),
   consumePasswordReset: db.prepare("UPDATE password_reset_tokens SET used_at = ? WHERE id = ?"),
+  insertOrganization: db.prepare(`
+    INSERT INTO organizations (id, name, status, created_at, updated_at)
+    VALUES (?, ?, 'pending_payment', ?, ?)
+  `),
+  findOrganizationById: db.prepare("SELECT * FROM organizations WHERE id = ?"),
+  activateOrganization: db.prepare(`
+    UPDATE organizations SET status = 'active', updated_at = ? WHERE id = ?
+  `),
+  insertOrganizationUser: db.prepare(`
+    INSERT INTO organization_users (
+      id, organization_id, email, name, phone, password_hash, role, status,
+      app_role, router_access_mode, invitation_pending, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 'owner', 'active', 'admin', 'all', 0, ?, ?)
+  `),
+  insertOrganizationMember: db.prepare(`
+    INSERT INTO organization_users (
+      id, organization_id, email, name, phone, password_hash, role, status,
+      app_role, router_access_mode, invitation_pending, created_by_user_id,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 'member', 'active', ?, ?, 1, ?, ?, ?)
+  `),
+  findOrganizationUserById: db.prepare("SELECT * FROM organization_users WHERE id = ?"),
+  findOrganizationUserByEmail: db.prepare("SELECT * FROM organization_users WHERE email = ?"),
+  insertOrganizationMembership: db.prepare(`
+    INSERT INTO organization_memberships (
+      id, organization_id, user_id, authority_role, app_role, status,
+      router_access_mode, invitation_status, created_by_user_id,
+      created_at, updated_at, accepted_at
+    ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)
+  `),
+  findOrganizationMembershipById: db.prepare(`
+    SELECT * FROM organization_memberships WHERE id = ?
+  `),
+  findOrganizationMembership: db.prepare(`
+    SELECT * FROM organization_memberships WHERE organization_id = ? AND user_id = ?
+  `),
+  listAcceptedMembershipsByUser: db.prepare(`
+    SELECT membership.*, organization.name AS organization_name,
+      organization.status AS organization_status
+    FROM organization_memberships AS membership
+    JOIN organizations AS organization ON organization.id = membership.organization_id
+    WHERE membership.user_id = ? AND membership.status = 'active'
+      AND membership.invitation_status = 'accepted'
+    ORDER BY COALESCE(membership.last_used_at, membership.created_at) DESC
+  `),
+  listOrganizationMemberships: db.prepare(`
+    SELECT membership.*, user.email, user.name, user.phone, user.last_login_at,
+      user.created_at AS user_created_at
+    FROM organization_memberships AS membership
+    JOIN organization_users AS user ON user.id = membership.user_id
+    WHERE membership.organization_id = ?
+    ORDER BY CASE membership.authority_role WHEN 'owner' THEN 0 ELSE 1 END,
+      user.name COLLATE NOCASE
+  `),
+  updateOrganizationMembership: db.prepare(`
+    UPDATE organization_memberships
+    SET app_role = ?, router_access_mode = ?, status = ?, updated_at = ?
+    WHERE id = ? AND organization_id = ? AND authority_role <> 'owner'
+  `),
+  acceptOrganizationMembershipsForUser: db.prepare(`
+    UPDATE organization_memberships
+    SET invitation_status = 'accepted', accepted_at = ?, updated_at = ?
+    WHERE user_id = ? AND invitation_status = 'pending'
+  `),
+  acceptOrganizationMembership: db.prepare(`
+    UPDATE organization_memberships
+    SET invitation_status = 'accepted', accepted_at = ?, updated_at = ?
+    WHERE id = ? AND invitation_status = 'pending'
+  `),
+  touchOrganizationMembership: db.prepare(`
+    UPDATE organization_memberships SET last_used_at = ?, updated_at = ? WHERE id = ?
+  `),
+  deleteOrganizationMembership: db.prepare(`
+    DELETE FROM organization_memberships
+    WHERE id = ? AND organization_id = ? AND authority_role <> 'owner'
+  `),
+  clearMembershipRouterAccess: db.prepare(`
+    DELETE FROM organization_membership_router_access WHERE membership_id = ?
+  `),
+  insertMembershipRouterAccess: db.prepare(`
+    INSERT OR IGNORE INTO organization_membership_router_access (membership_id, router_id, created_at)
+    VALUES (?, ?, ?)
+  `),
+  listMembershipRouterAccess: db.prepare(`
+    SELECT router_id FROM organization_membership_router_access
+    WHERE membership_id = ? ORDER BY router_id
+  `),
+  insertOrganizationInvitationToken: db.prepare(`
+    INSERT INTO organization_invitation_tokens (
+      id, membership_id, token_hash, requires_password, expires_at, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `),
+  findOrganizationInvitationToken: db.prepare(`
+    SELECT token.*, membership.organization_id, membership.user_id,
+      membership.invitation_status, organization.name AS organization_name,
+      user.email, user.name
+    FROM organization_invitation_tokens AS token
+    JOIN organization_memberships AS membership ON membership.id = token.membership_id
+    JOIN organizations AS organization ON organization.id = membership.organization_id
+    JOIN organization_users AS user ON user.id = membership.user_id
+    WHERE token.token_hash = ? AND token.used_at IS NULL
+    LIMIT 1
+  `),
+  consumeOrganizationInvitationToken: db.prepare(`
+    UPDATE organization_invitation_tokens SET used_at = ? WHERE id = ?
+  `),
+  listOrganizationUsers: db.prepare(`
+    SELECT * FROM organization_users
+    WHERE organization_id = ?
+    ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END, name COLLATE NOCASE
+  `),
+  updateOrganizationMember: db.prepare(`
+    UPDATE organization_users
+    SET name = ?, app_role = ?, router_access_mode = ?, status = ?, updated_at = ?
+    WHERE id = ? AND organization_id = ? AND role <> 'owner'
+  `),
+  deleteOrganizationMember: db.prepare(`
+    DELETE FROM organization_users
+    WHERE id = ? AND organization_id = ? AND role <> 'owner'
+  `),
+  markOrganizationInvitationAccepted: db.prepare(`
+    UPDATE organization_users SET invitation_pending = 0, updated_at = ? WHERE id = ?
+  `),
+  clearOrganizationRouterAccess: db.prepare(`
+    DELETE FROM organization_user_router_access WHERE user_id = ?
+  `),
+  insertOrganizationRouterAccess: db.prepare(`
+    INSERT OR IGNORE INTO organization_user_router_access (user_id, router_id, created_at)
+    VALUES (?, ?, ?)
+  `),
+  listOrganizationRouterAccess: db.prepare(`
+    SELECT router_id FROM organization_user_router_access WHERE user_id = ? ORDER BY router_id
+  `),
+  organizationLoginSucceeded: db.prepare(`
+    UPDATE organization_users SET failed_login_count = 0, locked_until = NULL,
+      last_login_at = ?, updated_at = ? WHERE id = ?
+  `),
+  organizationLoginFailed: db.prepare(`
+    UPDATE organization_users SET failed_login_count = ?, locked_until = ?, updated_at = ? WHERE id = ?
+  `),
+  updateOrganizationIdentityName: db.prepare(`
+    UPDATE organization_users SET name = ?, updated_at = ? WHERE id = ?
+  `),
+  updateOrganizationPassword: db.prepare(`
+    UPDATE organization_users SET password_hash = ?, failed_login_count = 0,
+      locked_until = NULL, updated_at = ? WHERE id = ?
+  `),
+  insertOrganizationSession: db.prepare(`
+    INSERT INTO organization_sessions (
+      id, user_id, token_hash, created_at, expires_at, last_seen_at,
+      ip_address, user_agent, active_membership_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  findOrganizationSessionByToken: db.prepare(`
+    SELECT * FROM organization_sessions WHERE token_hash = ? AND revoked_at IS NULL LIMIT 1
+  `),
+  touchOrganizationSession: db.prepare("UPDATE organization_sessions SET last_seen_at = ? WHERE id = ?"),
+  setOrganizationSessionMembership: db.prepare(`
+    UPDATE organization_sessions SET active_membership_id = ?, last_seen_at = ? WHERE id = ?
+  `),
+  revokeOrganizationSession: db.prepare("UPDATE organization_sessions SET revoked_at = ? WHERE id = ?"),
+  revokeOrganizationUserSessions: db.prepare(`
+    UPDATE organization_sessions SET revoked_at = ?
+    WHERE user_id = ? AND revoked_at IS NULL
+  `),
+  revokeOrganizationMembershipSessions: db.prepare(`
+    UPDATE organization_sessions SET revoked_at = ?
+    WHERE active_membership_id = ? AND revoked_at IS NULL
+  `),
+  insertOrganizationPasswordReset: db.prepare(`
+    INSERT INTO organization_password_reset_tokens (
+      id, user_id, token_hash, expires_at, created_at
+    ) VALUES (?, ?, ?, ?, ?)
+  `),
+  findOrganizationPasswordReset: db.prepare(`
+    SELECT * FROM organization_password_reset_tokens
+    WHERE token_hash = ? AND used_at IS NULL LIMIT 1
+  `),
+  consumeOrganizationPasswordReset: db.prepare(`
+    UPDATE organization_password_reset_tokens SET used_at = ? WHERE id = ?
+  `),
+  insertOrganizationSubscription: db.prepare(`
+    INSERT INTO organization_subscriptions (
+      id, organization_id, plan_id, plan_code, plan_name, status, router_limit,
+      amount, currency, current_period_start, current_period_end, payment_order_id,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, 'XOF', ?, ?, ?, ?, ?)
+  `),
+  expireOrganizationSubscriptions: db.prepare(`
+    UPDATE organization_subscriptions SET status = 'expired', updated_at = ?
+    WHERE organization_id = ? AND status = 'active' AND current_period_end <= ?
+  `),
+  expireOrganizationSubscriptionById: db.prepare(`
+    UPDATE organization_subscriptions
+    SET status = 'expired', current_period_end = ?, updated_at = ?
+    WHERE id = ? AND status = 'active'
+  `),
+  findActiveOrganizationSubscription: db.prepare(`
+    SELECT * FROM organization_subscriptions
+    WHERE organization_id = ? AND status = 'active' AND current_period_end > ?
+    ORDER BY current_period_end DESC LIMIT 1
+  `),
+  findLatestOrganizationSubscription: db.prepare(`
+    SELECT * FROM organization_subscriptions
+    WHERE organization_id = ? ORDER BY current_period_end DESC LIMIT 1
+  `),
+  linkPaymentOrderOrganization: db.prepare(`
+    UPDATE payment_orders SET organization_id = ?, organization_user_id = ?, updated_at = ?
+    WHERE id = ?
+  `),
   listLicenses: db.prepare(`
     SELECT id, status, license_type, reseller_id, plan_id, plan_code, plan_name,
       duration_days, router_limit, max_devices, price_cfa, label, issued_at,
@@ -454,11 +882,12 @@ const statements = {
   insertPaymentOrder: db.prepare(`
     INSERT INTO payment_orders (
       id, transaction_id, purchaser_type, reseller_id, reseller_registration_id,
+      organization_id, organization_user_id,
       plan_id, plan_code, plan_name,
       router_limit, max_devices, duration_days, amount, currency, country, msisdn,
       customer_name, payment_type, status, fulfillment_status, access_token_hash,
       created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'XOF', 'NE', ?, ?, ?, 'pending', 'pending', ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'XOF', 'NE', ?, ?, ?, 'pending', 'pending', ?, ?, ?)
   `),
   findPaymentOrderById: db.prepare("SELECT * FROM payment_orders WHERE id = ?"),
   findPaymentOrderByTransaction: db.prepare("SELECT * FROM payment_orders WHERE transaction_id = ?"),
@@ -484,6 +913,11 @@ const statements = {
       last_checked_at = ?, updated_at = ?, failure_reason = NULL WHERE id = ?
   `),
   fulfillResellerPayment: db.prepare(`
+    UPDATE payment_orders SET status = 'succeeded', fulfillment_status = 'fulfilled',
+      paid_at = ?, fulfilled_at = ?, last_checked_at = ?, updated_at = ?,
+      failure_reason = NULL WHERE id = ?
+  `),
+  fulfillSaasPayment: db.prepare(`
     UPDATE payment_orders SET status = 'succeeded', fulfillment_status = 'fulfilled',
       paid_at = ?, fulfilled_at = ?, last_checked_at = ?, updated_at = ?,
       failure_reason = NULL WHERE id = ?
@@ -596,6 +1030,14 @@ function requireNewPassword(body, field = "new_password") {
       400,
       "Le nouveau mot de passe doit contenir au moins 12 caractères, avec majuscule, minuscule, chiffre et symbole."
     );
+  }
+  return password;
+}
+
+function requireCustomerPassword(body, field = "password") {
+  const password = String(body?.[field] ?? "");
+  if (password.length < 8 || password.length > 256) {
+    throw new HttpError(400, "Le mot de passe doit contenir au moins 8 caractères.");
   }
   return password;
 }
@@ -941,6 +1383,281 @@ function createSession(request, actorType, actorId, durationHours) {
   return { token, expires_at: expiresAt };
 }
 
+function organizationSession(request) {
+  const token = bearerToken(request);
+  if (!token) return null;
+  const session = statements.findOrganizationSessionByToken.get(hash(token));
+  if (!session) return null;
+  if (Date.parse(session.expires_at) <= Date.now()) {
+    statements.revokeOrganizationSession.run(nowIso(), session.id);
+    return null;
+  }
+  statements.touchOrganizationSession.run(nowIso(), session.id);
+  return session;
+}
+
+function createOrganizationSession(request, userId, membershipId = null, durationHours = 24 * 30) {
+  const selectedMembership = membershipId
+    ? statements.findOrganizationMembershipById.get(membershipId)
+    : statements.listAcceptedMembershipsByUser.all(userId)[0];
+  if (!selectedMembership || selectedMembership.user_id !== userId) {
+    throw new HttpError(403, "Aucune organisation active n'est associée à ce compte.");
+  }
+  const token = randomToken(40);
+  const createdAt = nowIso();
+  const expiresAt = new Date(Date.now() + durationHours * 3_600_000).toISOString();
+  statements.insertOrganizationSession.run(
+    crypto.randomUUID(),
+    userId,
+    hash(token),
+    createdAt,
+    expiresAt,
+    createdAt,
+    requestIp(request),
+    String(request.headers["user-agent"] ?? "").slice(0, 500),
+    selectedMembership.id
+  );
+  statements.touchOrganizationMembership.run(createdAt, createdAt, selectedMembership.id);
+  return { token, expires_at: expiresAt, active_membership_id: selectedMembership.id };
+}
+
+function currentOrganizationSubscription(organizationId) {
+  const timestamp = nowIso();
+  statements.expireOrganizationSubscriptions.run(timestamp, organizationId, timestamp);
+  return statements.findActiveOrganizationSubscription.get(organizationId, timestamp)
+    ?? statements.findLatestOrganizationSubscription.get(organizationId)
+    ?? null;
+}
+
+function organizationSubscriptionResponse(subscription) {
+  if (!subscription) {
+    return {
+      status: "none",
+      is_active: false,
+      router_limit: 0,
+      current_period_start: null,
+      current_period_end: null,
+      plan: null
+    };
+  }
+  const isActive = subscription.status === "active"
+    && Date.parse(subscription.current_period_end) > Date.now();
+  return {
+    id: subscription.id,
+    status: isActive ? "active" : subscription.status === "cancelled" ? "cancelled" : "expired",
+    is_active: isActive,
+    router_limit: Number(subscription.router_limit),
+    current_period_start: subscription.current_period_start,
+    current_period_end: subscription.current_period_end,
+    plan: {
+      id: subscription.plan_id,
+      code: subscription.plan_code,
+      name: subscription.plan_name,
+      price_cfa: Number(subscription.amount)
+    }
+  };
+}
+
+function normalizeOrganizationAppRole(value) {
+  const role = String(value ?? "").trim().toLowerCase();
+  if (!ORGANIZATION_APP_ROLES.has(role)) {
+    throw new HttpError(400, "Rôle employé invalide.");
+  }
+  return role;
+}
+
+function createOwnerMembership(organizationId, userId, createdAt) {
+  const membershipId = `membership:${organizationId}:${userId}`;
+  statements.insertOrganizationMembership.run(
+    membershipId,
+    organizationId,
+    userId,
+    "owner",
+    "admin",
+    "all",
+    "accepted",
+    null,
+    createdAt,
+    createdAt,
+    createdAt
+  );
+  return membershipId;
+}
+
+function organizationUserRouterAccess(membership) {
+  const mode = membership.authority_role === "owner" || membership.router_access_mode === "all"
+    ? "all"
+    : "selected";
+  return {
+    mode,
+    router_ids: mode === "all"
+      ? []
+      : statements.listMembershipRouterAccess.all(membership.id).map((item) => item.router_id)
+  };
+}
+
+function organizationUserResponse(user, membership) {
+  const appRole = membership.authority_role === "owner"
+    ? "admin"
+    : normalizeOrganizationAppRole(membership.app_role);
+  return {
+    id: user.id,
+    membership_id: membership.id,
+    organization_id: membership.organization_id,
+    email: user.email,
+    name: user.name,
+    phone: user.phone ?? null,
+    role: membership.authority_role,
+    app_role: appRole,
+    permissions: [
+      ...ORGANIZATION_ROLE_PERMISSIONS[appRole],
+      ...(membership.authority_role === "owner" ? ["global.subscription", "global.invoices"] : [])
+    ],
+    router_access: organizationUserRouterAccess(membership),
+    invitation_pending: membership.invitation_status === "pending",
+    status: membership.status,
+    created_at: user.created_at,
+    last_login_at: user.last_login_at ?? null
+  };
+}
+
+function organizationAuthResponse(user, session = null, selectedMembership = null, requireSelection = false) {
+  const membership = selectedMembership
+    ?? (session?.active_membership_id
+      ? statements.findOrganizationMembershipById.get(session.active_membership_id)
+      : statements.listAcceptedMembershipsByUser.all(user.id)[0]);
+  if (!membership || membership.user_id !== user.id) {
+    throw new HttpError(403, "Aucune organisation active n'est disponible.");
+  }
+  const organization = statements.findOrganizationById.get(membership.organization_id);
+  const subscription = currentOrganizationSubscription(membership.organization_id);
+  const memberships = statements.listAcceptedMembershipsByUser.all(user.id);
+  return {
+    ...(session ? { session } : {}),
+    user: organizationUserResponse(user, membership),
+    organization: {
+      id: organization.id,
+      name: organization.name,
+      status: organization.status
+    },
+    organizations: memberships.map((item) => ({
+      membership_id: item.id,
+      organization_id: item.organization_id,
+      organization_name: item.organization_name,
+      app_role: item.authority_role === "owner" ? "admin" : item.app_role,
+      authority_role: item.authority_role,
+      is_current: item.id === membership.id
+    })),
+    requires_organization_selection: requireSelection && memberships.length > 1,
+    subscription: organizationSubscriptionResponse(subscription),
+    access: {
+      can_manage_billing: membership.authority_role === "owner",
+      can_manage_team: membership.authority_role === "owner" || membership.app_role === "admin",
+      can_manage_routers: Boolean(subscription
+        && subscription.status === "active"
+        && Date.parse(subscription.current_period_end) > Date.now())
+    }
+  };
+}
+
+function requireOrganizationUser(request, { requireActiveSubscription = false } = {}) {
+  const session = organizationSession(request);
+  const user = session ? statements.findOrganizationUserById.get(session.user_id) : null;
+  if (!user || user.status !== "active") {
+    throw new HttpError(401, "Session TicketPro invalide.");
+  }
+  const membership = session.active_membership_id
+    ? statements.findOrganizationMembershipById.get(session.active_membership_id)
+    : null;
+  if (!membership || membership.user_id !== user.id || membership.status !== "active"
+    || membership.invitation_status !== "accepted") {
+    throw new HttpError(403, "Cette appartenance à l'organisation n'est pas active.");
+  }
+  const organization = statements.findOrganizationById.get(membership.organization_id);
+  if (!organization || organization.status === "suspended") {
+    throw new HttpError(403, "Cette organisation est suspendue.");
+  }
+  const subscription = currentOrganizationSubscription(membership.organization_id);
+  const active = Boolean(subscription
+    && subscription.status === "active"
+    && Date.parse(subscription.current_period_end) > Date.now());
+  if (requireActiveSubscription && !active) {
+    throw new HttpError(402, "Votre abonnement a expiré. Renouvelez-le pour utiliser les services TicketPro.", {
+      code: "SUBSCRIPTION_REQUIRED",
+      subscription: organizationSubscriptionResponse(subscription)
+    });
+  }
+  return { session, user, membership, organization, subscription, active };
+}
+
+function requireTeamManager(request) {
+  const context = requireOrganizationUser(request);
+  if (context.membership.authority_role !== "owner" && context.membership.app_role !== "admin") {
+    throw new HttpError(403, "Seuls le propriétaire et les administrateurs peuvent gérer l'équipe.");
+  }
+  return context;
+}
+
+function requireOrganizationPermission(request, permission, options = {}) {
+  const context = requireOrganizationUser(request, options);
+  const appRole = context.membership.authority_role === "owner"
+    ? "admin"
+    : normalizeOrganizationAppRole(context.membership.app_role);
+  const permissions = ORGANIZATION_ROLE_PERMISSIONS[appRole] ?? [];
+  if (!permissions.includes(permission)) {
+    throw new HttpError(403, "Votre rôle n'autorise pas cette action.");
+  }
+  return context;
+}
+
+function requireOrganizationMember(context, body) {
+  const userId = requireText(body, "user_id", 128);
+  const membership = statements.findOrganizationMembership.get(context.organization.id, userId);
+  const user = membership ? statements.findOrganizationUserById.get(membership.user_id) : null;
+  if (!membership || !user) {
+    throw new HttpError(404, "Employé introuvable.");
+  }
+  return { membership, user };
+}
+
+function normalizeRouterAccess(body, appRole) {
+  const requestedMode = String(body.router_access_mode ?? "selected");
+  const mode = appRole === "admin" || requestedMode === "all" ? "all" : "selected";
+  const routerIds = mode === "all"
+    ? []
+    : Array.from(new Set(
+        (Array.isArray(body.router_ids) ? body.router_ids : [])
+          .map((value) => String(value).trim())
+          .filter(Boolean)
+      )).slice(0, 10_000);
+  if (routerIds.some((routerId) => routerId.length > 200)) {
+    throw new HttpError(400, "Identifiant de routeur invalide.");
+  }
+  return { mode, routerIds };
+}
+
+function replaceOrganizationRouterAccess(membershipId, routerIds, createdAt = nowIso()) {
+  statements.clearMembershipRouterAccess.run(membershipId);
+  for (const routerId of routerIds) {
+    statements.insertMembershipRouterAccess.run(membershipId, routerId, createdAt);
+  }
+}
+
+function organizationTeamResponse(organizationId) {
+  return statements.listOrganizationMemberships.all(organizationId).map((row) => organizationUserResponse(
+    {
+      id: row.user_id,
+      email: row.email,
+      name: row.name,
+      phone: row.phone,
+      status: row.status,
+      created_at: row.user_created_at,
+      last_login_at: row.last_login_at
+    },
+    row
+  ));
+}
+
 function adminResponse(admin) {
   return {
     id: admin.id,
@@ -1144,31 +1861,73 @@ function processVerifiedPayment(request, order, payment) {
       return statements.findPaymentOrderById.get(current.id);
     }
     if (current.purchaser_type === "organization") {
-      const planSnapshot = {
-        id: current.plan_id,
-        code: current.plan_code,
-        name: current.plan_name,
-        description: "Licence achetée dans TicketPro.",
-        router_limit: Number(current.router_limit),
-        max_devices: Number(current.max_devices),
-        duration_days: Number(current.duration_days),
-        price_cfa: Number(current.amount),
-        billing_period: "custom"
-      };
-      const license = createStandardLicenseFromPlan(
-        planSnapshot,
-        current.customer_name,
-        `Paiement iPay ${current.transaction_id}`
-      );
-      statements.fulfillOrganizationPayment.run(
-        license.license_id,
-        encryptSensitive(license.key),
-        checkedAt,
-        checkedAt,
-        checkedAt,
-        checkedAt,
-        current.id
-      );
+      if (current.organization_id) {
+        const existing = statements.findActiveOrganizationSubscription.get(
+          current.organization_id,
+          checkedAt
+        );
+        const replacingTrial = existing?.plan_code === SAAS_TRIAL_PLAN_CODE;
+        if (replacingTrial) {
+          statements.expireOrganizationSubscriptionById.run(checkedAt, checkedAt, existing.id);
+        }
+        const startsAtMs = existing
+          && !replacingTrial
+          && Date.parse(existing.current_period_end) > Date.now()
+            ? Date.parse(existing.current_period_end)
+            : Date.now();
+        const startsAt = new Date(startsAtMs).toISOString();
+        const endsAt = new Date(
+          startsAtMs + Number(current.duration_days) * 86_400_000
+        ).toISOString();
+        statements.insertOrganizationSubscription.run(
+          crypto.randomUUID(),
+          current.organization_id,
+          current.plan_id,
+          current.plan_code,
+          current.plan_name,
+          Number(current.router_limit),
+          Number(current.amount),
+          startsAt,
+          endsAt,
+          current.id,
+          checkedAt,
+          checkedAt
+        );
+        statements.activateOrganization.run(checkedAt, current.organization_id);
+        statements.fulfillSaasPayment.run(
+          checkedAt,
+          checkedAt,
+          checkedAt,
+          checkedAt,
+          current.id
+        );
+      } else {
+        const planSnapshot = {
+          id: current.plan_id,
+          code: current.plan_code,
+          name: current.plan_name,
+          description: "Licence achetée dans TicketPro.",
+          router_limit: Number(current.router_limit),
+          max_devices: Number(current.max_devices),
+          duration_days: Number(current.duration_days),
+          price_cfa: Number(current.amount),
+          billing_period: "custom"
+        };
+        const license = createStandardLicenseFromPlan(
+          planSnapshot,
+          current.customer_name,
+          `Paiement iPay ${current.transaction_id}`
+        );
+        statements.fulfillOrganizationPayment.run(
+          license.license_id,
+          encryptSensitive(license.key),
+          checkedAt,
+          checkedAt,
+          checkedAt,
+          checkedAt,
+          current.id
+        );
+      }
     } else {
       let reseller = current.reseller_id ? statements.findResellerById.get(current.reseller_id) : null;
       if (!reseller && current.reseller_registration_id) {
@@ -1324,7 +2083,9 @@ function recordFailedLogin(actorType, actor) {
     : null;
   const statement = actorType === "admin"
     ? statements.adminLoginFailed
-    : statements.resellerLoginFailed;
+    : actorType === "organization"
+      ? statements.organizationLoginFailed
+      : statements.resellerLoginFailed;
   statement.run(failedCount, lockedUntil, nowIso(), actor.id);
 }
 
@@ -1376,7 +2137,152 @@ function generateTemporaryPassword() {
   return `Tp!9aA${randomToken(12)}`;
 }
 
-async function createIpayOrder(request, body, purchaserType, reseller = null, registration = null) {
+async function deliverOrganizationPasswordReset(user, resetToken, expiresAt) {
+  const transporter = getSmtpTransporter();
+  if (!transporter) return false;
+  const resetUrl = `${SAAS_PASSWORD_RESET_URL}?token=${encodeURIComponent(resetToken)}`;
+  const safeName = escapeHtml(user.name);
+  const safeResetUrl = escapeHtml(resetUrl);
+  const expiresLabel = new Intl.DateTimeFormat("fr-FR", {
+    dateStyle: "long",
+    timeStyle: "short",
+    timeZone: "Africa/Niamey"
+  }).format(new Date(expiresAt));
+  await transporter.sendMail({
+    from: { name: SMTP_FROM_NAME, address: SMTP_FROM_EMAIL },
+    to: user.email,
+    subject: "Réinitialisez votre mot de passe TicketPro",
+    text: [
+      `Bonjour ${user.name},`,
+      "",
+      "Une demande de réinitialisation a été reçue pour votre compte TicketPro.",
+      `Ouvrez ce lien : ${resetUrl}`,
+      `Ce lien expire le ${expiresLabel}.`,
+      "",
+      "Si vous n'êtes pas à l'origine de cette demande, ignorez cet email."
+    ].join("\n"),
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;color:#18202a">
+        <h1 style="font-size:24px">Réinitialisation TicketPro</h1>
+        <p>Bonjour ${safeName},</p>
+        <p>Une demande de réinitialisation a été reçue pour votre compte TicketPro.</p>
+        <p style="margin:28px 0">
+          <a href="${safeResetUrl}" style="background:#0b6bcb;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none">
+            Choisir un nouveau mot de passe
+          </a>
+        </p>
+        <p>Ce lien expire le ${escapeHtml(expiresLabel)}.</p>
+        <p style="color:#5f6b76">Si vous n'êtes pas à l'origine de cette demande, ignorez cet email.</p>
+      </div>
+    `,
+    disableFileAccess: true,
+    disableUrlAccess: true
+  });
+  return true;
+}
+
+async function deliverOrganizationInvitation(user, organization, invitationToken, expiresAt, requiresPassword) {
+  const transporter = getSmtpTransporter();
+  if (!transporter) return false;
+  const invitationUrl = `${SAAS_INVITATION_URL}?token=${encodeURIComponent(invitationToken)}`;
+  const expiresLabel = new Intl.DateTimeFormat("fr-FR", {
+    dateStyle: "long",
+    timeStyle: "short",
+    timeZone: "Africa/Niamey"
+  }).format(new Date(expiresAt));
+  const action = requiresPassword
+    ? "Accepter et créer mon mot de passe"
+    : "Accepter l'invitation";
+  await transporter.sendMail({
+    from: { name: SMTP_FROM_NAME, address: SMTP_FROM_EMAIL },
+    to: user.email,
+    subject: `${organization.name} vous invite sur TicketPro`,
+    text: [
+      `Bonjour ${user.name},`,
+      "",
+      `${organization.name} vous invite à rejoindre son espace TicketPro.`,
+      requiresPassword
+        ? "Vous créerez votre mot de passe personnel après avoir ouvert le lien."
+        : "Votre mot de passe TicketPro actuel reste inchangé.",
+      `${action} : ${invitationUrl}`,
+      `Cette invitation expire le ${expiresLabel}.`
+    ].join("\n"),
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;color:#18202a">
+        <h1 style="font-size:24px">Invitation TicketPro</h1>
+        <p>Bonjour ${escapeHtml(user.name)},</p>
+        <p><strong>${escapeHtml(organization.name)}</strong> vous invite à rejoindre son espace TicketPro.</p>
+        <p>${requiresPassword
+          ? "Vous créerez votre mot de passe personnel après avoir ouvert ce lien."
+          : "Votre mot de passe TicketPro actuel reste inchangé."}</p>
+        <p style="margin:28px 0">
+          <a href="${escapeHtml(invitationUrl)}" style="background:#0b6bcb;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none">
+            ${action}
+          </a>
+        </p>
+        <p>Cette invitation expire le ${escapeHtml(expiresLabel)}.</p>
+      </div>
+    `,
+    disableFileAccess: true,
+    disableUrlAccess: true
+  });
+  return true;
+}
+
+function smtpConfigured() {
+  return Boolean(
+    SMTP_HOST
+    && Number.isInteger(SMTP_PORT)
+    && SMTP_PORT > 0
+    && SMTP_USER
+    && SMTP_PASSWORD
+    && SMTP_FROM_EMAIL
+  );
+}
+
+function getSmtpTransporter() {
+  if (!smtpConfigured()) return null;
+  if (!smtpTransporter) {
+    smtpTransporter = nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: SMTP_PORT,
+      secure: SMTP_SECURE,
+      requireTLS: !SMTP_SECURE,
+      auth: {
+        user: SMTP_USER,
+        pass: SMTP_PASSWORD
+      },
+      tls: {
+        minVersion: "TLSv1.2",
+        rejectUnauthorized: true
+      },
+      pool: true,
+      maxConnections: 3,
+      maxMessages: 100,
+      disableFileAccess: true,
+      disableUrlAccess: true
+    });
+  }
+  return smtpTransporter;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+async function createIpayOrder(
+  request,
+  body,
+  purchaserType,
+  reseller = null,
+  registration = null,
+  organizationRegistration = null
+) {
   if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. Réessayez plus tard.");
   const plan = statements.findPlanById.get(requireText(body, "plan_id", 128));
   if (!plan || !Boolean(plan.is_active)) throw new HttpError(404, "Forfait introuvable ou inactif.");
@@ -1406,6 +2312,8 @@ async function createIpayOrder(request, body, purchaserType, reseller = null, re
     purchaserType,
     reseller?.id ?? null,
     registration?.id ?? null,
+    organizationRegistration?.organization_id ?? null,
+    organizationRegistration?.user_id ?? null,
     plan.id,
     plan.code,
     plan.name,
@@ -1416,7 +2324,7 @@ async function createIpayOrder(request, body, purchaserType, reseller = null, re
     normalizeNigerMsisdn(body.msisdn),
     purchaserType === "reseller"
       ? reseller?.name ?? registration.name
-      : requireText(body, "customer_name", 200),
+      : organizationRegistration?.organization_name ?? requireText(body, "customer_name", 200),
     requirePaymentType(body),
     hash(orderToken),
     createdAt,
@@ -1453,9 +2361,700 @@ seedDefaultAdmins();
 const handlers = [
   route("GET", "/health", async () => {
     db.prepare("SELECT 1").get();
-    return { ok: true, service: "ticketpro-license-api", database: "ok", time: nowIso() };
+    return {
+      ok: true,
+      service: "ticketpro-license-api",
+      database: "ok",
+      email: smtpConfigured() ? "configured" : "not_configured",
+      time: nowIso()
+    };
   }),
   route("GET", "/v1/plans", async () => ({ plans: statements.listPlans.all().map(planResponse) })),
+
+  route("POST", "/v1/saas/register-trial", async (request, body) => {
+    if (isRateLimited(request)) {
+      throw new HttpError(429, "Trop de tentatives. Réessayez dans quelques instants.");
+    }
+    const email = requireEmail(body);
+    const password = requireCustomerPassword(body);
+    if (password !== String(body.confirm_password ?? "")) {
+      throw new HttpError(400, "Les mots de passe ne correspondent pas.");
+    }
+    const organizationName = requireText(body, "organization_name", 200);
+    const ownerName = requireText(body, "name", 200);
+    const phone = body.phone ? String(body.phone).trim().slice(0, 40) : null;
+    const existingUser = statements.findOrganizationUserByEmail.get(email);
+    const createdAt = nowIso();
+    const expiresAt = new Date(Date.now() + SAAS_TRIAL_DAYS * 86_400_000).toISOString();
+    let organizationId;
+    let userId;
+
+    if (existingUser) {
+      const existingOrganization = statements.findOrganizationById.get(existingUser.organization_id);
+      if (!existingOrganization || existingOrganization.status !== "pending_payment") {
+        throw new HttpError(409, "Un compte existe déjà avec cet email. Connectez-vous.");
+      }
+      if (!verifyPassword(password, existingUser.password_hash)) {
+        throw new HttpError(409, "Une inscription inachevée existe déjà avec cet email.");
+      }
+      if (statements.findLatestOrganizationSubscription.get(existingOrganization.id)) {
+        throw new HttpError(409, "L'essai gratuit a déjà été utilisé pour ce compte.");
+      }
+      organizationId = existingOrganization.id;
+      userId = existingUser.id;
+    } else {
+      organizationId = crypto.randomUUID();
+      userId = crypto.randomUUID();
+    }
+
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      if (!existingUser) {
+        statements.insertOrganization.run(
+          organizationId,
+          organizationName,
+          createdAt,
+          createdAt
+        );
+        statements.insertOrganizationUser.run(
+          userId,
+          organizationId,
+          email,
+          ownerName,
+          phone,
+          hashPassword(password),
+          createdAt,
+          createdAt
+        );
+        createOwnerMembership(organizationId, userId, createdAt);
+      }
+      statements.insertOrganizationSubscription.run(
+        crypto.randomUUID(),
+        organizationId,
+        SAAS_TRIAL_PLAN_ID,
+        SAAS_TRIAL_PLAN_CODE,
+        "Essai gratuit 7 jours",
+        SAAS_TRIAL_ROUTER_LIMIT,
+        0,
+        createdAt,
+        expiresAt,
+        `trial:${organizationId}`,
+        createdAt,
+        createdAt
+      );
+      statements.activateOrganization.run(createdAt, organizationId);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      if (String(error.message).includes("UNIQUE")) {
+        throw new HttpError(409, "L'essai gratuit a déjà été utilisé pour ce compte.");
+      }
+      throw error;
+    }
+
+    const user = statements.findOrganizationUserById.get(userId);
+    const membership = statements.findOrganizationMembership.get(organizationId, userId);
+    const session = createOrganizationSession(request, userId, membership.id);
+    logEvent(request, null, "saas_trial_started", organizationId, null, {
+      organization_user_id: userId,
+      duration_days: SAAS_TRIAL_DAYS,
+      router_limit: SAAS_TRIAL_ROUTER_LIMIT
+    });
+    return organizationAuthResponse(user, session, membership);
+  }),
+
+  route("POST", "/v1/saas/register-and-pay", async (request, body) => {
+    if (isRateLimited(request)) {
+      throw new HttpError(429, "Trop de tentatives. Réessayez dans quelques instants.");
+    }
+    const email = requireEmail(body);
+    const password = requireCustomerPassword(body);
+    if (password !== String(body.confirm_password ?? "")) {
+      throw new HttpError(400, "Les mots de passe ne correspondent pas.");
+    }
+    const organizationName = requireText(body, "organization_name", 200);
+    const ownerName = requireText(body, "name", 200);
+    const phone = body.phone ? String(body.phone).trim().slice(0, 40) : null;
+    const existingUser = statements.findOrganizationUserByEmail.get(email);
+    let organizationId;
+    let userId;
+
+    if (existingUser) {
+      const existingOrganization = statements.findOrganizationById.get(existingUser.organization_id);
+      if (!existingOrganization || existingOrganization.status !== "pending_payment") {
+        throw new HttpError(409, "Un compte existe déjà avec cet email. Connectez-vous.");
+      }
+      if (!verifyPassword(password, existingUser.password_hash)) {
+        throw new HttpError(409, "Une inscription inachevée existe déjà avec cet email.");
+      }
+      organizationId = existingOrganization.id;
+      userId = existingUser.id;
+    } else {
+      organizationId = crypto.randomUUID();
+      userId = crypto.randomUUID();
+      const createdAt = nowIso();
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        statements.insertOrganization.run(
+          organizationId,
+          organizationName,
+          createdAt,
+          createdAt
+        );
+        statements.insertOrganizationUser.run(
+          userId,
+          organizationId,
+          email,
+          ownerName,
+          phone,
+          hashPassword(password),
+          createdAt,
+          createdAt
+        );
+        createOwnerMembership(organizationId, userId, createdAt);
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        if (String(error.message).includes("UNIQUE")) {
+          throw new HttpError(409, "Un compte existe déjà avec cet email.");
+        }
+        throw error;
+      }
+    }
+
+    const result = await createIpayOrder(
+      request,
+      body,
+      "organization",
+      null,
+      null,
+      {
+        organization_id: organizationId,
+        user_id: userId,
+        organization_name: organizationName
+      }
+    );
+    return {
+      ...result,
+      registration: {
+        organization_id: organizationId,
+        email,
+        next_step: "confirm_payment"
+      }
+    };
+  }),
+
+  route("POST", "/v1/saas/migrate-license", async (request, body) => {
+    if (isRateLimited(request)) {
+      throw new HttpError(429, "Trop de tentatives. Réessayez dans quelques instants.");
+    }
+    const { license } = requireLicensedDevice(body);
+    if (!license.expires_at || Date.parse(license.expires_at) <= Date.now()) {
+      throw new HttpError(402, "Cette ancienne licence a expiré. Créez un abonnement SaaS.");
+    }
+    const email = requireEmail(body);
+    if (statements.findOrganizationUserByEmail.get(email)) {
+      throw new HttpError(409, "Un compte SaaS existe déjà avec cet email. Connectez-vous.");
+    }
+    const password = requireCustomerPassword(body);
+    if (password !== String(body.confirm_password ?? "")) {
+      throw new HttpError(400, "Les mots de passe ne correspondent pas.");
+    }
+    const organizationName = requireText(body, "organization_name", 200);
+    const ownerName = requireText(body, "name", 200);
+    const organizationId = crypto.randomUUID();
+    const userId = crypto.randomUUID();
+    const createdAt = nowIso();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      statements.insertOrganization.run(
+        organizationId,
+        organizationName,
+        createdAt,
+        createdAt
+      );
+      statements.insertOrganizationUser.run(
+        userId,
+        organizationId,
+        email,
+        ownerName,
+        body.phone ? String(body.phone).trim().slice(0, 40) : null,
+        hashPassword(password),
+        createdAt,
+        createdAt
+      );
+      createOwnerMembership(organizationId, userId, createdAt);
+      statements.insertOrganizationSubscription.run(
+        crypto.randomUUID(),
+        organizationId,
+        license.plan_id ?? `legacy-${license.id}`,
+        license.plan_code ?? "LEGACY",
+        license.plan_name ?? "Abonnement migré",
+        Number(license.router_limit),
+        Number(license.price_cfa ?? 0),
+        license.activated_at ?? createdAt,
+        license.expires_at,
+        `legacy-license:${license.id}`,
+        createdAt,
+        createdAt
+      );
+      statements.activateOrganization.run(createdAt, organizationId);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      if (String(error.message).includes("UNIQUE")) {
+        throw new HttpError(409, "Cette licence ou cet email a déjà été migré.");
+      }
+      throw error;
+    }
+    const user = statements.findOrganizationUserById.get(userId);
+    const membership = statements.findOrganizationMembership.get(organizationId, userId);
+    const session = createOrganizationSession(request, userId, membership.id);
+    logEvent(request, license.id, "license_migrated_to_saas", organizationId, null, {
+      organization_user_id: userId
+    });
+    return organizationAuthResponse(user, session, membership);
+  }),
+
+  route("POST", "/v1/saas/registration/complete", async (request, body) => {
+    const order = authorizePaymentOrder(request, body);
+    if (!order.organization_id || !order.organization_user_id) {
+      throw new HttpError(400, "Cette commande ne correspond pas à une inscription SaaS.");
+    }
+    if (order.status !== "succeeded" || order.fulfillment_status !== "fulfilled") {
+      throw new HttpError(409, "Le paiement n'est pas encore confirmé.");
+    }
+    const user = statements.findOrganizationUserById.get(order.organization_user_id);
+    if (!user || user.organization_id !== order.organization_id) {
+      throw new HttpError(409, "Le compte lié au paiement est introuvable.");
+    }
+    const membership = statements.findOrganizationMembership.get(order.organization_id, user.id);
+    if (!membership) {
+      throw new HttpError(409, "L'appartenance liée au paiement est introuvable.");
+    }
+    const session = createOrganizationSession(request, user.id, membership.id);
+    return organizationAuthResponse(user, session, membership);
+  }),
+
+  route("POST", "/v1/saas/auth/login", async (request, body) => {
+    if (isRateLimited(request)) {
+      throw new HttpError(429, "Trop de tentatives. Réessayez dans quelques instants.");
+    }
+    const email = requireEmail(body);
+    const password = requirePasswordInput(body);
+    const user = statements.findOrganizationUserByEmail.get(email);
+    if (!user) throw new HttpError(401, "Email ou mot de passe incorrect.");
+    assertLoginAllowed(user);
+    if (!verifyPassword(password, user.password_hash)) {
+      recordFailedLogin("organization", user);
+      throw new HttpError(401, "Email ou mot de passe incorrect.");
+    }
+    if (user.status !== "active") throw new HttpError(403, "Ce compte est désactivé.");
+    const memberships = statements.listAcceptedMembershipsByUser.all(user.id);
+    const selectedMembership = memberships.find((item) => item.organization_status === "active")
+      ?? memberships[0];
+    if (!selectedMembership || selectedMembership.organization_status === "pending_payment") {
+      throw new HttpError(
+        403,
+        "Cette inscription n'est pas terminée. Reprenez l'inscription pour choisir l'essai gratuit ou payer un forfait."
+      );
+    }
+    const loggedAt = nowIso();
+    statements.organizationLoginSucceeded.run(loggedAt, loggedAt, user.id);
+    const session = createOrganizationSession(request, user.id, selectedMembership.id);
+    return organizationAuthResponse(
+      statements.findOrganizationUserById.get(user.id),
+      session,
+      selectedMembership,
+      memberships.length > 1
+    );
+  }),
+
+  route("GET", "/v1/saas/auth/me", async (request) => {
+    const { session, user, membership } = requireOrganizationUser(request);
+    return organizationAuthResponse(user, session, membership);
+  }),
+
+  route("POST", "/v1/saas/auth/switch-organization", async (request, body) => {
+    const session = organizationSession(request);
+    const user = session ? statements.findOrganizationUserById.get(session.user_id) : null;
+    if (!session || !user || user.status !== "active") {
+      throw new HttpError(401, "Session TicketPro invalide.");
+    }
+    const membershipId = requireText(body, "membership_id", 128);
+    const membership = statements.findOrganizationMembershipById.get(membershipId);
+    if (!membership || membership.user_id !== user.id || membership.status !== "active"
+      || membership.invitation_status !== "accepted") {
+      throw new HttpError(403, "Cette organisation n'est pas accessible.");
+    }
+    const switchedAt = nowIso();
+    statements.setOrganizationSessionMembership.run(membership.id, switchedAt, session.id);
+    statements.touchOrganizationMembership.run(switchedAt, switchedAt, membership.id);
+    return organizationAuthResponse(
+      user,
+      { ...session, active_membership_id: membership.id },
+      membership
+    );
+  }),
+
+  route("GET", "/v1/saas/team", async (request) => {
+    const { organization } = requireTeamManager(request);
+    return { members: organizationTeamResponse(organization.id) };
+  }),
+
+  route("POST", "/v1/saas/team/members", async (request, body) => {
+    const context = requireTeamManager(request);
+    const email = requireEmail(body);
+    const name = requireText(body, "name", 200);
+    const appRole = normalizeOrganizationAppRole(body.app_role);
+    if (appRole === "admin" && context.membership.authority_role !== "owner") {
+      throw new HttpError(403, "Seul le propriétaire peut créer un administrateur.");
+    }
+    const access = normalizeRouterAccess(body, appRole);
+    const createdAt = nowIso();
+    const existingUser = statements.findOrganizationUserByEmail.get(email);
+    const userId = existingUser?.id ?? crypto.randomUUID();
+    if (statements.findOrganizationMembership.get(context.organization.id, userId)) {
+      throw new HttpError(409, "Cette personne est déjà membre ou invitée dans cette organisation.");
+    }
+    const membershipId = crypto.randomUUID();
+    const invitationToken = randomToken(32);
+    const invitationExpiresAt = new Date(Date.now() + 24 * 3_600_000).toISOString();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      if (!existingUser) {
+        statements.insertOrganizationMember.run(
+          userId,
+          context.organization.id,
+          email,
+          name,
+          body.phone ? String(body.phone).trim().slice(0, 40) : null,
+          hashPassword(generateTemporaryPassword()),
+          appRole,
+          access.mode,
+          context.user.id,
+          createdAt,
+          createdAt
+        );
+      }
+      statements.insertOrganizationMembership.run(
+        membershipId,
+        context.organization.id,
+        userId,
+        "member",
+        appRole,
+        access.mode,
+        "pending",
+        context.user.id,
+        createdAt,
+        createdAt,
+        null
+      );
+      replaceOrganizationRouterAccess(membershipId, access.routerIds, createdAt);
+      statements.insertOrganizationInvitationToken.run(
+        crypto.randomUUID(),
+        membershipId,
+        hash(invitationToken),
+        existingUser ? 0 : 1,
+        invitationExpiresAt,
+        createdAt
+      );
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      if (String(error.message).includes("UNIQUE")) {
+        throw new HttpError(409, "Cette personne est déjà membre ou invitée dans cette organisation.");
+      }
+      throw error;
+    }
+    const member = statements.findOrganizationUserById.get(userId);
+    const membership = statements.findOrganizationMembershipById.get(membershipId);
+    try {
+      await deliverOrganizationInvitation(
+        member,
+        context.organization,
+        invitationToken,
+        invitationExpiresAt,
+        !existingUser
+      );
+    } catch (error) {
+      console.error("Impossible d'envoyer l'invitation employé:", error.message);
+    }
+    logEvent(request, null, "organization_member_invited", context.organization.id, null, {
+      member_id: userId,
+      app_role: appRole
+    });
+    return {
+      member: organizationUserResponse(member, membership),
+      message: existingUser
+        ? "Invitation envoyée. Le mot de passe actuel de cette personne reste inchangé."
+        : "Invitation envoyée. Cette personne créera son mot de passe en l'acceptant.",
+      ...(SAAS_EXPOSE_RESET_TOKEN ? { invitation_token: invitationToken } : {})
+    };
+  }),
+
+  route("POST", "/v1/saas/team/members/update", async (request, body) => {
+    const context = requireTeamManager(request);
+    const { membership, user: member } = requireOrganizationMember(context, body);
+    if (membership.authority_role === "owner") {
+      throw new HttpError(400, "Le compte propriétaire ne peut pas être modifié ici.");
+    }
+    if (membership.app_role === "admin" && context.membership.authority_role !== "owner") {
+      throw new HttpError(403, "Seul le propriétaire peut modifier un administrateur.");
+    }
+    const appRole = normalizeOrganizationAppRole(body.app_role ?? membership.app_role);
+    if (appRole === "admin" && context.membership.authority_role !== "owner") {
+      throw new HttpError(403, "Seul le propriétaire peut attribuer le rôle administrateur.");
+    }
+    const status = String(body.status ?? membership.status);
+    if (!["active", "disabled"].includes(status)) {
+      throw new HttpError(400, "Statut employé invalide.");
+    }
+    const access = normalizeRouterAccess(body, appRole);
+    const updatedAt = nowIso();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      statements.updateOrganizationIdentityName.run(
+        body.name ? requireText(body, "name", 200) : member.name,
+        updatedAt,
+        member.id
+      );
+      statements.updateOrganizationMembership.run(
+        appRole,
+        access.mode,
+        status,
+        updatedAt,
+        membership.id,
+        context.organization.id
+      );
+      replaceOrganizationRouterAccess(membership.id, access.routerIds, updatedAt);
+      if (status === "disabled") {
+        statements.revokeOrganizationMembershipSessions.run(updatedAt, membership.id);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    logEvent(request, null, "organization_member_updated", context.organization.id, null, {
+      member_id: member.id,
+      app_role: appRole,
+      status
+    });
+    return {
+      member: organizationUserResponse(
+        statements.findOrganizationUserById.get(member.id),
+        statements.findOrganizationMembershipById.get(membership.id)
+      )
+    };
+  }),
+
+  route("POST", "/v1/saas/team/members/resend-invitation", async (request, body) => {
+    const context = requireTeamManager(request);
+    const { membership, user: member } = requireOrganizationMember(context, body);
+    if (membership.authority_role === "owner" || membership.invitation_status !== "pending") {
+      throw new HttpError(400, "Cette invitation n'est plus en attente.");
+    }
+    const invitationToken = randomToken(32);
+    const createdAt = nowIso();
+    const expiresAt = new Date(Date.now() + 24 * 3_600_000).toISOString();
+    const requiresPassword = !member.last_login_at && member.invitation_pending;
+    statements.insertOrganizationInvitationToken.run(
+      crypto.randomUUID(),
+      membership.id,
+      hash(invitationToken),
+      requiresPassword ? 1 : 0,
+      expiresAt,
+      createdAt
+    );
+    await deliverOrganizationInvitation(member, context.organization, invitationToken, expiresAt, requiresPassword);
+    return {
+      ok: true,
+      message: "Invitation renvoyée.",
+      ...(SAAS_EXPOSE_RESET_TOKEN ? { invitation_token: invitationToken } : {})
+    };
+  }),
+
+  route("POST", "/v1/saas/team/members/remove", async (request, body) => {
+    const context = requireTeamManager(request);
+    const { membership, user: member } = requireOrganizationMember(context, body);
+    if (membership.authority_role === "owner") {
+      throw new HttpError(400, "Le propriétaire ne peut pas être supprimé.");
+    }
+    if (membership.app_role === "admin" && context.membership.authority_role !== "owner") {
+      throw new HttpError(403, "Seul le propriétaire peut supprimer un administrateur.");
+    }
+    statements.revokeOrganizationMembershipSessions.run(nowIso(), membership.id);
+    statements.deleteOrganizationMembership.run(membership.id, context.organization.id);
+    logEvent(request, null, "organization_member_removed", context.organization.id, null, {
+      member_id: member.id
+    });
+    return { ok: true };
+  }),
+
+  route("POST", "/v1/saas/invitations/inspect", async (request, body) => {
+    if (isRateLimited(request)) {
+      throw new HttpError(429, "Trop de tentatives. Réessayez dans quelques instants.");
+    }
+    const token = requireText(body, "invitation_token", 512);
+    const invitation = statements.findOrganizationInvitationToken.get(hash(token));
+    if (!invitation || invitation.invitation_status !== "pending"
+      || Date.parse(invitation.expires_at) <= Date.now()) {
+      throw new HttpError(400, "Cette invitation est invalide ou expirée.");
+    }
+    return {
+      valid: true,
+      email: invitation.email,
+      name: invitation.name,
+      organization_name: invitation.organization_name,
+      requires_password: Boolean(invitation.requires_password),
+      expires_at: invitation.expires_at
+    };
+  }),
+
+  route("POST", "/v1/saas/invitations/accept", async (request, body) => {
+    if (isRateLimited(request)) {
+      throw new HttpError(429, "Trop de tentatives. Réessayez dans quelques instants.");
+    }
+    const token = requireText(body, "invitation_token", 512);
+    const invitation = statements.findOrganizationInvitationToken.get(hash(token));
+    if (!invitation || invitation.invitation_status !== "pending"
+      || Date.parse(invitation.expires_at) <= Date.now()) {
+      throw new HttpError(400, "Cette invitation est invalide ou expirée.");
+    }
+    let password = null;
+    if (invitation.requires_password) {
+      password = requireCustomerPassword(body, "new_password");
+      if (password !== String(body.confirm_password ?? "")) {
+        throw new HttpError(400, "Les mots de passe ne correspondent pas.");
+      }
+    }
+    const acceptedAt = nowIso();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      if (password) {
+        statements.updateOrganizationPassword.run(
+          hashPassword(password),
+          acceptedAt,
+          invitation.user_id
+        );
+        statements.revokeOrganizationUserSessions.run(acceptedAt, invitation.user_id);
+      }
+      statements.acceptOrganizationMembership.run(
+        acceptedAt,
+        acceptedAt,
+        invitation.membership_id
+      );
+      statements.consumeOrganizationInvitationToken.run(acceptedAt, invitation.id);
+      statements.markOrganizationInvitationAccepted.run(acceptedAt, invitation.user_id);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    logEvent(request, null, "organization_invitation_accepted", invitation.organization_id, null, {
+      membership_id: invitation.membership_id,
+      user_id: invitation.user_id
+    });
+    return {
+      ok: true,
+      email: invitation.email,
+      organization_name: invitation.organization_name,
+      message: "Invitation acceptée. Vous pouvez maintenant vous connecter à TicketPro."
+    };
+  }),
+
+  route("POST", "/v1/saas/auth/logout", async (request) => {
+    const { session } = requireOrganizationUser(request);
+    statements.revokeOrganizationSession.run(nowIso(), session.id);
+    return { ok: true };
+  }),
+
+  route("POST", "/v1/saas/auth/forgot-password", async (request, body) => {
+    if (isRateLimited(request)) {
+      throw new HttpError(429, "Trop de tentatives. Réessayez dans quelques instants.");
+    }
+    const email = requireEmail(body);
+    const user = statements.findOrganizationUserByEmail.get(email);
+    let exposedToken = null;
+    if (user && user.status === "active") {
+      const resetToken = randomToken(32);
+      const createdAt = nowIso();
+      const expiresAt = new Date(Date.now() + 30 * 60_000).toISOString();
+      statements.insertOrganizationPasswordReset.run(
+        crypto.randomUUID(),
+        user.id,
+        hash(resetToken),
+        expiresAt,
+        createdAt
+      );
+      try {
+        await deliverOrganizationPasswordReset(user, resetToken, expiresAt);
+      } catch (error) {
+        console.error("Impossible d'envoyer l'email de réinitialisation:", error.message);
+      }
+      if (SAAS_EXPOSE_RESET_TOKEN) exposedToken = resetToken;
+    }
+    return {
+      accepted: true,
+      message: "Si ce compte existe, un lien de réinitialisation vient d'être envoyé.",
+      ...(exposedToken ? { reset_token: exposedToken } : {})
+    };
+  }),
+
+  route("POST", "/v1/saas/auth/reset-password", async (request, body) => {
+    const resetToken = requireText(body, "reset_token", 512);
+    const password = requireCustomerPassword(body, "new_password");
+    if (password !== String(body.confirm_password ?? "")) {
+      throw new HttpError(400, "Les mots de passe ne correspondent pas.");
+    }
+    const reset = statements.findOrganizationPasswordReset.get(hash(resetToken));
+    if (!reset || Date.parse(reset.expires_at) <= Date.now()) {
+      throw new HttpError(400, "Ce lien de réinitialisation est invalide ou expiré.");
+    }
+    const updatedAt = nowIso();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      statements.updateOrganizationPassword.run(hashPassword(password), updatedAt, reset.user_id);
+      statements.markOrganizationInvitationAccepted.run(updatedAt, reset.user_id);
+      statements.consumeOrganizationPasswordReset.run(updatedAt, reset.id);
+      statements.revokeOrganizationUserSessions.run(updatedAt, reset.user_id);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    return { ok: true, message: "Mot de passe modifié. Vous pouvez vous connecter." };
+  }),
+
+  route("POST", "/v1/saas/subscriptions/purchase", async (request, body) => {
+    const { user, membership, organization } = requireOrganizationUser(request);
+    if (membership.authority_role !== "owner") {
+      throw new HttpError(403, "Seul le propriétaire peut gérer l'abonnement.");
+    }
+    return createIpayOrder(
+      request,
+      body,
+      "organization",
+      null,
+      null,
+      {
+        organization_id: organization.id,
+        user_id: user.id,
+        organization_name: organization.name
+      }
+    );
+  }),
+
+  route("GET", "/v1/saas/services/access", async (request) => {
+    const context = requireOrganizationUser(request, { requireActiveSubscription: true });
+    return {
+      allowed: true,
+      organization_id: context.organization.id,
+      router_limit: Number(context.subscription.router_limit),
+      expires_at: context.subscription.current_period_end
+    };
+  }),
 
   route("POST", "/v1/payments/orders/organization", async (request, body) => {
     return createIpayOrder(request, body, "organization");
@@ -2031,6 +3630,59 @@ const handlers = [
     };
   }),
 
+  route("POST", "/v1/saas/vpn/bootstrap", async (request) => {
+    if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. Réessayez plus tard.");
+    const { organization, subscription, user } = requireOrganizationPermission(request, "global.vpn", {
+      requireActiveSubscription: true
+    });
+    const tenant = await vpnHubRequest("/v1/tenants", {
+      account_id: organization.id,
+      operator_limit: 1_000,
+      router_limit: Number(subscription.router_limit)
+    });
+    logEvent(request, null, "saas_vpn_bootstrapped", organization.id, null, {
+      organization_user_id: user.id
+    });
+    return {
+      address_pool: tenant.address_pool,
+      server_endpoint: tenant.server_endpoint,
+      server_port: tenant.server_port,
+      server_public_key: tenant.server_public_key
+    };
+  }),
+
+  route("POST", "/v1/saas/vpn/peers", async (request, body) => {
+    if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. Réessayez plus tard.");
+    const { organization, user } = requireOrganizationPermission(request, "global.vpn", {
+      requireActiveSubscription: true
+    });
+    const action = String(body.action ?? "");
+    if (!["upsert", "revoke"].includes(action)) throw new HttpError(400, "Action VPN invalide.");
+    const publicKey = requireText(body, "public_key", 128);
+    const peer = await vpnHubRequest("/v1/peers", {
+      account_id: organization.id,
+      action,
+      name: typeof body.name === "string" ? body.name.slice(0, 200) : "",
+      peer_type: body.peer_type === "operator" ? "operator" : "router",
+      persistent_keepalive: 25,
+      public_key: publicKey
+    });
+    logEvent(
+      request,
+      null,
+      action === "revoke" ? "saas_vpn_peer_revoked" : "saas_vpn_peer_upserted",
+      organization.id,
+      null,
+      { organization_user_id: user.id, public_key_hash: hash(publicKey) }
+    );
+    return {
+      address_pool: peer.address_pool ?? null,
+      assigned_address: peer.assigned_address ?? null,
+      public_key: publicKey,
+      status: peer.status
+    };
+  }),
+
   route("POST", "/v1/vpn/peers", async (request, body) => {
     if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. Réessayez plus tard.");
     const { activation, license } = requireLicensedDevice(body);
@@ -2056,20 +3708,65 @@ const handlers = [
     };
   }),
 
+  route("POST", "/v1/admin/email/test", async (request, body) => {
+    const admin = requireAdmin(request, ["owner", "admin"]);
+    const transporter = getSmtpTransporter();
+    if (!transporter) {
+      throw new HttpError(503, "Le SMTP TicketPro n'est pas encore configuré.");
+    }
+    const recipient = body.email ? requireEmail(body) : admin.email;
+    await transporter.verify();
+    const result = await transporter.sendMail({
+      from: { name: SMTP_FROM_NAME, address: SMTP_FROM_EMAIL },
+      to: recipient,
+      subject: "Test SMTP TicketPro réussi",
+      text: `Le serveur TicketPro peut envoyer des emails via le SMTP LWS.\n\nTest effectué le ${nowIso()}.`,
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto">
+          <h1>Test SMTP TicketPro réussi</h1>
+          <p>Le serveur TicketPro peut envoyer des emails via le SMTP LWS.</p>
+          <p>Test effectué le ${escapeHtml(nowIso())}.</p>
+        </div>
+      `,
+      disableFileAccess: true,
+      disableUrlAccess: true
+    });
+    logEvent(request, null, "smtp_test_sent", admin.id, null, {
+      recipient_hash: hash(recipient),
+      message_id_hash: hash(result.messageId ?? "")
+    });
+    return { ok: true, recipient };
+  }),
+
   route("POST", "/v1/admin/plans", async (request, body) => {
     requireMaster(request);
     const planId = requireText(body, "id", 128);
     const code = requireText(body, "code", 64).toUpperCase();
     const name = requireText(body, "name", 200);
     const routerLimit = requireInteger(body, "router_limit", 1, 100_000);
-    const maxDevices = requireInteger(body, "max_devices", 1, 100_000);
     const durationDays = requireInteger(body, "duration_days", 1, 3650);
     const billingPeriod = String(body.billing_period ?? "monthly");
     if (!["monthly", "yearly", "custom"].includes(billingPeriod)) {
       throw new HttpError(400, "billing_period invalide.");
     }
+    const isActive = body.is_active !== false;
+    const isReseller = Boolean(body.is_reseller);
     const existing = statements.findPlanById.get(planId);
+    // Conservé uniquement pour la compatibilité des anciennes licences.
+    // Les abonnements SaaS n'ont aucune limite de PC.
+    const maxDevices = isReseller
+      ? requireInteger(body, "max_devices", 1, 100_000)
+      : Number(existing?.max_devices ?? 100_000);
+    const priceCfa = body.price_cfa === null || body.price_cfa === undefined
+      ? null
+      : requireInteger(body, "price_cfa", 1, 1_000_000_000);
+    if (isActive && !isReseller && priceCfa === null) {
+      throw new HttpError(400, "Un forfait SaaS actif doit avoir un prix payable.");
+    }
     const now = nowIso();
+    if (body.is_recommended && !isReseller) {
+      statements.clearRecommendedPlans.run(now, planId);
+    }
     statements.upsertPlan.run(
       planId,
       code,
@@ -2078,11 +3775,11 @@ const handlers = [
       routerLimit,
       maxDevices,
       durationDays,
-      body.price_cfa === null || body.price_cfa === undefined ? null : Number(body.price_cfa),
+      priceCfa,
       billingPeriod,
       body.is_recommended ? 1 : 0,
-      body.is_active === false ? 0 : 1,
-      body.is_reseller ? 1 : 0,
+      isActive ? 1 : 0,
+      isReseller ? 1 : 0,
       Number.isInteger(Number(body.sort_order)) ? Number(body.sort_order) : 0,
       existing?.created_at ?? now,
       now

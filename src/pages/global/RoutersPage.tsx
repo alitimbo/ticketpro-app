@@ -91,7 +91,7 @@ type ScanState = {
 
 export function RoutersPage() {
   const navigate = useNavigate();
-  const { accountSession, session, userCan } = useAuth();
+  const { accountSession, saasAccount, session, userCan } = useAuth();
   const { database, isInitialized, isPersistent } = useAppDatabase();
   const accountId = accountSession?.accountId ?? session?.account_id ?? null;
   const canAddRouter = userCan("global.routers.add");
@@ -156,7 +156,12 @@ export function RoutersPage() {
     };
   }, [accountId, connectionRepository, isInitialized, isPersistent, routerRepository]);
 
-  const accountRouters = useMemo(() => listRoutersForAccount(routers, accountId), [accountId, routers]);
+  const accountRouters = useMemo(() => {
+    const scopedRouters = listRoutersForAccount(routers, accountId);
+    if (!saasAccount || saasAccount.user.router_access.mode === "all") return scopedRouters;
+    const allowed = new Set(saasAccount.user.router_access.router_ids);
+    return scopedRouters.filter((router) => allowed.has(router.id));
+  }, [accountId, routers, saasAccount]);
   const visibleRouters = useMemo(() => filterRouters(accountRouters, query, filter), [accountRouters, filter, query]);
   const subscriptionOverview = useMemo(
     () => getSubscriptionOverview(countRoutersForSubscription(accountRouters)),

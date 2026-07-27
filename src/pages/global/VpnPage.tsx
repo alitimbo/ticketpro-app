@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Download, KeyRound, Network, Plus, RefreshCw, Shield, ShieldOff } from "lucide-react";
 import { useAuth } from "../../app/auth/AuthProvider";
 import type { RouterRecord, VpnNetworkRecord, VpnPeerRecord } from "../../domain/database";
-import { LicenseStateRepository, RouterConnectionRepository, RouterRepository, useAppDatabase, VpnNetworkRepository, VpnPeerRepository } from "../../services/database";
+import { RouterConnectionRepository, RouterRepository, useAppDatabase, VpnNetworkRepository, VpnPeerRepository } from "../../services/database";
 import {
   buildOperatorWireGuardConfig,
   generateWireGuardKeyPair,
@@ -13,7 +13,7 @@ import {
   startWireGuardTunnel,
   stopWireGuardTunnel
 } from "../../services/vpn";
-import { bootstrapLicenseVpn, revokeLicenseVpnPeer, unprotectLicenseToken, upsertLicenseVpnPeer } from "../../services/licensing";
+import { bootstrapSaasVpn, revokeSaasVpnPeer, upsertSaasVpnPeer } from "../../services/saas";
 import { Badge, Button, Card, EmptyState, PageHeader } from "../../shared/ui";
 import { decryptLocalSecret } from "../../services/security/localSecrets";
 import { RouterService } from "../../services/router";
@@ -42,7 +42,6 @@ export function VpnPage() {
   const peerRepository = useMemo(() => new VpnPeerRepository(database), [database]);
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
   const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
-  const licenseRepository = useMemo(() => new LicenseStateRepository(database), [database]);
   const [network, setNetwork] = useState<VpnNetworkRecord | null>(null);
   const [peers, setPeers] = useState<VpnPeerRecord[]>([]);
   const [routers, setRouters] = useState<RouterRecord[]>([]);
@@ -83,17 +82,6 @@ export function VpnPage() {
     void load().catch((loadError: unknown) => setError(loadError instanceof Error ? loadError.message : "Impossible de charger le VPN."));
   }, [accountId, isInitialized, networkRepository, peerRepository, routerRepository]);
 
-  const getLicenseCredentials = async () => {
-    const stored = await licenseRepository.findCurrent();
-    if (!stored || stored.account_id !== accountId || stored.status !== "active") {
-      throw new Error("Une licence TicketPro active est requise pour utiliser le VPN.");
-    }
-    return {
-      activationToken: await unprotectLicenseToken(stored.activation_token_encrypted),
-      licenseId: stored.license_id
-    };
-  };
-
   const saveNetwork = async () => {
     if (!accountId) {
       setError("Compte actif introuvable.");
@@ -102,12 +90,7 @@ export function VpnPage() {
     setIsSaving(true);
     setError(null);
     try {
-      const license = await getLicenseCredentials();
-      const remote = await bootstrapLicenseVpn({
-        accountId,
-        activationToken: license.activationToken,
-        licenseId: license.licenseId
-      });
+      const remote = await bootstrapSaasVpn();
       const input = {
         id: network?.id ?? `vpn-${crypto.randomUUID()}`,
         account_id: accountId,
@@ -160,11 +143,7 @@ export function VpnPage() {
     try {
       setError(null);
       const keyPair = generateWireGuardKeyPair();
-      const license = await getLicenseCredentials();
-      const remotePeer = await upsertLicenseVpnPeer({
-        accountId,
-        activationToken: license.activationToken,
-        licenseId: license.licenseId,
+      const remotePeer = await upsertSaasVpnPeer({
         name: router.name,
         peerType: "router",
         publicKey: keyPair.publicKey
@@ -241,11 +220,7 @@ export function VpnPage() {
     } catch (peerError: unknown) {
       if (remotePublicKey) {
         try {
-          const license = await getLicenseCredentials();
-          await revokeLicenseVpnPeer({
-            accountId,
-            activationToken: license.activationToken,
-            licenseId: license.licenseId,
+          await revokeSaasVpnPeer({
             peerType: "router",
             publicKey: remotePublicKey
           });
@@ -269,11 +244,7 @@ export function VpnPage() {
       setError(null);
       const keyPair = generateWireGuardKeyPair();
       const name = operatorName.trim() || `Opérateur ${peers.filter((item) => item.peer_type === "operator").length + 1}`;
-      const license = await getLicenseCredentials();
-      const remotePeer = await upsertLicenseVpnPeer({
-        accountId,
-        activationToken: license.activationToken,
-        licenseId: license.licenseId,
+      const remotePeer = await upsertSaasVpnPeer({
         name,
         peerType: "operator",
         publicKey: keyPair.publicKey
@@ -328,11 +299,7 @@ export function VpnPage() {
     } catch (peerError: unknown) {
       if (remotePublicKey) {
         try {
-          const license = await getLicenseCredentials();
-          await revokeLicenseVpnPeer({
-            accountId,
-            activationToken: license.activationToken,
-            licenseId: license.licenseId,
+          await revokeSaasVpnPeer({
             peerType: "operator",
             publicKey: remotePublicKey
           });
@@ -349,11 +316,7 @@ export function VpnPage() {
     if (!accountId) {
       return;
     }
-    const license = await getLicenseCredentials();
-    await revokeLicenseVpnPeer({
-      accountId,
-      activationToken: license.activationToken,
-      licenseId: license.licenseId,
+    await revokeSaasVpnPeer({
       peerType: peer.peer_type,
       publicKey: peer.public_key
     });

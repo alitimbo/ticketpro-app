@@ -219,9 +219,9 @@ export function ResellerDashboardPage({ onExit }: { onExit: () => void }) {
             </label>
             <label className="form-field">Moyen de paiement
               <select value={paymentForm.paymentType} onChange={(event) => setPaymentForm({ ...paymentForm, paymentType: event.target.value as IpayPaymentType })}>
-                <option value="mobile">Orange / Moov / Zamani</option>
-                <option value="nita_online">Nita</option>
-                <option value="amanata">Amana</option>
+                <option value="mobile">Mobile Money (Airtel, Moov, Zamani)</option>
+                <option value="nita_online">MyNita</option>
+                <option value="amanata">Amanata</option>
               </select>
             </label>
           </div>

@@ -10,7 +10,6 @@ import {
   createMainAccountSession,
   createSession,
   getFirstLaunchRequired,
-  hashMainAccountPassword,
   hashProfilePassword,
   hasProfilePasswordConfigured,
   findInternalProfile,
@@ -26,9 +25,18 @@ import {
   saveMainAccountRecord,
   storeMainAccountSession,
   storeSession,
-  verifyMainAccount,
   verifyDevelopmentPassword
 } from "../../services/auth";
+import { getInternalProfilePermissions } from "../../services/auth";
+import {
+  getSaasAccount,
+  loginSaas,
+  logoutSaas,
+  readSaasSession,
+  switchSaasOrganization,
+  type SaasAuthResult
+} from "../../services/saas";
+import { completeFirstLaunch, defaultFirstLaunchState } from "../../pages/auth/firstLaunchModel";
 
 type LoginResult = {
   ok: boolean;
@@ -40,12 +48,17 @@ type AuthContextValue = {
   firstLaunchRequired: boolean;
   isAuthenticated: boolean;
   isMainAuthenticated: boolean;
+  isSubscriptionActive: boolean;
+  isSubscriptionChecked: boolean;
   loginAccount: (email: string, password: string) => Promise<LoginResult>;
   loginProfile: (role: UserRole, password: string) => Promise<LoginResult>;
   logout: () => void;
   logoutAccount: () => void;
   logoutProfile: () => void;
   session: AuthSession | null;
+  saasAccount: SaasAuthResult | null;
+  refreshSaasAccount: () => Promise<void>;
+  switchOrganization: (membershipId: string) => Promise<LoginResult>;
   touchSession: () => void;
   refreshAccountSession: () => void;
   userCan: (permission: Permission) => boolean;
@@ -72,6 +85,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return profile;
   });
   const [firstLaunchRequired] = useState(() => getFirstLaunchRequired());
+  const [saasAccount, setSaasAccount] = useState<SaasAuthResult | null>(null);
+  const [isSubscriptionChecked, setIsSubscriptionChecked] = useState(false);
 
   const logoutProfile = useCallback(() => {
     clearStoredSession();
@@ -79,15 +94,79 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logoutAccount = useCallback(() => {
+    void logoutSaas();
     clearStoredSession();
     clearMainAccountSession();
     setSession(null);
     setAccountSession(null);
+    setSaasAccount(null);
+    setIsSubscriptionChecked(false);
+  }, []);
+
+  const refreshSaasAccount = useCallback(async () => {
+    try {
+      const token = await readSaasSession();
+      if (!token) {
+        clearStoredSession();
+        clearMainAccountSession();
+        setSession(null);
+        setAccountSession(null);
+        setSaasAccount(null);
+        return;
+      }
+      const current = await getSaasAccount();
+      setSaasAccount(current);
+      const storedAccount = readMainAccountSession();
+      if (storedAccount) {
+        const restoredSession = createSession(
+          current.user.app_role,
+          current.user.email,
+          Date.now(),
+          current.user.name,
+          storedAccount.accountId,
+          current.user.permissions
+        );
+        storeSession(restoredSession);
+        setSession(restoredSession);
+      }
+    } catch {
+      setSaasAccount(null);
+    } finally {
+      setIsSubscriptionChecked(true);
+    }
   }, []);
 
   const refreshAccountSessionFromStorage = useCallback(() => {
     const stored = readMainAccountSession();
     setAccountSession(stored);
+  }, []);
+
+  const selectOrganization = useCallback(async (membershipId: string): Promise<LoginResult> => {
+    try {
+      const selected = await switchSaasOrganization(membershipId);
+      setSaasAccount(selected);
+      const storedAccount = readMainAccountSession();
+      if (!storedAccount) return { ok: false, message: "Session locale introuvable." };
+      const updatedAccount = { ...storedAccount, companyLabel: selected.organization.name };
+      storeMainAccountSession(updatedAccount);
+      setAccountSession(updatedAccount);
+      const selectedSession = createSession(
+        selected.user.app_role,
+        selected.user.email,
+        Date.now(),
+        selected.user.name,
+        updatedAccount.accountId,
+        selected.user.permissions
+      );
+      storeSession(selectedSession);
+      setSession(selectedSession);
+      return { ok: true };
+    } catch (error) {
+      return {
+        ok: false,
+        message: error instanceof Error ? error.message : "Changement d'organisation impossible."
+      };
+    }
   }, []);
 
   const touchSession = useCallback(() => {
@@ -133,15 +212,61 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     const normalizedEmail = email.trim().toLowerCase();
-    const persistentAccount = isPersistent ? await accountRepository.findByEmail(normalizedEmail) : null;
-    const isValid = persistentAccount
-      ? persistentAccount.status !== "suspended" &&
-        persistentAccount.status !== "expired" &&
-        (await hashMainAccountPassword(normalizedEmail, password)) === persistentAccount.password_hash
-      : await verifyMainAccount(email, password);
+    let saasAccount;
+    try {
+      saasAccount = await loginSaas(normalizedEmail, password);
+      setSaasAccount(saasAccount);
+      setIsSubscriptionChecked(true);
+    } catch (error) {
+      return {
+        ok: false,
+        message: error instanceof Error ? error.message : "Connexion TicketPro impossible."
+      };
+    }
 
-    if (!isValid) {
-      return { ok: false, message: "Compte principal ou mot de passe incorrect." };
+    let persistentAccount = isPersistent ? await accountRepository.findByEmail(normalizedEmail) : null;
+    if (!persistentAccount) {
+      await completeFirstLaunch(
+        {
+          ...defaultFirstLaunchState,
+          account: {
+            companyName: saasAccount.organization.name,
+            confirmPassword: password,
+            email: normalizedEmail,
+            password,
+            phone: saasAccount.user.phone ?? ""
+          },
+          profilePasswords: {
+            admin: password,
+            agent: "",
+            guest: "",
+            operator: ""
+          },
+          selectedPlanId: saasAccount.subscription.plan?.id ?? defaultFirstLaunchState.selectedPlanId,
+          subscriptionStatus: "active_manual"
+        },
+        isPersistent ? database : undefined,
+        saasAccount.subscription.plan
+          ? {
+              billingPeriod: "monthly",
+              description: "Abonnement SaaS TicketPro.",
+              durationDays: Math.max(
+                1,
+                Math.ceil(
+                  ((Date.parse(saasAccount.subscription.current_period_end ?? "") || Date.now()) - Date.now())
+                    / 86_400_000
+                )
+              ),
+              maxDevices: 100,
+              planCode: saasAccount.subscription.plan.code,
+              planId: saasAccount.subscription.plan.id,
+              planName: saasAccount.subscription.plan.name,
+              priceCfa: saasAccount.subscription.plan.price_cfa,
+              routerLimit: Math.max(1, saasAccount.subscription.router_limit)
+            }
+          : undefined
+      );
+      persistentAccount = isPersistent ? await accountRepository.findByEmail(normalizedEmail) : null;
     }
 
     if (persistentAccount) {
@@ -154,17 +279,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         internalProfileId: null,
         message: "Connexion au compte principal réussie."
       });
-    } else {
-      recordMainAccountLogin(email);
-    }
+    } else recordMainAccountLogin(email);
     const nextAccountSession = createMainAccountSession(email);
     storeMainAccountSession(nextAccountSession);
     setAccountSession(nextAccountSession);
-    clearStoredSession();
-    setSession(null);
+    if (saasAccount.requires_organization_selection) {
+      clearStoredSession();
+      setSession(null);
+    } else {
+      const localRole: UserRole = saasAccount.user.app_role;
+      const nextSession = createSession(
+        localRole,
+        normalizedEmail,
+        Date.now(),
+        saasAccount.user.name,
+        nextAccountSession.accountId,
+        saasAccount.user.permissions
+      );
+      storeSession(nextSession);
+      setSession(nextSession);
+    }
 
     return { ok: true };
-  }, [accountRepository, auditLogService, isInitialized, isPersistent]);
+  }, [accountRepository, auditLogService, database, isInitialized, isPersistent]);
+
+  useEffect(() => {
+    if (!accountSession) {
+      setIsSubscriptionChecked(false);
+      setSaasAccount(null);
+      return;
+    }
+    void refreshSaasAccount();
+  }, [accountSession?.accountId, refreshSaasAccount]);
 
   const loginProfile = useCallback(async (role: UserRole, password: string): Promise<LoginResult> => {
     if (!accountSession) {
@@ -288,12 +434,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       firstLaunchRequired,
       isAuthenticated: Boolean(session),
       isMainAuthenticated: Boolean(accountSession),
+      isSubscriptionActive: Boolean(saasAccount?.subscription.is_active),
+      isSubscriptionChecked,
       loginAccount,
       loginProfile,
       logout: logoutAccount,
       logoutAccount,
       logoutProfile,
       session,
+      saasAccount,
+      refreshSaasAccount,
+      switchOrganization: selectOrganization,
       touchSession,
       refreshAccountSession: refreshAccountSessionFromStorage,
       userCan: (permission) => Boolean(session?.permissions.includes(permission)),
@@ -303,11 +454,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [
       accountSession,
       firstLaunchRequired,
+      isSubscriptionChecked,
       loginAccount,
       loginProfile,
       logoutAccount,
       logoutProfile,
       refreshAccountSessionFromStorage,
+      refreshSaasAccount,
+      selectOrganization,
+      saasAccount,
       session,
       touchSession
     ]

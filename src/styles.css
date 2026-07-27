@@ -80,14 +80,10 @@ a {
 }
 
 .sidebar__mark {
-  display: grid;
-  place-items: center;
   width: 40px;
   height: 40px;
-  border-radius: var(--radius-md);
-  color: #ffffff;
-  background: linear-gradient(145deg, var(--color-primary), var(--color-primary-strong));
-  font-weight: 800;
+  flex: 0 0 40px;
+  object-fit: contain;
 }
 
 .sidebar__title {
@@ -2069,6 +2065,12 @@ a {
 .toggle-option span {
   color: var(--color-text);
   font-weight: 800;
+}
+
+.team-dialog {
+  width: min(760px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
 }
 
 .summary-grid {
