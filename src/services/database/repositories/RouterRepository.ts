@@ -100,6 +100,39 @@ export class RouterRepository {
     return updated;
   }
 
+  async remove(accountId: string, routerId: string): Promise<void> {
+    const activePeers = await this.database.query<{ count: number }>(
+      `SELECT COUNT(*) AS count
+       FROM vpn_peers
+       WHERE account_id = ?1 AND router_id = ?2 AND status <> 'revoked'`,
+      [accountId, routerId]
+    );
+
+    if (Number(activePeers[0]?.count ?? 0) > 0) {
+      throw new Error("Révoquez d'abord le pair VPN de ce routeur avant de le supprimer.");
+    }
+
+    const now = new Date().toISOString();
+    const results = await this.database.transaction([
+      {
+        params: [now, now, routerId, accountId],
+        sql: `UPDATE routers
+              SET deleted_at = ?1, updated_at = ?2, status = 'offline', subscription_counted = 0
+              WHERE id = ?3 AND account_id = ?4 AND deleted_at IS NULL`
+      },
+      {
+        params: [now, now, routerId],
+        sql: `UPDATE router_connections
+              SET deleted_at = ?1, updated_at = ?2, status = 'inactive'
+              WHERE router_id = ?3 AND deleted_at IS NULL`
+      }
+    ]);
+
+    if ((results[0]?.rowsAffected ?? 0) === 0) {
+      throw new Error("Le routeur est introuvable ou a déjà été supprimé.");
+    }
+  }
+
   async recordConnectionTest(input: {
     accountId: string;
     internalProfileId: string;
