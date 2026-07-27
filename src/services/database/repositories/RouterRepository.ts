@@ -63,7 +63,6 @@ export class RouterRepository {
 
   async update(input: CreateRouterInput): Promise<RouterRecord> {
     assertAccountProfileOwnership(input.account_id, input.created_by_profile_id);
-
     await this.database.execute(
       `UPDATE routers SET
         name = ?1, label = ?2, model = ?3, board_name = ?4, serial_number = ?5,
@@ -145,7 +144,6 @@ export class RouterRepository {
     assertAccountProfileOwnership(input.accountId, input.internalProfileId);
 
     const routerStatus = input.status === "connected" ? "active" : input.status;
-    const connectionId = `${input.routerId}:${input.mode === "local" ? "local" : "remote"}`;
     const statements: DatabaseStatement[] = [
       {
         params: [routerStatus, input.checkedAt, input.routerId, input.accountId],
@@ -155,10 +153,13 @@ export class RouterRepository {
         params: [
           input.status === "connected" ? "active" : "inactive",
           input.errorMessage,
+          input.checkedAt,
           input.routerId,
-          connectionId
+          input.mode
         ],
-        sql: "UPDATE router_connections SET status = ?1, last_error = ?2 WHERE id = ?4 AND router_id = ?3"
+        sql: `UPDATE router_connections
+              SET status = ?1, last_error = ?2, updated_at = ?3
+              WHERE router_id = ?4 AND mode = ?5 AND deleted_at IS NULL`
       }
     ];
 
@@ -169,8 +170,10 @@ export class RouterRepository {
           sql: "UPDATE routers SET last_seen_at = ?1 WHERE id = ?2 AND account_id = ?3"
         },
         {
-          params: [input.checkedAt, connectionId],
-          sql: "UPDATE router_connections SET last_connected_at = ?1 WHERE id = ?2"
+          params: [input.checkedAt, input.checkedAt, input.routerId, input.mode],
+          sql: `UPDATE router_connections
+                SET last_connected_at = ?1, updated_at = ?2
+                WHERE router_id = ?3 AND mode = ?4 AND deleted_at IS NULL`
         }
       );
     }
