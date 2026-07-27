@@ -104,7 +104,11 @@ async function selectReachableAdapter(
 }
 
 function orderConnections(router: RouterRecord, storedConnections: RouterConnectionRecord[]): RouterConnectionRecord[] {
-  const connections = [...storedConnections];
+  const connections = storedConnections.map((connection) =>
+    connection.mode === "vpn"
+      ? { ...connection, port: 8728, use_ssl: 0 }
+      : connection
+  );
   if (!connections.some((connection) => connection.mode === "local")) {
     connections.push({
       created_at: "",
