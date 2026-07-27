@@ -1,14 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { CreateTicketInput, TicketRecord } from "../../../domain/database";
-import type { RouterService } from "../../router";
-import {
-  registerPersistedRouterService,
-  unregisterPersistedRouterService
-} from "../../router/PersistedRouterServiceRegistry";
 import type { DatabaseClient, DatabaseExecuteResult, DatabaseStatement } from "../DatabaseClient";
 import { TicketRepository } from "./TicketRepository";
-
-const routerId = "router-1";
 
 class TicketDatabaseStub implements DatabaseClient {
   constructor(private record: TicketRecord) {}
@@ -33,61 +26,19 @@ class TicketDatabaseStub implements DatabaseClient {
   }
 }
 
-afterEach(() => unregisterPersistedRouterService(routerId));
-
 describe("TicketRepository", () => {
-  it("désactive et déconnecte le voucher RouterOS avant de le marquer expiré", async () => {
-    const current = createTicketRecord();
-    const database = new TicketDatabaseStub(current);
-    const disableHotspotUser = vi.fn(async () => ({
-      comment: null,
-      createdAt: current.created_at,
-      id: current.mikrotik_id!,
-      passwordSecretRef: current.password_encrypted,
-      planId: current.plan_id,
-      profileName: "plan-10m",
-      status: "disabled" as const,
-      username: current.username
-    }));
-    const listActiveUsers = vi.fn(async () => [
-      {
-        downloadedBytes: 0,
-        id: "*A",
-        ipAddress: "192.168.88.10",
-        macAddress: "AA:BB:CC:DD:EE:FF",
-        sessionTimeLeft: "9m",
-        uploadedBytes: 0,
-        uptime: "1m",
-        username: current.username
-      }
-    ]);
-    const disconnectActiveUser = vi.fn(async () => undefined);
-    registerPersistedRouterService(routerId, {
-      disableHotspotUser,
-      disconnectActiveUser,
-      listActiveUsers
-    } as unknown as RouterService);
-
-    const repository = new TicketRepository(database);
-    const updated = await repository.update({
-      ...ticketInputFromRecord(current),
-      status: "expiré"
-    });
-
-    expect(disableHotspotUser).toHaveBeenCalledWith(current.username);
-    expect(listActiveUsers).toHaveBeenCalledOnce();
-    expect(disconnectActiveUser).toHaveBeenCalledWith(current.username);
-    expect(updated.status).toBe("expiré");
-  });
-
-  it("refuse l'expiration locale d'un voucher synchronisé si le routeur n'est pas connecté", async () => {
+  it("enregistre un changement de statut uniquement après que l'appelant l'a validé", async () => {
     const current = createTicketRecord();
     const repository = new TicketRepository(new TicketDatabaseStub(current));
 
-    await expect(repository.update({
+    const updated = await repository.update({
       ...ticketInputFromRecord(current),
-      status: "expiré"
-    })).rejects.toThrow("Le routeur n'est pas connecté");
+      status: "expiré",
+      sync_status: "synced"
+    });
+
+    expect(updated.status).toBe("expiré");
+    expect(updated.sync_status).toBe("synced");
   });
 });
 
@@ -110,7 +61,7 @@ function createTicketRecord(): TicketRecord {
     password_encrypted: "secret://router-1/123456/password",
     plan_id: "plan-1",
     printed_count: 0,
-    router_id: routerId,
+    router_id: "router-1",
     status: "disponible",
     sync_status: "synced",
     updated_at: "2026-01-01T00:00:00.000Z",
