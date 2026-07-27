@@ -4,6 +4,7 @@ export {
   normalizeTicketPrefix,
   secretRefForTicket
 } from "./TicketCodeGenerator";
+export { VoucherActionService } from "./VoucherActionService";
 export type {
   ExistingTicketLike,
   GeneratedTicketCode,
