@@ -1,5 +1,4 @@
 import type { CreateTicketInput, TicketRecord } from "../../../domain/database";
-import { getPersistedRouterService } from "../../router/PersistedRouterServiceRegistry";
 import type { DatabaseClient } from "../DatabaseClient";
 import { assertAccountProfileOwnership } from "../ownership";
 
@@ -41,11 +40,7 @@ export class TicketRepository {
     );
 
     const created = await this.findById(input.id);
-
-    if (!created) {
-      throw new Error("Le ticket n'a pas pu être créé.");
-    }
-
+    if (!created) throw new Error("Le ticket n'a pas pu être créé.");
     return created;
   }
 
@@ -56,27 +51,6 @@ export class TicketRepository {
 
   async update(input: CreateTicketInput): Promise<TicketRecord> {
     assertAccountProfileOwnership(input.account_id, input.created_by_profile_id);
-    const current = await this.findById(input.id);
-
-    if (shouldDisableOnRouter(current, input)) {
-      const service = getPersistedRouterService(input.router_id);
-      if (!service) {
-        throw new Error("Le routeur n'est pas connecté. Le voucher n'a pas été désactivé.");
-      }
-
-      await service.disableHotspotUser(input.username);
-
-      try {
-        const activeUsers = await service.listActiveUsers();
-        if (activeUsers.some((user) => user.username === input.username)) {
-          await service.disconnectActiveUser(input.username);
-        }
-      } catch {
-        // Le compte Hotspot est déjà désactivé. Une session encore active sera
-        // éliminée au prochain contrôle ou à l'expiration de la session.
-      }
-    }
-
     await this.database.execute(
       `UPDATE tickets SET
         status = ?1, mac_address = ?2, ip_address = ?3, activated_at = ?4, completed_at = ?5,
@@ -103,18 +77,12 @@ export class TicketRepository {
     );
 
     const updated = await this.findById(input.id);
-
-    if (!updated) {
-      throw new Error("Le ticket n'a pas pu être mis à jour.");
-    }
-
+    if (!updated) throw new Error("Le ticket n'a pas pu être mis à jour.");
     return updated;
   }
 
   async listByBatch(batchId: string): Promise<TicketRecord[]> {
-    return this.database.query<TicketRecord>("SELECT * FROM tickets WHERE batch_id = ?1 ORDER BY created_at ASC", [
-      batchId
-    ]);
+    return this.database.query<TicketRecord>("SELECT * FROM tickets WHERE batch_id = ?1 ORDER BY created_at ASC", [batchId]);
   }
 
   async listByRouter(routerId: string): Promise<TicketRecord[]> {
@@ -131,19 +99,9 @@ export class TicketRepository {
         [accountId, profileId]
       );
     }
-
     return this.database.query<TicketRecord>(
       "SELECT * FROM tickets WHERE account_id = ?1 AND deleted_at IS NULL ORDER BY created_at DESC",
       [accountId]
     );
   }
-}
-
-function shouldDisableOnRouter(current: TicketRecord | null, input: CreateTicketInput): boolean {
-  return Boolean(
-    current &&
-      current.status !== "expiré" &&
-      input.status === "expiré" &&
-      current.mikrotik_id
-  );
 }
