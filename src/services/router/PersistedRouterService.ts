@@ -5,7 +5,6 @@ import { DatabaseRouterActionLogger } from "../logging";
 import { decryptLocalSecret, isEncryptedLocalSecret } from "../security/localSecrets";
 import { MikroTikRouterAdapter } from "./MikroTikRouterAdapter";
 import { PersistedPlanMappingRouterAdapter } from "./PersistedPlanMappingRouterAdapter";
-import { registerPersistedRouterService } from "./PersistedRouterServiceRegistry";
 import type { RouterAdapter } from "./RouterAdapter";
 import { RouterService, type RouterActionLogger } from "./RouterService";
 
@@ -41,21 +40,18 @@ export async function createPersistedRouterService(input: {
   const adapter: RouterAdapter = plans.length > 0
     ? new PersistedPlanMappingRouterAdapter(mikrotikAdapter, plans)
     : mikrotikAdapter;
-  const service = new RouterService({
+
+  return new RouterService({
     adapter,
     authSession: input.authSession,
     logger
   });
-
-  registerPersistedRouterService(router.id, service);
-  return service;
 }
 
 async function resolvePersistedRouterPassword(value: string): Promise<string> {
   if (!isEncryptedLocalSecret(value)) {
     throw new Error("Le mot de passe du routeur doit être ressaisi avant la synchronisation.");
   }
-
   return decryptLocalSecret(value);
 }
 
@@ -86,17 +82,15 @@ async function selectReachableAdapter(
     username: router.username
   });
 
-  if (adapters.length <= 1) {
-    return fallback;
-  }
+  if (adapters.length <= 1) return fallback;
 
   for (const adapter of adapters) {
     try {
       await adapter.testConnection();
       return adapter;
     } catch {
-      // Try the next known endpoint. The chosen adapter will still expose the
-      // exact RouterOS error when the page performs its requested operation.
+      // Try the next known endpoint. The selected adapter exposes the exact
+      // RouterOS error when the requested action is executed.
     }
   }
 
@@ -105,9 +99,7 @@ async function selectReachableAdapter(
 
 function orderConnections(router: RouterRecord, storedConnections: RouterConnectionRecord[]): RouterConnectionRecord[] {
   const connections = storedConnections.map((connection) =>
-    connection.mode === "vpn"
-      ? { ...connection, port: 8728, use_ssl: 0 }
-      : connection
+    connection.mode === "vpn" ? { ...connection, port: 8728, use_ssl: 0 } : connection
   );
   if (!connections.some((connection) => connection.mode === "local")) {
     connections.push({
