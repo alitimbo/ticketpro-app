@@ -123,63 +123,29 @@ export function filterTickets(tickets: TicketListItem[], filters: TicketFilters)
   const to = filters.dateTo ? endOfDay(filters.dateTo) : null;
 
   return tickets.filter((ticket) => {
+    if (ticket.status === "supprimé" && filters.status !== "supprimé") return false;
+
     const createdAt = new Date(ticket.createdAt).getTime();
-
-    if (from !== null && createdAt < from) {
-      return false;
-    }
-
-    if (to !== null && createdAt > to) {
-      return false;
-    }
-
-    if (filters.planId && ticket.planId !== filters.planId) {
-      return false;
-    }
-
-    if (filters.operatorProfile && ticket.operatorProfile !== filters.operatorProfile) {
-      return false;
-    }
-
-    if (filters.status && ticket.status !== filters.status) {
-      return false;
-    }
-
-    if (filters.batchId && ticket.batchId !== filters.batchId) {
-      return false;
-    }
-
-    if (filters.routerId && ticket.routerId !== filters.routerId) {
-      return false;
-    }
-
-    if (code && !normalizeSearch(ticket.code).includes(code)) {
-      return false;
-    }
-
-    if (mac && !normalizeSearch(ticket.macAddress ?? "").includes(mac)) {
-      return false;
-    }
-
+    if (from !== null && createdAt < from) return false;
+    if (to !== null && createdAt > to) return false;
+    if (filters.planId && ticket.planId !== filters.planId) return false;
+    if (filters.operatorProfile && ticket.operatorProfile !== filters.operatorProfile) return false;
+    if (filters.status && ticket.status !== filters.status) return false;
+    if (filters.batchId && ticket.batchId !== filters.batchId) return false;
+    if (filters.routerId && ticket.routerId !== filters.routerId) return false;
+    if (code && !normalizeSearch(ticket.code).includes(code)) return false;
+    if (mac && !normalizeSearch(ticket.macAddress ?? "").includes(mac)) return false;
     return true;
   });
 }
 
 export function scopeTicketsForSession(tickets: TicketListItem[], session: AuthSession | null | undefined): TicketListItem[] {
-  if (!session) {
-    return [];
-  }
-
+  if (!session) return [];
   const accountTickets = tickets.filter((ticket) => ticket.accountId === session.account_id);
-
-  if (session.permissions.includes("router.tickets.read")) {
-    return accountTickets;
-  }
-
+  if (session.permissions.includes("router.tickets.read")) return accountTickets;
   if (session.permissions.includes("router.tickets.own")) {
     return accountTickets.filter((ticket) => ticket.createdByProfileId === session.internal_profile_id);
   }
-
   return [];
 }
 
@@ -243,6 +209,15 @@ export function buildTicketLifecycleLogs(ticket: TicketListItem): TicketLifecycl
     });
   }
 
+  if (ticket.status === "supprimé") {
+    logs.push({
+      createdAt: ticket.createdAt,
+      id: `${ticket.id}-deleted`,
+      level: "warning",
+      message: "Ticket supprimé de RouterOS et masqué de la liste active."
+    });
+  }
+
   if (ticket.status === "erreur_sync") {
     logs.push({
       createdAt: ticket.createdAt,
@@ -261,7 +236,7 @@ export function buildTicketLifecycleLogs(ticket: TicketListItem): TicketLifecycl
     });
   }
 
-  return logs.sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime());
+  return logs;
 }
 
 export function ticketStatusLabel(status: TicketListStatus): string {
@@ -274,187 +249,57 @@ export function ticketStatusLabel(status: TicketListStatus): string {
     imprimé: "Imprimé",
     supprimé: "Supprimé"
   };
-
   return labels[status];
 }
 
 export function ticketStatusToBadge(status: TicketListStatus): AppStatus {
-  if (status === "erreur_sync") {
-    return "error";
-  }
-
-  if (status === "activé") {
-    return "active";
-  }
-
-  if (status === "disponible" || status === "complété") {
-    return "success";
-  }
-
-  if (status === "imprimé") {
-    return "warning";
-  }
-
+  if (status === "erreur_sync") return "error";
+  if (status === "activé") return "active";
+  if (status === "imprimé") return "warning";
+  if (status === "disponible" || status === "complété") return "success";
   return "offline";
 }
 
+export function formatBytes(value: number): string {
+  if (value <= 0) return "0 octet";
+  if (value < 1024) return `${value} octets`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} Ko`;
+  if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} Mo`;
+  return `${(value / (1024 * 1024 * 1024)).toFixed(1)} Go`;
+}
+
+export function formatDataLimit(value: number | null): string {
+  return value === null ? "Illimité" : `${value} Mo`;
+}
+
 export function formatDuration(minutes: number): string {
-  if (minutes >= 1440 && minutes % 1440 === 0) {
-    return `${minutes / 1440} j`;
-  }
-
-  if (minutes >= 60 && minutes % 60 === 0) {
-    return `${minutes / 60} h`;
-  }
-
+  if (minutes <= 0) return "Non définie";
+  if (minutes % 1440 === 0) return `${minutes / 1440} j`;
+  if (minutes % 60 === 0) return `${minutes / 60} h`;
   return `${minutes} min`;
 }
 
-export function formatDataLimit(megabytes: number | null): string {
-  if (megabytes === null) {
-    return "Illimité";
-  }
-
-  if (megabytes >= 1024 && megabytes % 1024 === 0) {
-    return `${megabytes / 1024} Go`;
-  }
-
-  return `${megabytes} MB`;
-}
-
-export function formatBytes(bytes: number): string {
-  if (bytes <= 0) {
-    return "0 MB";
-  }
-
-  const megabytes = bytes / 1024 / 1024;
-
-  if (megabytes >= 1024) {
-    return `${(megabytes / 1024).toFixed(1)} Go`;
-  }
-
-  return `${Math.round(megabytes)} MB`;
-}
-
 export function formatDateTime(value: string | null): string {
-  if (!value) {
-    return "Non disponible";
-  }
-
+  if (!value) return "Non disponible";
   const date = new Date(value);
-  const year = date.getFullYear();
-  const month = padDatePart(date.getMonth() + 1);
-  const day = padDatePart(date.getDate());
-  const hours = padDatePart(date.getHours());
-  const minutes = padDatePart(date.getMinutes());
-  const seconds = padDatePart(date.getSeconds());
-
-  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
-}
-
-export function createDemoTickets(): TicketListItem[] {
-  const plans = [
-    { dataLimitMb: null, duration: 1440, id: "plan-jour", name: "Journée", validity: 1440 },
-    { dataLimitMb: 2048, duration: 180, id: "plan-3h", name: "3h-2Go", validity: 300 },
-    { dataLimitMb: 1024, duration: 60, id: "plan-1h", name: "1h", validity: 180 }
-  ];
-  const statuses: TicketListStatus[] = [
-    "disponible",
-    "imprimé",
-    "activé",
-    "complété",
-    "expiré",
-    "erreur_sync"
-  ];
-  const now = new Date("2026-07-08T10:00:00.000Z").getTime();
-  const demoCodes = createDemoTicketCodes(64);
-
-  return Array.from({ length: 64 }, (_, index) => {
-    const plan = plans[index % plans.length];
-    const status = statuses[index % statuses.length];
-    const createdAt = new Date(now - index * 43 * 60 * 1000).toISOString();
-    const activatedAt =
-      status === "activé" || status === "complété" || status === "expiré"
-        ? new Date(new Date(createdAt).getTime() + 15 * 60 * 1000).toISOString()
-        : null;
-    const expiresAt = activatedAt ? new Date(new Date(activatedAt).getTime() + plan.validity * 60 * 1000).toISOString() : null;
-
-    return {
-      accountId: index % 13 === 0 ? "account-autre-demo" : "account-douma-demo",
-      activatedAt,
-      batchId: index < 24 ? "batch-jour-20" : index < 48 ? "batch-3h-30" : "batch-agent-14",
-      code: demoCodes[index],
-      completedAt: status === "complété" ? expiresAt : null,
-      createdAt,
-      dataLimitMb: plan.dataLimitMb,
-      downloadedBytes: status === "activé" || status === "complété" ? (index + 1) * 18_874_368 : 0,
-      expiresAt,
-      generatedFileName: index % 4 !== 3 ? `tickets-${index < 24 ? "jour" : index < 48 ? "3h" : "agent"}.pdf` : null,
-      hasPdf: index % 4 !== 3,
-      id: `ticket-demo-${String(index + 1).padStart(3, "0")}`,
-      ipAddress: status === "activé" ? `192.168.88.${20 + index}` : null,
-      macAddress: status === "activé" ? `A8:6B:AD:73:11:${String(index).padStart(2, "0")}` : null,
-      mikrotikId: status === "disponible" ? null : `*${1000 + index}`,
-      operatorProfile: index % 5 === 0 ? "agent" : "operator",
-      passwordSecretRef: `secret://routeur-demo/${demoCodes[index]}/password`,
-      createdByProfileId:
-        index % 5 === 0
-          ? "account-douma-demo:internal-profile-agent"
-          : "account-douma-demo:internal-profile-operator",
-      planDurationMinutes: plan.duration,
-      planValidityMinutes: plan.validity,
-      planId: plan.id,
-      planName: plan.name,
-      printedCount: status === "imprimé" ? 1 : 0,
-      routerId: "routeur-demo",
-      routerName: "Routeur démo",
-      status,
-      syncStatus: index % 9 === 0 ? "conflict" : index % 6 === 0 ? "router_missing" : "router_synced",
-      uploadedBytes: status === "activé" || status === "complété" ? (index + 1) * 2_621_440 : 0
-    };
-  });
-}
-
-function createDemoTicketCodes(quantity: number): string[] {
-  const codes = new Set<string>();
-  let seed = 483_271;
-
-  while (codes.size < quantity) {
-    seed = (seed * 1_103_515_245 + 12_345) & 0x7fffffff;
-    codes.add(String(200_000 + (seed % 800_000)));
-  }
-
-  return Array.from(codes);
-}
-
-function normalizeSearch(value: string): string {
-  return value.trim().toUpperCase();
-}
-
-function startOfDay(date: string): number {
-  return new Date(`${date}T00:00:00.000`).getTime();
-}
-
-function endOfDay(date: string): number {
-  return new Date(`${date}T23:59:59.999`).getTime();
-}
-
-function padDatePart(value: number): string {
-  return String(value).padStart(2, "0");
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("fr-FR");
 }
 
 function databaseSyncStatusToTicketSyncStatus(status: TicketRecord["sync_status"]): RouterTicketSyncStatus {
-  if (status === "synced") {
-    return "router_synced";
-  }
-
-  if (status === "conflict") {
-    return "conflict";
-  }
-
-  if (status === "pending") {
-    return "local_only";
-  }
-
+  if (status === "synced") return "router_synced";
+  if (status === "conflict") return "conflict";
+  if (status === "pending") return "error";
   return "local_only";
+}
+
+function normalizeSearch(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function startOfDay(value: string): number {
+  return new Date(`${value}T00:00:00`).getTime();
+}
+
+function endOfDay(value: string): number {
+  return new Date(`${value}T23:59:59.999`).getTime();
 }
