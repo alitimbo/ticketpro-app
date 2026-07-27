@@ -65,12 +65,10 @@ const statusLabels: Record<RouterCardData["status"], string> = {
   warning: "À vérifier"
 };
 
-type RouterFormMode = "add" | "edit";
-
 type RouterFormState = {
   detectedInfo: RouterSystemInfo | null;
   error: string | null;
-  mode: RouterFormMode;
+  mode: "add" | "edit";
   router: RouterCardData | null;
   testMessage: string | null;
   testStatus: RouterConnectionTestStatus;
@@ -100,7 +98,6 @@ export function RoutersPage() {
 
   useEffect(() => {
     if (!isInitialized || !accountId) return undefined;
-
     let mounted = true;
     const scopedAccountId = accountId;
 
@@ -201,9 +198,10 @@ export function RoutersPage() {
     });
   };
 
-  const enterRouter = async (mode: RouterFormValues["preferredMode"]) => {
-    const router = selectedRouter;
-    if (!router) return;
+  const activateRouterMode = async (
+    router: RouterCardData,
+    mode: RouterFormValues["preferredMode"]
+  ) => {
     if (isRemoteConnectionMode(mode) && !router.remoteHost.trim()) {
       setSelectedRouter(null);
       setMessage("Aucune adresse distante n'est configurée. Modifiez le routeur avant d'utiliser cette action.");
@@ -224,6 +222,10 @@ export function RoutersPage() {
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Le mode de connexion n'a pas pu être sélectionné.");
     }
+  };
+
+  const enterSelectedRouter = async (mode: RouterFormValues["preferredMode"]) => {
+    if (selectedRouter) await activateRouterMode(selectedRouter, mode);
   };
 
   const testConnection = async (router: RouterCardData) => {
@@ -274,7 +276,6 @@ export function RoutersPage() {
     const encryptedPassword = formState.values.password.trim()
       ? await encryptLocalSecret(formState.values.password)
       : formState.router?.encryptedPassword ?? "";
-
     if (!session || !accountId) {
       setFormState({ ...formState, error: "Session du compte ou du profil interne introuvable." });
       return;
@@ -544,16 +545,9 @@ export function RoutersPage() {
               key={router.id}
               onDelete={() => setRouterToDelete(router)}
               onEdit={() => openEditForm(router)}
-              onLocal={() => {
-                setSelectedRouter(router);
-                void enterRouterFor(router, "local", enterRouter);
-              }}
+              onLocal={() => void activateRouterMode(router, "local")}
               onOpen={() => setSelectedRouter(router)}
-              onRemote={() => {
-                setSelectedRouter(router);
-                const remoteMode = router.preferredMode === "local" ? "distant_ip" : router.preferredMode;
-                void enterRouterFor(router, remoteMode, enterRouter);
-              }}
+              onRemote={() => void activateRouterMode(router, router.preferredMode === "vpn" ? "vpn" : "distant_ip")}
               onTest={() => void testConnection(router)}
               router={router}
             />
@@ -572,8 +566,8 @@ export function RoutersPage() {
 
       <ConnectionChoiceDialog
         onCancel={() => setSelectedRouter(null)}
-        onLocal={() => void enterRouter("local")}
-        onRemote={() => void enterRouter(selectedRouter?.preferredMode === "local" ? "distant_ip" : selectedRouter?.preferredMode ?? "distant_ip")}
+        onLocal={() => void enterSelectedRouter("local")}
+        onRemote={() => void enterSelectedRouter(selectedRouter?.preferredMode === "vpn" ? "vpn" : "distant_ip")}
         router={selectedRouter}
       />
       <RouterFormDialog
@@ -592,16 +586,6 @@ export function RoutersPage() {
       />
     </div>
   );
-}
-
-async function enterRouterFor(
-  router: RouterCardData,
-  mode: RouterFormValues["preferredMode"],
-  enter: (mode: RouterFormValues["preferredMode"]) => Promise<void>
-): Promise<void> {
-  void router;
-  await Promise.resolve();
-  await enter(mode);
 }
 
 type RouterCardProps = {
