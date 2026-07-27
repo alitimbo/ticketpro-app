@@ -15,8 +15,10 @@ export type RouterConnectionTestStatus =
   | "api_disabled"
   | "authentication_failed"
   | "connected"
+  | "hotspot_not_found"
   | "not_tested"
   | "offline"
+  | "permission_denied"
   | "remote_not_configured"
   | "remote_unavailable"
   | "timeout";
@@ -81,8 +83,8 @@ export const emptyRouterFormValues: RouterFormValues = {
   password: "",
   preferredMode: "local",
   remoteHost: "",
-  remotePort: "8729",
-  remoteUseSsl: true,
+  remotePort: "8728",
+  remoteUseSsl: false,
   username: "admin"
 };
 
@@ -104,8 +106,8 @@ export const demoRouters: RouterCardData[] = [
     notes: "Routeur de démonstration local.",
     preferredMode: "local",
     remoteHost: "vpn-boutique-centre.local",
-    remotePort: 8729,
-    remoteUseSsl: true,
+    remotePort: 8728,
+    remoteUseSsl: false,
     remoteEnabled: true,
     routerOsVersion: "7.15.3",
     serialNumber: "HAX2-DEMO-2026",
@@ -131,8 +133,8 @@ export const demoRouters: RouterCardData[] = [
     notes: "À vérifier sur site.",
     preferredMode: "local",
     remoteHost: "",
-    remotePort: 8729,
-    remoteUseSsl: true,
+    remotePort: 8728,
+    remoteUseSsl: false,
     remoteEnabled: false,
     routerOsVersion: "7.14.2",
     serialNumber: "HEX-NORD-001",
@@ -158,8 +160,8 @@ export const demoRouters: RouterCardData[] = [
     notes: "API à activer après validation admin.",
     preferredMode: "local",
     remoteHost: "10.50.5.1",
-    remotePort: 8729,
-    remoteUseSsl: true,
+    remotePort: 8728,
+    remoteUseSsl: false,
     remoteEnabled: false,
     routerOsVersion: "7.12.1",
     serialNumber: "HAP-AC2-4582",
@@ -231,8 +233,8 @@ export function routerCardFromRecord(
     preferredMode: record.connection_mode,
     remoteEnabled: Boolean(remoteConnection),
     remoteHost: remoteConnection?.host ?? "",
-    remotePort: remoteConnection?.port ?? record.api_ssl_port,
-    remoteUseSsl: remoteConnection ? remoteConnection.use_ssl === 1 : true,
+    remotePort: remoteConnection?.port ?? record.api_port,
+    remoteUseSsl: remoteConnection ? remoteConnection.use_ssl === 1 : false,
     routerOsVersion: record.routeros_version ?? "Non détectée",
     serialNumber: record.serial_number ?? "Non détecté",
     status,
@@ -253,7 +255,7 @@ export function routerRecordFromCard(router: RouterCardData): CreateRouterInput 
     encrypted_password: router.encryptedPassword,
     id: router.id,
     label: router.zoneName,
-    last_seen_at: null,
+    last_seen_at: router.lastTestStatus === "connected" ? new Date().toISOString() : null,
     local_ip: router.ipAddress,
     model: router.model,
     name: router.zoneName,
@@ -272,7 +274,7 @@ export function routerConnectionInputsFromCard(router: RouterCardData): CreateRo
     {
       host: router.ipAddress,
       id: `${router.id}:local`,
-      last_connected_at: router.lastTestStatus === "connected" ? router.lastTestedAt : null,
+      last_connected_at: router.lastTestStatus === "connected" ? router.lastTestedAt ?? new Date().toISOString() : null,
       last_error: router.lastTestStatus === "connected" ? null : router.lastTestMessage,
       mode: "local",
       port: router.apiPort,
@@ -283,16 +285,17 @@ export function routerConnectionInputsFromCard(router: RouterCardData): CreateRo
   ];
 
   if (router.remoteHost.trim()) {
+    const isVpn = router.preferredMode === "vpn";
     connections.push({
       host: router.remoteHost.trim(),
       id: `${router.id}:remote`,
       last_connected_at: router.preferredMode !== "local" ? router.lastTestedAt : null,
       last_error: router.preferredMode !== "local" ? router.lastTestMessage : null,
       mode: router.preferredMode === "local" ? "distant_ip" : router.preferredMode,
-      port: router.remotePort,
+      port: isVpn ? 8728 : router.remotePort,
       router_id: router.id,
       status: router.preferredMode !== "local" && router.status === "active" ? "active" : "inactive",
-      use_ssl: router.remoteUseSsl ? 1 : 0
+      use_ssl: isVpn ? 0 : router.remoteUseSsl ? 1 : 0
     });
   }
 
@@ -385,8 +388,8 @@ export function mapRouterErrorToTestStatus(code: RouterErrorCode): RouterConnect
     api_disabled: "api_disabled",
     authentication_failed: "authentication_failed",
     duplicate_user: "timeout",
-    hotspot_not_found: "timeout",
-    permission_denied: "timeout",
+    hotspot_not_found: "hotspot_not_found",
+    permission_denied: "permission_denied",
     remote_not_configured: "remote_not_configured",
     remote_unavailable: "remote_unavailable",
     router_offline: "offline",
@@ -399,12 +402,14 @@ export function mapRouterErrorToTestStatus(code: RouterErrorCode): RouterConnect
 
 export function routerTestMessage(status: RouterConnectionTestStatus): string {
   const messages: Record<RouterConnectionTestStatus, string> = {
-    api_disabled: "API désactivée",
-    authentication_failed: "Mot de passe incorrect",
+    api_disabled: "API RouterOS désactivée ou port 8728 inaccessible",
+    authentication_failed: "Identifiants MikroTik incorrects",
     connected: "Routeur connecté",
+    hotspot_not_found: "Service Hotspot ou profil requis introuvable",
     not_tested: "Non testé",
-    offline: "Routeur hors ligne",
-    remote_not_configured: "Connexion distante non configuree",
+    offline: "Routeur hors ligne ou adresse IP inaccessible",
+    permission_denied: "Le compte MikroTik n'a pas les permissions requises",
+    remote_not_configured: "Connexion distante non configurée",
     remote_unavailable: "Connexion distante non disponible",
     timeout: "Délai d'attente dépassé"
   };
