@@ -8,6 +8,7 @@ export class RouterRepository {
 
   async create(input: CreateRouterInput): Promise<RouterRecord> {
     assertAccountProfileOwnership(input.account_id, input.created_by_profile_id);
+    assertRouterConnectionValidated(input);
     await this.database.execute(
       `INSERT INTO routers (
         id, account_id, zone_id, name, label, model, board_name, serial_number, routeros_version,
@@ -53,6 +54,7 @@ export class RouterRepository {
     connections: CreateRouterConnectionInput[]
   ): Promise<RouterRecord> {
     assertAccountProfileOwnership(input.account_id, input.created_by_profile_id);
+    assertRouterConnectionValidated(input);
 
     await this.database.transaction([
       this.buildRouterInsertStatement(input),
@@ -215,22 +217,33 @@ export class RouterRepository {
   }
 
   private buildConnectionInsertStatement(input: CreateRouterConnectionInput): DatabaseStatement {
+    const connection = normalizeRouterConnection(input);
     return {
       params: [
-        input.id,
-        input.router_id,
-        input.mode,
-        input.host,
-        input.port,
-        input.use_ssl,
-        input.status,
-        input.last_error,
-        input.last_connected_at,
-        input.sync_status ?? "local"
+        connection.id,
+        connection.router_id,
+        connection.mode,
+        connection.host,
+        connection.port,
+        connection.use_ssl,
+        connection.status,
+        connection.last_error,
+        connection.last_connected_at,
+        connection.sync_status ?? "local"
       ],
       sql: `INSERT INTO router_connections (
         id, router_id, mode, host, port, use_ssl, status, last_error, last_connected_at, sync_status
       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`
     };
   }
+}
+
+function assertRouterConnectionValidated(input: CreateRouterInput): void {
+  if (input.status !== "active") {
+    throw new Error("Testez et validez la connexion RouterOS avant d'enregistrer ce routeur.");
+  }
+}
+
+function normalizeRouterConnection(input: CreateRouterConnectionInput): CreateRouterConnectionInput {
+  return input.mode === "vpn" ? { ...input, port: 8728, use_ssl: 0 } : input;
 }
