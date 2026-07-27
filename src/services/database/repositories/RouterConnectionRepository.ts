@@ -5,25 +5,26 @@ export class RouterConnectionRepository {
   constructor(private readonly database: DatabaseClient) {}
 
   async create(input: CreateRouterConnectionInput): Promise<RouterConnectionRecord> {
+    const connection = normalizeConnection(input);
     await this.database.execute(
       `INSERT INTO router_connections (
         id, router_id, mode, host, port, use_ssl, status, last_error, last_connected_at, sync_status
       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
       [
-        input.id,
-        input.router_id,
-        input.mode,
-        input.host,
-        input.port,
-        input.use_ssl,
-        input.status,
-        input.last_error,
-        input.last_connected_at,
-        input.sync_status ?? "local"
+        connection.id,
+        connection.router_id,
+        connection.mode,
+        connection.host,
+        connection.port,
+        connection.use_ssl,
+        connection.status,
+        connection.last_error,
+        connection.last_connected_at,
+        connection.sync_status ?? "local"
       ]
     );
 
-    const created = await this.findById(input.id);
+    const created = await this.findById(connection.id);
 
     if (!created) {
       throw new Error("La connexion du routeur n'a pas pu être créée.");
@@ -49,12 +50,13 @@ export class RouterConnectionRepository {
   }
 
   async replaceForRouter(routerId: string, connections: CreateRouterConnectionInput[]): Promise<void> {
+    const normalizedConnections = connections.map(normalizeConnection);
     const statements: DatabaseStatement[] = [
       {
         params: [routerId],
         sql: "DELETE FROM router_connections WHERE router_id = ?1"
       },
-      ...connections.map((connection) => ({
+      ...normalizedConnections.map((connection) => ({
         params: [
           connection.id,
           connection.router_id,
@@ -75,4 +77,18 @@ export class RouterConnectionRepository {
 
     await this.database.transaction(statements);
   }
+}
+
+function normalizeConnection(input: CreateRouterConnectionInput): CreateRouterConnectionInput {
+  if (input.mode !== "vpn") {
+    return input;
+  }
+
+  // WireGuard already encrypts and authenticates the transport. Using api-ssl
+  // here would require a RouterOS certificate and a trusted CA on every PC.
+  return {
+    ...input,
+    port: 8728,
+    use_ssl: 0
+  };
 }
