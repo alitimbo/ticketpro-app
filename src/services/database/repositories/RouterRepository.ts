@@ -8,7 +8,6 @@ export class RouterRepository {
 
   async create(input: CreateRouterInput): Promise<RouterRecord> {
     assertAccountProfileOwnership(input.account_id, input.created_by_profile_id);
-    assertRouterConnectionValidated(input);
     await this.database.execute(
       `INSERT INTO routers (
         id, account_id, zone_id, name, label, model, board_name, serial_number, routeros_version,
@@ -41,11 +40,7 @@ export class RouterRepository {
     );
 
     const created = await this.findById(input.id);
-
-    if (!created) {
-      throw new Error("Le routeur n'a pas pu être créé.");
-    }
-
+    if (!created) throw new Error("Le routeur n'a pas pu être créé.");
     return created;
   }
 
@@ -62,11 +57,7 @@ export class RouterRepository {
     ]);
 
     const created = await this.findById(input.id);
-
-    if (!created) {
-      throw new Error("Le routeur n'a pas pu être créé.");
-    }
-
+    if (!created) throw new Error("Le routeur n'a pas pu être créé.");
     return created;
   }
 
@@ -105,11 +96,7 @@ export class RouterRepository {
     );
 
     const updated = await this.findById(input.id);
-
-    if (!updated) {
-      throw new Error("Le routeur n'a pas pu être mis à jour.");
-    }
-
+    if (!updated) throw new Error("Le routeur n'a pas pu être mis à jour.");
     return updated;
   }
 
@@ -179,7 +166,6 @@ export class RouterRepository {
       "SELECT COUNT(*) as count FROM routers WHERE account_id = ?1 AND subscription_counted = 1 AND deleted_at IS NULL",
       [accountId]
     );
-
     return Number(rows[0]?.count ?? 0);
   }
 
