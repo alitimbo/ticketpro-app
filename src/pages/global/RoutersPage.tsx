@@ -188,12 +188,15 @@ export function RoutersPage() {
       return;
     }
 
+
+    /*
     try {
       await validateStoredLicense(database, accountId ?? "", accountRouters.map(routerLicenseFingerprint));
     } catch (licenseError) {
       setMessage(licenseError instanceof Error ? licenseError.message : "Licence TicketPro non valide.");
       return;
     }
+    */
 
     setFormState({
       detectedInfo: null,
@@ -219,12 +222,14 @@ export function RoutersPage() {
       return;
     }
 
+    /*
     try {
       await validateStoredLicense(database, accountId ?? "", accountRouters.map(routerLicenseFingerprint));
     } catch (licenseError) {
       setMessage(licenseError instanceof Error ? licenseError.message : "Licence TicketPro non valide.");
       return;
     }
+    */
 
     setScanState({ error: null, isOpen: true, isScanning: false, results: [] });
   };
@@ -387,10 +392,12 @@ export function RoutersPage() {
         formState.detectedInfo
       );
       try {
+        /*
         await validateStoredLicense(database, accountId, [
           ...accountRouters.map(routerLicenseFingerprint),
           routerLicenseFingerprint(created)
         ]);
+        */
         await routerRepository.createWithConnections(
           routerRecordFromCard(created),
           routerConnectionInputsFromCard(created)
