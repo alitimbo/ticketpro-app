@@ -1,8 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Download, KeyRound, Network, Plus, RefreshCw, Shield, ShieldOff } from "lucide-react";
+import { Download, KeyRound, Network, RefreshCw, Shield, ShieldOff } from "lucide-react";
 import { useAuth } from "../../app/auth/AuthProvider";
 import type { RouterRecord, VpnNetworkRecord, VpnPeerRecord } from "../../domain/database";
-import { RouterConnectionRepository, RouterRepository, useAppDatabase, VpnNetworkRepository, VpnPeerRepository } from "../../services/database";
+import {
+  RouterConnectionRepository,
+  RouterRepository,
+  useAppDatabase,
+  VpnNetworkRepository,
+  VpnPeerRepository
+} from "../../services/database";
 import {
   buildOperatorWireGuardConfig,
   generateWireGuardKeyPair,
@@ -55,9 +61,8 @@ export function VpnPage() {
   const bootstrapAccountRef = useRef<string | null>(null);
 
   const load = async () => {
-    if (!accountId || !isInitialized) {
-      return;
-    }
+    if (!accountId || !isInitialized) return;
+
     const [storedNetwork, storedPeers, storedRouters] = await Promise.all([
       networkRepository.findByAccount(accountId),
       peerRepository.listByAccount(accountId),
@@ -79,7 +84,9 @@ export function VpnPage() {
   };
 
   useEffect(() => {
-    void load().catch((loadError: unknown) => setError(loadError instanceof Error ? loadError.message : "Impossible de charger le VPN."));
+    void load().catch((loadError: unknown) =>
+      setError(loadError instanceof Error ? loadError.message : "Impossible de charger le VPN.")
+    );
   }, [accountId, isInitialized, networkRepository, peerRepository, routerRepository]);
 
   const saveNetwork = async () => {
@@ -103,11 +110,8 @@ export function VpnPage() {
         provisioning_api_token_encrypted: null,
         status: "active" as const
       };
-      if (network) {
-        await networkRepository.update(input);
-      } else {
-        await networkRepository.create(input);
-      }
+      if (network) await networkRepository.update(input);
+      else await networkRepository.create(input);
       await load();
       setMessage("Réseau VPN configuré automatiquement et isolé pour votre organisation.");
     } catch (saveError: unknown) {
@@ -124,6 +128,71 @@ export function VpnPage() {
     void saveNetwork();
   }, [accountId, isLoaded, network]);
 
+  const persistVpnConnection = async (
+    router: RouterRecord,
+    host: string,
+    active: boolean,
+    errorMessage: string | null
+  ) => {
+    const existingConnections = await connectionRepository.listByRouter(router.id);
+    await connectionRepository.replaceForRouter(router.id, [
+      ...existingConnections
+        .filter((connection) => connection.mode !== "vpn")
+        .map((connection) => ({
+          host: connection.host,
+          id: connection.id,
+          last_connected_at: connection.last_connected_at,
+          last_error: connection.last_error,
+          mode: connection.mode,
+          port: connection.port,
+          router_id: connection.router_id,
+          status: connection.status,
+          use_ssl: connection.use_ssl
+        })),
+      {
+        host,
+        id: `${router.id}:vpn`,
+        last_connected_at: active ? new Date().toISOString() : null,
+        last_error: errorMessage,
+        mode: "vpn",
+        port: 8728,
+        router_id: router.id,
+        status: active ? "active" : "inactive",
+        use_ssl: 0
+      }
+    ]);
+  };
+
+  const validateDraftRouterPeers = async (): Promise<number> => {
+    if (!accountId) return 0;
+    let activatedCount = 0;
+
+    for (const routerPeer of peers.filter(
+      (peer) => peer.peer_type === "router" && peer.status === "draft" && peer.router_id
+    )) {
+      const router = routers.find((item) => item.id === routerPeer.router_id);
+      if (!router) continue;
+      const vpnHost = routerPeer.assigned_address.split("/")[0];
+
+      try {
+        const password = await decryptLocalSecret(router.encrypted_password);
+        await verifyRouterOverVpn(router, vpnHost, password);
+        await persistVpnConnection(router, vpnHost, true, null);
+        await peerRepository.updateStatus(accountId, routerPeer.id, "active");
+        activatedCount += 1;
+      } catch (validationError) {
+        await persistVpnConnection(
+          router,
+          vpnHost,
+          false,
+          validationError instanceof Error ? validationError.message : "Validation distante impossible."
+        );
+      }
+    }
+
+    return activatedCount;
+  };
+
   const createRouterPeer = async () => {
     if (!accountId || !network) {
       setError("Enregistrez d'abord le réseau VPN.");
@@ -138,20 +207,22 @@ export function VpnPage() {
       setError("Ce routeur possède déjà un pair VPN actif ou en cours de validation.");
       return;
     }
+
     let remotePublicKey: string | null = null;
     let localPeerId: string | null = null;
     try {
       setError(null);
-      setMessage("Provisionnement WireGuard et vérification de la connexion distante en cours…");
+      setMessage("Provisionnement WireGuard du MikroTik en cours…");
       const keyPair = generateWireGuardKeyPair();
       const remotePeer = await upsertSaasVpnPeer({
         name: router.name,
         peerType: "router",
         publicKey: keyPair.publicKey
       });
-      if (!remotePeer.assigned_address) throw new Error("Le serveur VPN n'a pas attribué d'adresse au routeur.");
+      if (!remotePeer.assigned_address) {
+        throw new Error("Le serveur VPN n'a pas attribué d'adresse au routeur.");
+      }
       remotePublicKey = keyPair.publicKey;
-      const assignedAddress = remotePeer.assigned_address;
       const peer = await peerRepository.create({
         id: `vpn-peer-${crypto.randomUUID()}`,
         account_id: accountId,
@@ -161,8 +232,8 @@ export function VpnPage() {
         name: router.name,
         public_key: keyPair.publicKey,
         private_key_encrypted: await protectWireGuardPrivateKey(keyPair.privateKey),
-        assigned_address: assignedAddress,
-        allowed_ips: assignedAddress,
+        assigned_address: remotePeer.assigned_address,
+        allowed_ips: remotePeer.assigned_address,
         endpoint_address: null,
         endpoint_port: null,
         status: "draft",
@@ -171,8 +242,7 @@ export function VpnPage() {
       localPeerId = peer.id;
       const privateKey = await revealWireGuardPrivateKey(peer.private_key_encrypted ?? "");
       const routerPassword = await decryptLocalSecret(router.encrypted_password);
-      const localService = createRouterService(router, router.local_ip, router.api_port, routerPassword);
-      await localService.provisionWireGuard({
+      await createRouterService(router, router.local_ip, router.api_port, routerPassword).provisionWireGuard({
         assignedAddress: peer.assigned_address,
         interfaceName: "ticketpro-vpn",
         privateKey,
@@ -183,43 +253,35 @@ export function VpnPage() {
       });
 
       const vpnHost = peer.assigned_address.split("/")[0];
-      await verifyRouterOverVpn(router, vpnHost, routerPassword);
+      await persistVpnConnection(
+        router,
+        vpnHost,
+        false,
+        "Validation distante en attente d'un tunnel opérateur actif."
+      );
 
-      const existingConnections = await connectionRepository.listByRouter(router.id);
-      await connectionRepository.replaceForRouter(router.id, [
-        ...existingConnections.filter((connection) => connection.mode !== "vpn").map((connection) => ({
-          host: connection.host,
-          id: connection.id,
-          last_connected_at: connection.last_connected_at,
-          last_error: connection.last_error,
-          mode: connection.mode,
-          port: connection.port,
-          router_id: connection.router_id,
-          status: connection.status,
-          use_ssl: connection.use_ssl
-        })),
-        {
-          host: vpnHost,
-          id: `${router.id}:vpn`,
-          last_connected_at: new Date().toISOString(),
-          last_error: null,
-          mode: "vpn",
-          port: 8728,
-          router_id: router.id,
-          status: "active",
-          use_ssl: 0
+      let validatedNow = false;
+      if (peers.some((item) => item.peer_type === "operator" && item.status === "active")) {
+        try {
+          await verifyRouterOverVpn(router, vpnHost, routerPassword);
+          await persistVpnConnection(router, vpnHost, true, null);
+          await peerRepository.updateStatus(accountId, peer.id, "active");
+          validatedNow = true;
+        } catch {
+          validatedNow = false;
         }
-      ]);
-      await peerRepository.updateStatus(accountId, peer.id, "active");
+      }
+
       await load();
-      setMessage(`Pair VPN créé et connexion RouterOS distante validée pour ${router.name}.`);
+      setMessage(
+        validatedNow
+          ? `Pair VPN créé et connexion RouterOS distante validée pour ${router.name}.`
+          : `Pair VPN injecté dans ${router.name}. Activez un poste opérateur pour valider la connexion distante.`
+      );
     } catch (peerError: unknown) {
       if (remotePublicKey) {
         try {
-          await revokeSaasVpnPeer({
-            peerType: "router",
-            publicKey: remotePublicKey
-          });
+          await revokeSaasVpnPeer({ peerType: "router", publicKey: remotePublicKey });
           if (localPeerId) await peerRepository.updateStatus(accountId, localPeerId, "revoked");
         } catch {
           // Le prochain contrôle serveur permettra de reprendre ce nettoyage.
@@ -235,20 +297,19 @@ export function VpnPage() {
       setError("Enregistrez d'abord le réseau VPN.");
       return;
     }
+
     let remotePublicKey: string | null = null;
     let localPeerId: string | null = null;
     try {
       setError(null);
       const keyPair = generateWireGuardKeyPair();
-      const name = operatorName.trim() || `Opérateur ${peers.filter((item) => item.peer_type === "operator").length + 1}`;
-      const remotePeer = await upsertSaasVpnPeer({
-        name,
-        peerType: "operator",
-        publicKey: keyPair.publicKey
-      });
-      if (!remotePeer.assigned_address) throw new Error("Le serveur VPN n'a pas attribué d'adresse à l'opérateur.");
+      const name =
+        operatorName.trim() || `Opérateur ${peers.filter((item) => item.peer_type === "operator").length + 1}`;
+      const remotePeer = await upsertSaasVpnPeer({ name, peerType: "operator", publicKey: keyPair.publicKey });
+      if (!remotePeer.assigned_address) {
+        throw new Error("Le serveur VPN n'a pas attribué d'adresse à l'opérateur.");
+      }
       remotePublicKey = keyPair.publicKey;
-      const assignedAddress = remotePeer.assigned_address;
       const peer = await peerRepository.create({
         id: `vpn-peer-${crypto.randomUUID()}`,
         account_id: accountId,
@@ -258,8 +319,8 @@ export function VpnPage() {
         name,
         public_key: keyPair.publicKey,
         private_key_encrypted: await protectWireGuardPrivateKey(keyPair.privateKey),
-        assigned_address: assignedAddress,
-        allowed_ips: assignedAddress,
+        assigned_address: remotePeer.assigned_address,
+        allowed_ips: remotePeer.assigned_address,
         endpoint_address: network.server_endpoint,
         endpoint_port: network.server_port,
         status: "draft",
@@ -284,24 +345,27 @@ export function VpnPage() {
           wireGuardAvailable = false;
         }
       }
+
+      let activatedRouters = 0;
       if (wireGuardAvailable) {
         await startWireGuardTunnel(tunnelName, operatorConfig);
         await peerRepository.updateStatus(accountId, peer.id, "active");
+        activatedRouters = await validateDraftRouterPeers();
       } else {
         downloadText(operatorConfig, `${safeFileName(peer.name)}-wireguard.conf`);
       }
+
       setOperatorName("");
       await load();
-      setMessage(wireGuardAvailable
-        ? `Profil ${peer.name} créé et tunnel WireGuard activé automatiquement.`
-        : `Profil ${peer.name} créé en brouillon. Importez le fichier généré dans WireGuard pour l'activer.`);
+      setMessage(
+        wireGuardAvailable
+          ? `Profil ${peer.name} activé. ${activatedRouters} routeur(s) distant(s) validé(s).`
+          : `Profil ${peer.name} créé en brouillon. Importez le fichier généré dans WireGuard pour l'activer.`
+      );
     } catch (peerError: unknown) {
       if (remotePublicKey) {
         try {
-          await revokeSaasVpnPeer({
-            peerType: "operator",
-            publicKey: remotePublicKey
-          });
+          await revokeSaasVpnPeer({ peerType: "operator", publicKey: remotePublicKey });
           if (localPeerId) await peerRepository.updateStatus(accountId, localPeerId, "revoked");
         } catch {
           // Le prochain contrôle serveur permettra de reprendre ce nettoyage.
@@ -312,18 +376,14 @@ export function VpnPage() {
   };
 
   const revokePeer = async (peer: VpnPeerRecord) => {
-    if (!accountId) {
-      return;
-    }
-    await revokeSaasVpnPeer({
-      peerType: peer.peer_type,
-      publicKey: peer.public_key
-    });
+    if (!accountId) return;
+
+    await revokeSaasVpnPeer({ peerType: peer.peer_type, publicKey: peer.public_key });
     if (peer.peer_type === "operator") {
       try {
         await stopWireGuardTunnel(`ticketpro-${peer.id.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 38)}`);
       } catch {
-        // La révocation du peer reste prioritaire même si le service local est déjà arrêté.
+        // La révocation distante reste prioritaire.
       }
     }
     if (peer.peer_type === "router" && peer.router_id) {
@@ -331,10 +391,12 @@ export function VpnPage() {
       if (router) {
         try {
           const routerPassword = await decryptLocalSecret(router.encrypted_password);
-          await createRouterService(router, router.local_ip, router.api_port, routerPassword)
-            .removeWireGuardPeer({ interfaceName: "ticketpro-vpn", serverPublicKey: network?.server_public_key ?? "" });
+          await createRouterService(router, router.local_ip, router.api_port, routerPassword).removeWireGuardPeer({
+            interfaceName: "ticketpro-vpn",
+            serverPublicKey: network?.server_public_key ?? ""
+          });
         } catch {
-          // Le peer hub est déjà révoqué ; le nettoyage local sera retenté lors d'une prochaine connexion.
+          // Le nettoyage local sera retenté lors d'une prochaine connexion LAN.
         }
       }
     }
@@ -367,26 +429,67 @@ export function VpnPage() {
         ) : (
           <div className="notice">{isSaving ? "Configuration automatique du VPN en cours…" : "Le VPN sera configuré automatiquement avec votre licence."}</div>
         )}
-        <div className="card__footer"><Button icon={Shield} variant="primary" disabled={isSaving} onClick={() => void saveNetwork()}>{isSaving ? "Configuration…" : network ? "Resynchroniser" : "Réessayer"}</Button></div>
+        <div className="card__footer">
+          <Button icon={Shield} variant="primary" disabled={isSaving} onClick={() => void saveNetwork()}>
+            {isSaving ? "Configuration…" : network ? "Resynchroniser" : "Réessayer"}
+          </Button>
+        </div>
       </Card>
 
       {!network ? (
         <EmptyState icon={Network} title="Réseau VPN en attente" description="TicketPro récupère automatiquement une configuration isolée depuis le VPS." />
       ) : (
         <div className="page-grid">
-          <Card className="span-6" title="Ajouter un MikroTik" description="TicketPro injecte automatiquement l’interface WireGuard, puis valide une vraie connexion RouterOS distante.">
-            <label>Routeur<select value={selectedRouterId} onChange={(event) => setSelectedRouterId(event.target.value)}><option value="">Choisir un routeur</option>{routers.map((router) => <option key={router.id} value={router.id}>{router.name}</option>)}</select></label>
-            <div className="card__footer"><Button icon={KeyRound} variant="primary" onClick={() => void createRouterPeer()}>Provisionner et tester le MikroTik</Button></div>
+          <Card className="span-6" title="Ajouter un MikroTik" description="Le pair est injecté en LAN, puis validé dès qu'un tunnel opérateur permet d'atteindre son IP WireGuard.">
+            <label>
+              Routeur
+              <select value={selectedRouterId} onChange={(event) => setSelectedRouterId(event.target.value)}>
+                <option value="">Choisir un routeur</option>
+                {routers.map((router) => <option key={router.id} value={router.id}>{router.name}</option>)}
+              </select>
+            </label>
+            <div className="card__footer">
+              <Button icon={KeyRound} variant="primary" onClick={() => void createRouterPeer()}>
+                Provisionner le MikroTik
+              </Button>
+            </div>
           </Card>
-          <Card className="span-6" title="Ajouter un poste opérateur" description="Un profil permet à un utilisateur autorisé d’atteindre les routeurs du compte.">
-            <label>Nom du poste<input placeholder="PC de Paris" value={operatorName} onChange={(event) => setOperatorName(event.target.value)} /></label>
-            <div className="card__footer"><Button icon={Download} variant="primary" onClick={() => void createOperatorPeer()}>Créer le profil WireGuard</Button></div>
+          <Card className="span-6" title="Ajouter un poste opérateur" description="Le démarrage du tunnel valide automatiquement les routeurs en attente.">
+            <label>
+              Nom du poste
+              <input placeholder="PC de Paris" value={operatorName} onChange={(event) => setOperatorName(event.target.value)} />
+            </label>
+            <div className="card__footer">
+              <Button icon={Download} variant="primary" onClick={() => void createOperatorPeer()}>
+                Créer le profil WireGuard
+              </Button>
+            </div>
           </Card>
         </div>
       )}
 
-      <Card title="Pairs provisionnés" description="Révoquez immédiatement un accès compromis. TicketPro applique automatiquement la révocation sur le VPS.">
-        {peers.length === 0 ? <EmptyState icon={KeyRound} title="Aucun pair" description="Les pairs routeur et opérateur apparaîtront ici." /> : <div className="data-list">{peers.map((peer) => <div className="data-list-item" key={peer.id}><div className="data-list-item__icon"><Shield /></div><div className="data-list-item__content"><strong>{peer.name}</strong><span>{peer.peer_type === "router" ? "MikroTik" : "Opérateur"} · {peer.assigned_address}</span></div><Badge status={peer.status === "active" ? "success" : peer.status === "revoked" ? "offline" : "warning"}>{peer.status === "active" ? "Actif" : peer.status === "revoked" ? "Révoqué" : "Brouillon"}</Badge>{peer.status !== "revoked" ? <Button icon={ShieldOff} variant="danger" onClick={() => void revokePeer(peer)}>Révoquer</Button> : null}</div>)}</div>}
+      <Card title="Pairs provisionnés" description="Un pair routeur reste en brouillon jusqu'à une vraie commande RouterOS réussie via WireGuard.">
+        {peers.length === 0 ? (
+          <EmptyState icon={KeyRound} title="Aucun pair" description="Les pairs routeur et opérateur apparaîtront ici." />
+        ) : (
+          <div className="data-list">
+            {peers.map((peer) => (
+              <div className="data-list-item" key={peer.id}>
+                <div className="data-list-item__icon"><Shield /></div>
+                <div className="data-list-item__content">
+                  <strong>{peer.name}</strong>
+                  <span>{peer.peer_type === "router" ? "MikroTik" : "Opérateur"} · {peer.assigned_address}</span>
+                </div>
+                <Badge status={peer.status === "active" ? "success" : peer.status === "revoked" ? "offline" : "warning"}>
+                  {peer.status === "active" ? "Actif" : peer.status === "revoked" ? "Révoqué" : "Brouillon"}
+                </Badge>
+                {peer.status !== "revoked" ? (
+                  <Button icon={ShieldOff} variant="danger" onClick={() => void revokePeer(peer)}>Révoquer</Button>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        )}
       </Card>
     </div>
   );
@@ -414,14 +517,14 @@ async function verifyRouterOverVpn(router: RouterRecord, host: string, password:
     try {
       await createRouterService(router, host, 8728, password).testConnection();
       return;
-    } catch (error) {
-      lastError = error;
+    } catch (validationError) {
+      lastError = validationError;
       await delay(1500);
     }
   }
 
   throw new Error(
-    `Le pair WireGuard a été injecté, mais RouterOS ne répond pas encore sur ${host}:8728. Vérifiez le handshake, le firewall input et le service API. ${lastError instanceof Error ? lastError.message : ""}`.trim()
+    `RouterOS ne répond pas sur ${host}:8728 via WireGuard. Vérifiez le handshake, le firewall input et le service API. ${lastError instanceof Error ? lastError.message : ""}`.trim()
   );
 }
 
