@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Building2, CalendarDays, KeyRound, LogOut, Mail, Phone, Router, ShieldCheck, UserRound } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../app/auth/AuthProvider";
-import { AccountRepository, AppLogRepository, useAppDatabase } from "../../services/database";
+import { AccountRepository, AppLogRepository, RouterRepository, useAppDatabase } from "../../services/database";
 import { AuditLogService } from "../../services/logging";
 import {
   appendAccountSecurityLog,
@@ -16,8 +16,7 @@ import {
   type MainAccountSecurityLog
 } from "../../services/auth";
 import { Badge, Button, Card, DataListItem, PageHeader, PasswordField, StatCard } from "../../shared/ui";
-import { demoRouters, listRoutersForAccount } from "./routerPageModel";
-import { countRoutersForSubscription, getSubscriptionOverview } from "./subscriptionPageModel";
+import { getSubscriptionOverview } from "./subscriptionPageModel";
 import { accountStatusLabel, formatAccountDate, validateAccountDetails, validatePasswordChange } from "./accountPageModel";
 
 type DetailsFormState = {
@@ -46,13 +45,11 @@ export function AccountPage() {
   const accountRepository = useMemo(() => new AccountRepository(database), [database]);
   const auditLogService = useMemo(() => new AuditLogService(database), [database]);
   const appLogRepository = useMemo(() => new AppLogRepository(database), [database]);
-  const accountRouters = useMemo(
-    () => listRoutersForAccount(demoRouters, accountSession?.accountId ?? null),
-    [accountSession?.accountId]
-  );
+  const routerRepository = useMemo(() => new RouterRepository(database), [database]);
+  const [routersUsed, setRoutersUsed] = useState(0);
   const subscriptionOverview = useMemo(
-    () => getSubscriptionOverview(countRoutersForSubscription(accountRouters)),
-    [accountRouters]
+    () => getSubscriptionOverview(routersUsed),
+    [routersUsed]
   );
   const [detailsForm, setDetailsForm] = useState<DetailsFormState>({
     companyName: account?.companyName ?? "",
@@ -97,6 +94,14 @@ export function AccountPage() {
       }
     });
   }, [accountRepository, accountSession, isInitialized, isPersistent]);
+
+  useEffect(() => {
+    if (!isPersistent || !isInitialized || !accountSession) {
+      return;
+    }
+
+    void routerRepository.countSubscriptionRoutersByAccount(accountSession.accountId).then(setRoutersUsed);
+  }, [accountSession, isInitialized, isPersistent, routerRepository]);
 
   useEffect(() => {
     if (!isPersistent || !isInitialized || !accountSession) {

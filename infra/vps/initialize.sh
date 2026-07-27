@@ -81,7 +81,7 @@ printf '%s\n' "$WG_PUBLIC_KEY" > "$INFRA_DIR/wireguard-hub/wireguard/server_publ
   echo "IPAY_PUBLIC_KEY=${IPAY_PUBLIC_KEY:-}"
   echo "IPAY_PRIVATE_KEY=${IPAY_PRIVATE_KEY:-}"
   echo "IPAY_SECRET_HASH=${IPAY_SECRET_HASH:-}"
-  echo "LICENSE_CORS_ORIGIN=${LICENSE_CORS_ORIGIN:-http://tauri.localhost}"
+  echo "LICENSE_CORS_ORIGIN=${LICENSE_CORS_ORIGIN:-http://tauri.localhost,http://localhost:4321,http://127.0.0.1:4321,http://localhost:4322,http://127.0.0.1:4322,https://ticketpro.autoticket-ne.com,https://ticketpro-landing.vercel.app}"
   echo "VPN_HUB_URL=http://127.0.0.1:8788"
   echo "VPN_HUB_MASTER_TOKEN=$HUB_MASTER_TOKEN"
 } > "$INFRA_DIR/license-api/.env"

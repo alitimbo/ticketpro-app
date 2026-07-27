@@ -87,6 +87,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "license_multi_device_plan",
         include_str!("../migrations/016_license_multi_device_plan.sql"),
     ),
+    (
+        17,
+        "disable_legacy_demo_account",
+        include_str!("../migrations/017_disable_legacy_demo_account.sql"),
+    ),
 ];
 
 const DATABASE_FILE_NAME: &str = "hotspot-manager.sqlite";

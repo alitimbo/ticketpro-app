@@ -266,6 +266,34 @@ test("authentification, licences, paiements iPay et crédits revendeur restent c
     organizationPaymentStatus.payload.order.license_id
   );
 
+  const pendingOrganizationPayment = await api("/v1/payments/orders/organization", {
+    body: {
+      plan_id: "integration-organization-2",
+      msisdn: "22790909090",
+      customer_name: "Organisation abandon",
+      payment_type: "mobile"
+    }
+  });
+  ipayPayments.get(pendingOrganizationPayment.payload.payment.reference).status = "pending";
+  const abandonedOrganizationPayment = await api("/v1/payments/orders/abandon", {
+    body: {
+      order_id: pendingOrganizationPayment.payload.order.order_id,
+      order_token: pendingOrganizationPayment.payload.order_token
+    }
+  });
+  assert.equal(abandonedOrganizationPayment.status, 200);
+  assert.equal(abandonedOrganizationPayment.payload.abandoned, true);
+  assert.equal(abandonedOrganizationPayment.payload.order.status, "cancelled");
+  assert.equal(abandonedOrganizationPayment.payload.order.fulfillment_status, "failed");
+
+  const abandonedOrganizationPaymentAgain = await api("/v1/payments/orders/abandon", {
+    body: {
+      order_id: pendingOrganizationPayment.payload.order.order_id,
+      order_token: pendingOrganizationPayment.payload.order_token
+    }
+  });
+  assert.equal(abandonedOrganizationPaymentAgain.payload.abandoned, true);
+
   const planResult = await api("/v1/admin/plans", {
     token: adminToken,
     body: {

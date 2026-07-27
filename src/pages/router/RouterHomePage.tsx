@@ -26,11 +26,23 @@ import type {
   RouterSystemInfo
 } from "../../domain/router";
 import { useAuth } from "../../app/auth/AuthProvider";
-import { FakeRouterAdapter, RouterService, RouterServiceError } from "../../services/router";
+import {
+  HotspotPlanRepository,
+  RouterConnectionRepository,
+  RouterRepository,
+  TicketRepository,
+  useAppDatabase
+} from "../../services/database";
+import {
+  createPersistedRouterService,
+  FakeRouterAdapter,
+  RouterService,
+  RouterServiceError
+} from "../../services/router";
 import { compareLocalAndRouterTickets, type TicketSyncSummary } from "../../services/sync";
 import { Badge, Button, Card, DataListItem, PageHeader, StatCard, StatusDot } from "../../shared/ui";
 import { formatBytes, getRouterQuickActions } from "./routerHomeModel";
-import { createDemoTickets } from "./ticketsPageModel";
+import { createDemoTickets, ticketFromRecord } from "./ticketsPageModel";
 
 type RouterDashboardData = {
   activeUsers: ActiveHotspotUser[];
@@ -44,16 +56,19 @@ type RouterDashboardData = {
 
 export function RouterHomePage() {
   const navigate = useNavigate();
-  const { routerId = "routeur-demo" } = useParams();
+  const { routerId = "" } = useParams();
   const { session, userCan } = useAuth();
+  const { database, isInitialized, isPersistent } = useAppDatabase();
+  const routerRepository = useMemo(() => new RouterRepository(database), [database]);
+  const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
+  const ticketRepository = useMemo(() => new TicketRepository(database), [database]);
+  const planRepository = useMemo(() => new HotspotPlanRepository(database), [database]);
   const [dashboard, setDashboard] = useState<RouterDashboardData | null>(null);
   const [cpuLoad, setCpuLoad] = useState(0);
-  const [connectionMessage, setConnectionMessage] = useState("Connexion active");
+  const [connectionMessage, setConnectionMessage] = useState("Connexion en cours");
   const [syncSummary, setSyncSummary] = useState<TicketSyncSummary | null>(null);
-  const service = useMemo(
-    () => new RouterService({ adapter: new FakeRouterAdapter({ latencyMs: 0 }) }),
-    []
-  );
+  const [service, setService] = useState<RouterService | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const actions = session ? getRouterQuickActions(session.internal_profile_role, routerId) : [];
   const canCreateTickets = userCan("router.tickets.generate");
 
@@ -61,23 +76,66 @@ export function RouterHomePage() {
     let isMounted = true;
 
     async function loadDashboard() {
-      const [systemInfo, servers, plans, users, activeUsers, health, dateTime] = await Promise.all([
-        service.getSystemInfo(),
-        service.getHotspotServers(),
-        service.getHotspotPlans(),
-        service.listHotspotUsers(),
-        service.listActiveUsers(),
-        service.getRouterHealth(),
-        service.getRouterDateTime()
-      ]);
-
-      if (!isMounted) {
+      if (!session || !routerId || (isPersistent && !isInitialized)) {
         return;
       }
 
-      setDashboard({ activeUsers, dateTime, health, plans, servers, systemInfo, users });
-      setSyncSummary(compareLocalAndRouterTickets(createDemoTickets(), users, activeUsers).summary);
-      setCpuLoad(health.cpuLoad);
+      try {
+        let activeService: RouterService;
+        let localTickets = createDemoTickets();
+
+        if (isPersistent) {
+          const router = await routerRepository.findById(routerId);
+          if (!router || router.account_id !== session.account_id) {
+            throw new Error("Routeur introuvable pour cette organisation.");
+          }
+          const [connections, ticketRecords, planRecords] = await Promise.all([
+            connectionRepository.listByRouter(routerId),
+            ticketRepository.listByRouter(routerId),
+            planRepository.listByRouter(routerId)
+          ]);
+          const plansById = new Map(planRecords.map((plan) => [plan.id, plan]));
+          localTickets = ticketRecords.map((ticket) =>
+            ticketFromRecord(ticket, plansById.get(ticket.plan_id) ?? null, router.name)
+          );
+          activeService = await createPersistedRouterService({
+            authSession: session,
+            connections,
+            database,
+            router
+          });
+        } else {
+          activeService = new RouterService({ adapter: new FakeRouterAdapter({ latencyMs: 0 }) });
+        }
+
+        const [systemInfo, servers, plans, users, activeUsers, health, dateTime] = await Promise.all([
+          activeService.getSystemInfo(),
+          activeService.getHotspotServers(),
+          activeService.getHotspotPlans(),
+          activeService.listHotspotUsers(),
+          activeService.listActiveUsers(),
+          activeService.getRouterHealth(),
+          activeService.getRouterDateTime()
+        ]);
+
+        if (!isMounted) {
+          return;
+        }
+
+        setService(activeService);
+        setDashboard({ activeUsers, dateTime, health, plans, servers, systemInfo, users });
+        setSyncSummary(compareLocalAndRouterTickets(localTickets, users, activeUsers).summary);
+        setCpuLoad(health.cpuLoad);
+        setConnectionMessage("Routeur connecté");
+        setLoadError(null);
+      } catch (error) {
+        if (isMounted) {
+          setDashboard(null);
+          setService(null);
+          setConnectionMessage("Connexion impossible");
+          setLoadError(error instanceof Error ? error.message : "Impossible de charger le routeur.");
+        }
+      }
     }
 
     void loadDashboard();
@@ -85,20 +143,41 @@ export function RouterHomePage() {
     return () => {
       isMounted = false;
     };
-  }, [service]);
+  }, [
+    connectionRepository,
+    database,
+    isInitialized,
+    isPersistent,
+    planRepository,
+    routerId,
+    routerRepository,
+    session,
+    ticketRepository
+  ]);
 
   useEffect(() => {
+    if (!service) {
+      return undefined;
+    }
+
     const interval = window.setInterval(() => {
-      setCpuLoad((current) => {
-        const next = current + Math.round(Math.random() * 8 - 3);
-        return Math.min(72, Math.max(8, next));
-      });
-    }, 1800);
+      void service.getRouterHealth()
+        .then((health) => {
+          setCpuLoad(health.cpuLoad);
+          setDashboard((current) => current ? { ...current, health } : current);
+        })
+        .catch(() => setConnectionMessage("Actualisation du routeur impossible"));
+    }, 10_000);
 
     return () => window.clearInterval(interval);
-  }, []);
+  }, [service]);
 
   const testRouter = async () => {
+    if (!service) {
+      setConnectionMessage("Routeur indisponible");
+      return;
+    }
+
     try {
       await service.testConnection();
       setConnectionMessage("Routeur connecté");
@@ -111,12 +190,21 @@ export function RouterHomePage() {
     return (
       <div className="page-stack">
         <PageHeader
-          description="Chargement des informations du routeur."
+          description={loadError ?? "Chargement des informations du routeur."}
           eyebrow="Routeur"
-          title="Maison routeur"
+          title={loadError ? "Routeur indisponible" : "Maison routeur"}
         />
         <Card>
-          <StatusDot label="Chargement" status="warning" />
+          {loadError ? (
+            <>
+              <p className="form-error">{loadError}</p>
+              <Button icon={Router} onClick={() => navigate("/routeurs")} variant="primary">
+                Revenir aux routeurs
+              </Button>
+            </>
+          ) : (
+            <StatusDot label="Chargement" status="warning" />
+          )}
         </Card>
       </div>
     );

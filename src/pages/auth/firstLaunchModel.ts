@@ -170,7 +170,15 @@ export async function completeFirstLaunch(
         : []),
       {
         sql: `INSERT INTO accounts (id, email, password_hash, display_name, company_name, phone, status, last_login_at)
-          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+          ON CONFLICT(id) DO UPDATE SET
+            email = excluded.email,
+            password_hash = excluded.password_hash,
+            display_name = excluded.display_name,
+            company_name = excluded.company_name,
+            phone = excluded.phone,
+            status = excluded.status,
+            updated_at = CURRENT_TIMESTAMP`,
         params: [
           accountId,
           email,
@@ -184,7 +192,13 @@ export async function completeFirstLaunch(
       },
       ...(["admin", "operator", "agent", "guest"] as UserRole[]).map((role) => ({
         sql: `INSERT INTO internal_profiles (id, account_id, role, display_name, password_hash, is_enabled, permissions_json, last_used_at)
-          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+          ON CONFLICT(account_id, role) DO UPDATE SET
+            display_name = excluded.display_name,
+            password_hash = excluded.password_hash,
+            is_enabled = excluded.is_enabled,
+            permissions_json = excluded.permissions_json,
+            updated_at = CURRENT_TIMESTAMP`,
         params: [
           `${accountId}:internal-profile-${role}`,
           accountId,
@@ -200,9 +214,19 @@ export async function completeFirstLaunch(
         sql: `INSERT INTO account_subscriptions (
           id, account_id, subscription_plan_id, status, current_period_start, current_period_end,
           router_limit_snapshot, price_cfa_snapshot, price_per_router_cfa_snapshot, payment_status
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        ON CONFLICT(id) DO UPDATE SET
+          subscription_plan_id = excluded.subscription_plan_id,
+          status = excluded.status,
+          current_period_start = excluded.current_period_start,
+          current_period_end = excluded.current_period_end,
+          router_limit_snapshot = excluded.router_limit_snapshot,
+          price_cfa_snapshot = excluded.price_cfa_snapshot,
+          price_per_router_cfa_snapshot = excluded.price_per_router_cfa_snapshot,
+          payment_status = excluded.payment_status,
+          updated_at = CURRENT_TIMESTAMP`,
         params: [
-          `subscription-${accountId}-${Date.now()}`,
+          `subscription-${accountId}-current`,
           accountId,
           subscription.planId,
           subscription.status,

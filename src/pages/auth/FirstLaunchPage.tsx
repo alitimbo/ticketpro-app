@@ -17,6 +17,7 @@ import {
   type LicensePlan
 } from "../../services/licensing";
 import {
+  abandonPaymentOrder,
   getPaymentOrderStatus,
   initiateOrganizationPayment,
   type InitiatedPaymentOrder,
@@ -59,7 +60,7 @@ export function FirstLaunchPage({
   onComplete?: () => void;
   onResellerAccess?: () => void;
 }) {
-  const { database, isInitialized, isPersistent } = useAppDatabase();
+  const { database, initializationError, isInitialized, isPersistent } = useAppDatabase();
   const navigate = useNavigate();
   const [state, setState] = useState<FirstLaunchState>(defaultFirstLaunchState);
   const [journey, setJourney] = useState<FirstLaunchJourney | null>(null);
@@ -227,6 +228,31 @@ export function FirstLaunchPage({
     }
   };
 
+  const restartPayment = async () => {
+    if (!payment) return;
+    try {
+      setIsPaymentLoading(true);
+      setError(null);
+      const result = await abandonPaymentOrder({
+        orderId: payment.order.order_id,
+        orderToken: payment.order_token
+      });
+      if (!result.abandoned) {
+        setPayment((current) => (current ? { ...current, order: result.order } : current));
+        await applyPaidOrder(result.order);
+        return;
+      }
+      localStorage.removeItem(pendingPaymentStorageKey);
+      setPayment(null);
+      setActivation(null);
+      setError("Tentative abandonnée. Vous pouvez lancer un nouveau paiement.");
+    } catch (paymentError) {
+      setError(errorMessage(paymentError, "Impossible d'abandonner cette tentative."));
+    } finally {
+      setIsPaymentLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (journey !== "organization_purchase" || payment || !state.account.email.trim()) return;
     const stored = localStorage.getItem(pendingPaymentStorageKey);
@@ -261,7 +287,11 @@ export function FirstLaunchPage({
   const finish = async () => {
     try {
       if (isPersistent && !isInitialized) {
-        throw new Error("La base locale est encore en cours d'initialisation.");
+        throw new Error(
+          initializationError
+            ? `La base locale n'a pas pu être initialisée : ${initializationError}`
+            : "La base locale est encore en cours d'initialisation."
+        );
       }
       let stateForCompletion = state;
       if (shouldActivate) {
@@ -287,11 +317,6 @@ export function FirstLaunchPage({
             routerLimit: activation.router_limit
           }
         : undefined;
-      const completed = await completeFirstLaunch(
-        stateForCompletion,
-        isPersistent ? database : undefined,
-        licenseDetails
-      );
       if (activation && isPersistent) {
         const identity = await getLicenseDeviceIdentity();
         await new LicenseStateRepository(database).save({
@@ -318,12 +343,17 @@ export function FirstLaunchPage({
           status: activation.status
         });
       }
+      const completed = await completeFirstLaunch(
+        stateForCompletion,
+        isPersistent ? database : undefined,
+        licenseDetails
+      );
       setSummary(completed);
       setError(null);
       onComplete?.();
       navigate("/login", { replace: true });
     } catch (completionError) {
-      setError(completionError instanceof Error ? completionError.message : "Configuration impossible.");
+      setError(errorMessage(completionError, "Configuration impossible."));
     }
   };
 
@@ -379,6 +409,7 @@ export function FirstLaunchPage({
                 onMsisdnChange={setPaymentMsisdn}
                 onPaymentTypeChange={setPaymentType}
                 onPlanChange={(selectedPlanId) => updateState({ selectedPlanId })}
+                onRestart={() => void restartPayment()}
                 onVerify={() => void verifyPayment()}
                 payment={payment}
                 paymentType={paymentType}
@@ -401,7 +432,14 @@ export function FirstLaunchPage({
             )
           ) : null}
           {step === 3 ? <ProfilesStep state={state} onChange={updateState} /> : null}
-          {step === 4 ? <SummaryStep state={state} selectedPlanName={selectedPlan.name} summary={summary} /> : null}
+          {step === 4 ? (
+            <SummaryStep
+              paymentConfirmed={journey === "organization_purchase" && Boolean(activation)}
+              selectedPlanName={selectedPlan.name}
+              state={state}
+              summary={summary}
+            />
+          ) : null}
 
           {error ? <p className="form-error">{error}</p> : null}
 
@@ -476,6 +514,7 @@ function OrganizationPaymentStep({
   onMsisdnChange,
   onPaymentTypeChange,
   onPlanChange,
+  onRestart,
   onVerify,
   payment,
   paymentType,
@@ -489,6 +528,7 @@ function OrganizationPaymentStep({
   onMsisdnChange: (value: string) => void;
   onPaymentTypeChange: (value: IpayPaymentType) => void;
   onPlanChange: (planId: string) => void;
+  onRestart: () => void;
   onVerify: () => void;
   payment: InitiatedPaymentOrder | null;
   paymentType: IpayPaymentType;
@@ -565,9 +605,16 @@ function OrganizationPaymentStep({
             {payment.payment.meta_data?.code ? (
               <p className="payment-code">Code de validation iPay : <strong>{payment.payment.meta_data.code}</strong></p>
             ) : null}
-            <Button disabled={isLoading || Boolean(activation)} icon={CheckCircle2} onClick={onVerify} variant="primary">
-              {isLoading ? "Vérification…" : activation ? "Licence activée" : "J’ai validé — vérifier le paiement"}
-            </Button>
+            <div className="confirm-dialog__actions">
+              {!activation ? (
+                <Button disabled={isLoading} onClick={onRestart} variant="ghost">
+                  Abandonner et recommencer
+                </Button>
+              ) : null}
+              <Button disabled={isLoading || Boolean(activation)} icon={CheckCircle2} onClick={onVerify} variant="primary">
+                {isLoading ? "Vérification…" : activation ? "Licence activée" : "J’ai validé — vérifier le paiement"}
+              </Button>
+            </div>
           </div>
         )}
       </Card>
@@ -586,7 +633,7 @@ function OrganizationPaymentStep({
   );
 }
 
-function ResellerAccessStep({ onBack, onSuccess }: { onBack: () => void; onSuccess: () => void }) {
+export function ResellerAccessStep({ onBack, onSuccess }: { onBack: () => void; onSuccess: () => void }) {
   const [mode, setMode] = useState<"login" | "register" | "reset">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -735,6 +782,30 @@ function ResellerAccessStep({ onBack, onSuccess }: { onBack: () => void; onSucce
     }
   };
 
+  const restartRegistrationPayment = async () => {
+    if (!registrationPayment) return;
+    try {
+      setIsLoading(true);
+      setError(null);
+      const result = await abandonPaymentOrder({
+        orderId: registrationPayment.order.order_id,
+        orderToken: registrationPayment.order_token
+      });
+      setRegistrationPayment((current) => current ? { ...current, order: result.order } : current);
+      if (!result.abandoned) {
+        setError("Ce paiement a finalement été confirmé. Continuez avec le bouton de vérification.");
+        return;
+      }
+      localStorage.removeItem(pendingResellerPaymentStorageKey);
+      setRegistrationPayment(null);
+      setError("Tentative abandonnée. Vous pouvez relancer votre inscription et votre paiement.");
+    } catch (paymentError) {
+      setError(errorMessage(paymentError, "Impossible d'abandonner cette tentative."));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const resetPassword = async () => {
     if (newPassword !== confirmPassword) {
       setError("Les nouveaux mots de passe ne correspondent pas.");
@@ -857,6 +928,11 @@ function ResellerAccessStep({ onBack, onSuccess }: { onBack: () => void; onSucce
           {error ? <p className="form-error">{error}</p> : null}
           <div className="confirm-dialog__actions">
             <Button icon={ChevronLeft} onClick={onBack} variant="ghost">Retour</Button>
+            {registrationPayment && registrationPayment.order.fulfillment_status !== "fulfilled" ? (
+              <Button disabled={isLoading} onClick={() => void restartRegistrationPayment()} variant="ghost">
+                Abandonner et recommencer
+              </Button>
+            ) : null}
             <Button
               disabled={isLoading}
               icon={LogIn}
@@ -1076,10 +1152,12 @@ function ProfilesStep({
 }
 
 function SummaryStep({
+  paymentConfirmed,
   selectedPlanName,
   state,
   summary
 }: {
+  paymentConfirmed: boolean;
   selectedPlanName: string;
   state: FirstLaunchState;
   summary: FirstLaunchSummary | null;
@@ -1093,9 +1171,24 @@ function SummaryStep({
       <StatCard icon={Building2} label="Compte" value={state.account.email || "À créer"} hint={state.account.companyName || "Entreprise"} />
       <StatCard icon={CreditCard} label="Pack" value={selectedPlanName} hint={state.subscriptionStatus === "trial" ? "Essai" : "Actif manuel"} />
       <StatCard icon={ShieldCheck} label="Profils configurés" value={String(configuredProfiles.length)} hint={configuredProfiles.join(", ") || "Admin requis"} />
-      <StatCard icon={UserRound} label="Statut" value={summary ? "Créé" : "Prêt"} hint="Aucun paiement en ligne" />
+      <StatCard
+        icon={UserRound}
+        label="Statut"
+        value={summary ? "Créé" : "Prêt"}
+        hint={paymentConfirmed ? "Paiement confirmé" : "Activation par clé"}
+      />
     </div>
   );
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message.trim()) return error.message;
+  if (typeof error === "string" && error.trim()) return error;
+  if (error && typeof error === "object" && "message" in error) {
+    const message = String((error as { message?: unknown }).message ?? "").trim();
+    if (message) return message;
+  }
+  return fallback;
 }
 
 function billingPeriodLabel(period: LicensePlan["billing_period"]): string {

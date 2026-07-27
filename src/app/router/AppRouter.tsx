@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
+import { HashRouter, Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { ProtectedRoute } from "../auth/ProtectedRoute";
 import { DesktopLayout } from "../layouts/DesktopLayout";
 import { getFirstLaunchRequired } from "../../services/auth";
-import { FirstLaunchPage } from "../../pages/auth/FirstLaunchPage";
+import { FirstLaunchPage, ResellerAccessStep } from "../../pages/auth/FirstLaunchPage";
+import { AccessChoicePage } from "../../pages/auth/AccessChoicePage";
 import { SuperAdminPage } from "../../pages/dev/SuperAdminPage";
 import { LoginPage } from "../../pages/auth/LoginPage";
 import { AccountPage } from "../../pages/global/AccountPage";
@@ -66,6 +67,11 @@ export function AppRouter() {
   return (
     <HashRouter>
       <Routes>
+        <Route path="/acces" element={<AccessChoicePage />} />
+        <Route
+          path="/connexion-revendeur"
+          element={<ResellerLoginRoute onSuccess={() => setResellerMode(true)} />}
+        />
         <Route path="/dev-super-admin" element={<SuperAdminPage />} />
         <Route path="/login" element={<LoginPage />} />
 
@@ -143,5 +149,16 @@ export function AppRouter() {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </HashRouter>
+  );
+}
+
+function ResellerLoginRoute({ onSuccess }: { onSuccess: () => void }) {
+  const navigate = useNavigate();
+
+  return (
+    <ResellerAccessStep
+      onBack={() => navigate("/acces", { replace: true })}
+      onSuccess={onSuccess}
+    />
   );
 }

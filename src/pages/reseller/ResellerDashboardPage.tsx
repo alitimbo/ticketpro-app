@@ -2,10 +2,16 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { CreditCard, KeyRound, LogOut, RefreshCw, Router, ShoppingCart, Users } from "lucide-react";
 import { Badge, Button, Card, StatCard } from "../../shared/ui";
 import { formatCfa } from "../global/subscriptionPageModel";
-import { getPaymentOrderStatus, type InitiatedPaymentOrder, type IpayPaymentType } from "../../services/payments";
+import {
+  abandonPaymentOrder,
+  getPaymentOrderStatus,
+  type InitiatedPaymentOrder,
+  type IpayPaymentType
+} from "../../services/payments";
 import { listLicensePlans, type LicensePlan } from "../../services/licensing";
 import {
   createResellerLicense,
+  clearResellerSession,
   getResellerOverview,
   initiateResellerPackPayment,
   listResellerLicenses,
@@ -59,7 +65,13 @@ export function ResellerDashboardPage({ onExit }: { onExit: () => void }) {
         await refresh(token);
       })
       .catch((loadError) => {
-        setError(loadError instanceof Error ? loadError.message : "Espace revendeur indisponible.");
+        const message = loadError instanceof Error ? loadError.message : "Espace revendeur indisponible.";
+        if (/session revendeur invalide|erreur revendeur \(401\)/i.test(message)) {
+          clearResellerSession();
+          onExit();
+          return;
+        }
+        setError(message);
       })
       .finally(() => setIsLoading(false));
   }, [onExit, refresh]);
@@ -99,6 +111,27 @@ export function ResellerDashboardPage({ onExit }: { onExit: () => void }) {
       if (result.order.fulfillment_status === "fulfilled") await refresh(sessionToken);
     } catch (paymentError) {
       setError(paymentError instanceof Error ? paymentError.message : "Vérification impossible.");
+    }
+  };
+
+  const restartPayment = async () => {
+    if (!sessionToken || !payment) return;
+    try {
+      setError(null);
+      const result = await abandonPaymentOrder({
+        orderId: payment.order.order_id,
+        orderToken: payment.order_token,
+        resellerSessionToken: sessionToken
+      });
+      if (!result.abandoned) {
+        setPayment((current) => current ? { ...current, order: result.order } : current);
+        if (result.order.fulfillment_status === "fulfilled") await refresh(sessionToken);
+        return;
+      }
+      setPayment(null);
+      setError("Tentative abandonnée. Vous pouvez lancer un nouveau paiement.");
+    } catch (paymentError) {
+      setError(paymentError instanceof Error ? paymentError.message : "Abandon impossible.");
     }
   };
 
@@ -201,7 +234,12 @@ export function ResellerDashboardPage({ onExit }: { onExit: () => void }) {
                 {payment.order.fulfillment_status === "fulfilled" ? "Crédits ajoutés" : "Paiement en attente"}
               </Badge>
               {payment.payment.meta_data?.code ? <p>Code iPay : <strong>{payment.payment.meta_data.code}</strong></p> : null}
-              <Button onClick={() => void verifyPayment()} variant="ghost">Vérifier le paiement</Button>
+              <div className="confirm-dialog__actions">
+                {payment.order.fulfillment_status !== "fulfilled" ? (
+                  <Button onClick={() => void restartPayment()} variant="ghost">Abandonner et recommencer</Button>
+                ) : null}
+                <Button onClick={() => void verifyPayment()} variant="ghost">Vérifier le paiement</Button>
+              </div>
             </div>
           ) : null}
         </Card>
