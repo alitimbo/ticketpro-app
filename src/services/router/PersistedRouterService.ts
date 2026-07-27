@@ -5,6 +5,7 @@ import { DatabaseRouterActionLogger } from "../logging";
 import { decryptLocalSecret, isEncryptedLocalSecret } from "../security/localSecrets";
 import { MikroTikRouterAdapter } from "./MikroTikRouterAdapter";
 import { PersistedPlanMappingRouterAdapter } from "./PersistedPlanMappingRouterAdapter";
+import type { RouterAdapter } from "./RouterAdapter";
 import { RouterService, type RouterActionLogger } from "./RouterService";
 
 export async function createPersistedRouterService(input: {
@@ -15,7 +16,6 @@ export async function createPersistedRouterService(input: {
   database?: DatabaseClient;
 }): Promise<RouterService> {
   const { router, connections = [] } = input;
-  const connection = selectConnection(router, connections);
   const password = await resolvePersistedRouterPassword(router.encrypted_password);
 
   const databaseLogger = input.database ? new DatabaseRouterActionLogger(input.database) : null;
@@ -30,22 +30,14 @@ export async function createPersistedRouterService(input: {
       }
     : undefined;
 
-  const mikrotikAdapter = new MikroTikRouterAdapter({
-    connectionMode: connection?.mode ?? router.connection_mode,
-    host: connection?.host ?? router.local_ip,
-    password,
-    port: connection?.port ?? router.api_port,
-    timeoutMs: 5000,
-    useSsl: connection ? connection.use_ssl === 1 : false,
-    username: router.username
-  });
+  const mikrotikAdapter = await selectReachableAdapter(router, connections, password);
   const plans = input.database
     ? await input.database.query<HotspotPlanRecord>(
         "SELECT * FROM hotspot_plans WHERE router_id = ?1 AND deleted_at IS NULL",
         [router.id]
       )
     : [];
-  const adapter = plans.length > 0
+  const adapter: RouterAdapter = plans.length > 0
     ? new PersistedPlanMappingRouterAdapter(mikrotikAdapter, plans)
     : mikrotikAdapter;
 
@@ -64,13 +56,79 @@ async function resolvePersistedRouterPassword(value: string): Promise<string> {
   return decryptLocalSecret(value);
 }
 
-function selectConnection(router: RouterRecord, connections: RouterConnectionRecord[]): RouterConnectionRecord | undefined {
-  if (router.connection_mode === "local") {
-    return connections.find((connection) => connection.mode === "local");
+async function selectReachableAdapter(
+  router: RouterRecord,
+  storedConnections: RouterConnectionRecord[],
+  password: string
+): Promise<MikroTikRouterAdapter> {
+  const connections = orderConnections(router, storedConnections);
+  const adapters = connections.map((connection) =>
+    new MikroTikRouterAdapter({
+      connectionMode: connection.mode,
+      host: connection.host,
+      password,
+      port: connection.port,
+      timeoutMs: 5000,
+      useSsl: connection.use_ssl === 1,
+      username: router.username
+    })
+  );
+  const fallback = adapters[0] ?? new MikroTikRouterAdapter({
+    connectionMode: "local",
+    host: router.local_ip,
+    password,
+    port: router.api_port,
+    timeoutMs: 5000,
+    useSsl: false,
+    username: router.username
+  });
+
+  if (adapters.length <= 1) {
+    return fallback;
   }
 
-  return (
-    connections.find((connection) => connection.mode === router.connection_mode) ??
-    connections.find((connection) => connection.mode !== "local")
-  );
+  for (const adapter of adapters) {
+    try {
+      await adapter.testConnection();
+      return adapter;
+    } catch {
+      // Try the next known endpoint. The chosen adapter will still expose the
+      // exact RouterOS error when the page performs its requested operation.
+    }
+  }
+
+  return fallback;
+}
+
+function orderConnections(router: RouterRecord, storedConnections: RouterConnectionRecord[]): RouterConnectionRecord[] {
+  const connections = [...storedConnections];
+  if (!connections.some((connection) => connection.mode === "local")) {
+    connections.push({
+      created_at: "",
+      deleted_at: null,
+      host: router.local_ip,
+      id: `${router.id}:local-runtime`,
+      last_connected_at: null,
+      last_error: null,
+      mode: "local",
+      port: router.api_port,
+      router_id: router.id,
+      status: "inactive",
+      sync_status: "local",
+      updated_at: "",
+      use_ssl: 0
+    });
+  }
+
+  const modeWeight = (connection: RouterConnectionRecord): number => {
+    if (connection.mode === router.connection_mode) return 0;
+    if (connection.mode === "local") return 1;
+    if (connection.mode === "vpn") return 2;
+    if (connection.mode === "distant_ip") return 3;
+    return 4;
+  };
+
+  return connections
+    .filter((connection) => connection.mode !== "agent_future" && connection.host.trim().length > 0)
+    .sort((left, right) => modeWeight(left) - modeWeight(right));
 }
