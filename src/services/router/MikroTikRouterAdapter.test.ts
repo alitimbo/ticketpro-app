@@ -79,7 +79,7 @@ describe("MikroTikRouterAdapter", () => {
     });
   });
 
-  it("crée un utilisateur réel dans /ip/hotspot/user/add sans exposer le mot de passe dans l'erreur", async () => {
+  it("crée un utilisateur réel avec les limites RouterOS sans exposer le mot de passe", async () => {
     const transport = new MockRouterOsTransport({
       "/ip/hotspot/user/add": [],
       "/ip/hotspot/user/print": [
@@ -103,6 +103,8 @@ describe("MikroTikRouterAdapter", () => {
 
     await expect(
       adapter.createHotspotUser({
+        limitBytesTotal: 2147483648,
+        limitUptime: "3h",
         passwordSecretRef: "secret://routeur-demo/123456/password",
         planId: "*P1",
         username: "123456"
@@ -111,6 +113,8 @@ describe("MikroTikRouterAdapter", () => {
 
     const addCall = transport.calls.find((call) => call.command === "/ip/hotspot/user/add");
     expect(addCall?.params).toMatchObject({
+      "limit-bytes-total": 2147483648,
+      "limit-uptime": "3h",
       name: "123456",
       password: "123456",
       profile: "plan-3h"
@@ -126,7 +130,7 @@ describe("MikroTikRouterAdapter", () => {
     expect(normalizeMikroTikError(new Error("authentication failed")).code).toBe("authentication_failed");
   });
 
-  it("injecte idempotemment la configuration WireGuard dans RouterOS", async () => {
+  it("injecte idempotemment WireGuard avec de vraies query words", async () => {
     const transport = new MockRouterOsTransport({});
     const adapter = createAdapter(transport);
 
@@ -150,11 +154,20 @@ describe("MikroTikRouterAdapter", () => {
       "/ip/route/print",
       "/ip/route/add",
       "/ip/firewall/filter/print",
+      "/ip/firewall/filter/print",
       "/ip/firewall/filter/add"
     ]);
+    expect(transport.calls.find((call) => call.command === "/interface/wireguard/print")?.queries).toEqual({
+      name: "ticketpro-vpn"
+    });
     expect(transport.calls.find((call) => call.command === "/interface/wireguard/add")?.params).toMatchObject({
       name: "ticketpro-vpn",
       "private-key": "router-private"
+    });
+    expect(transport.calls.find((call) => call.command === "/ip/firewall/filter/add")?.params).toMatchObject({
+      action: "accept",
+      chain: "input",
+      "in-interface": "ticketpro-vpn"
     });
   });
 });
