@@ -5,6 +5,7 @@ import { DatabaseRouterActionLogger } from "../logging";
 import { decryptLocalSecret, isEncryptedLocalSecret } from "../security/localSecrets";
 import { MikroTikRouterAdapter } from "./MikroTikRouterAdapter";
 import { PersistedPlanMappingRouterAdapter } from "./PersistedPlanMappingRouterAdapter";
+import { registerPersistedRouterService } from "./PersistedRouterServiceRegistry";
 import type { RouterAdapter } from "./RouterAdapter";
 import { RouterService, type RouterActionLogger } from "./RouterService";
 
@@ -40,12 +41,14 @@ export async function createPersistedRouterService(input: {
   const adapter: RouterAdapter = plans.length > 0
     ? new PersistedPlanMappingRouterAdapter(mikrotikAdapter, plans)
     : mikrotikAdapter;
-
-  return new RouterService({
+  const service = new RouterService({
     adapter,
     authSession: input.authSession,
     logger
   });
+
+  registerPersistedRouterService(router.id, service);
+  return service;
 }
 
 async function resolvePersistedRouterPassword(value: string): Promise<string> {
