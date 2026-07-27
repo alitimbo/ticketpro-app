@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+export type RouterOsApiValue = string | number | boolean | null | undefined;
+
 export type RouterOsApiConfig = {
   host: string;
   password: string;
@@ -12,7 +14,10 @@ export type RouterOsApiConfig = {
 
 export type RouterOsApiRequest = RouterOsApiConfig & {
   command: string;
-  params?: Record<string, string | number | boolean | null | undefined>;
+  /** Attributes sent as =name=value words for add/set/action commands. */
+  params?: Record<string, RouterOsApiValue>;
+  /** Query words sent as ?name=value for filtered print commands. */
+  queries?: Record<string, RouterOsApiValue>;
 };
 
 export type RouterOsApiRow = Record<string, string>;
@@ -28,6 +33,7 @@ export class TauriRouterOsApiTransport implements RouterOsApiTransport {
         command: request.command,
         host: request.host,
         params: request.params ?? {},
+        queries: request.queries ?? {},
         password: request.password,
         port: request.port,
         retries: request.retries ?? 1,
