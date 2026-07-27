@@ -1,8 +1,87 @@
-# TicketPro License API
+# TicketPro SaaS API
 
-API VPS pour le catalogue, les clés d’activation et les packs revendeur TicketPro.
+API centrale TicketPro pour les comptes d'organisation, les abonnements, les
+paiements iPay et le VPN distant. Les routes historiques de licences et de
+revendeurs sont conservées temporairement uniquement pour la migration.
 
-SQLite ne conserve que les HMAC des clés et des jetons. Les clés et jetons en clair ne sont retournés qu’au moment de leur création.
+SQLite conserve les mots de passe avec `scrypt` et uniquement les HMAC des
+sessions. Les jetons en clair ne sont retournés qu'au moment de leur création.
+
+## Parcours SaaS principal
+
+```text
+POST /v1/saas/register-and-pay
+→ création du compte en attente
+→ paiement iPay
+→ POST /v1/payments/orders/status
+→ POST /v1/saas/registration/complete
+→ session SaaS et abonnement actif
+```
+
+Une organisation peut se connecter depuis plusieurs PC. Le quota porte sur les
+routeurs, pas sur le nombre d'installations. À l'expiration, la connexion, le
+compte et le paiement restent accessibles, mais les services opérationnels et
+le VPN répondent avec `402 SUBSCRIPTION_REQUIRED`.
+
+Routes principales :
+
+- `GET /v1/plans`
+- `POST /v1/saas/register-trial`
+- `POST /v1/saas/register-and-pay`
+- `POST /v1/saas/registration/complete`
+- `POST /v1/saas/auth/login`
+- `GET /v1/saas/auth/me`
+- `POST /v1/saas/auth/switch-organization`
+- `POST /v1/saas/auth/logout`
+- `POST /v1/saas/auth/forgot-password`
+- `POST /v1/saas/auth/reset-password`
+- `POST /v1/saas/invitations/inspect`
+- `POST /v1/saas/invitations/accept`
+- `POST /v1/saas/subscriptions/purchase`
+- `GET /v1/saas/services/access`
+- `POST /v1/saas/vpn/bootstrap`
+- `POST /v1/saas/vpn/peers`
+- `POST /v1/saas/migrate-license`
+- `GET /v1/saas/team`
+- `POST /v1/saas/team/members`
+- `POST /v1/saas/team/members/update`
+- `POST /v1/saas/team/members/resend-invitation`
+- `POST /v1/saas/team/members/remove`
+
+L'essai gratuit dure 7 jours et autorise un seul routeur. Il ne peut être
+activé qu'une fois par organisation. Un achat effectué pendant l'essai le
+remplace immédiatement.
+
+Chaque employé possède une identité unique, mais peut appartenir à plusieurs
+organisations avec un rôle et des affectations de routeurs différents dans
+chacune. Les rôles applicatifs sont `admin`, `operator`, `agent` et `guest`.
+Les invitations utilisent un lien temporaire : une nouvelle identité y définit
+son mot de passe, tandis qu'une identité existante conserve le sien.
+
+`POST /v1/saas/migrate-license` exige la preuve cryptographique d'une ancienne
+activation encore valide. La migration conserve le quota et la date
+d'expiration de la licence.
+
+## Réinitialisation des mots de passe
+
+Les emails sont envoyés directement par Nodemailer depuis le VPS. Pour LWS,
+utiliser de préférence le port `465` avec `SMTP_SECURE=true`. Le serveur exact
+est celui affiché dans les paramètres de la boîte LWS (`mail.domaine.com` ou
+`mailXX.lwspanel.com`). `SMTP_FROM_EMAIL` doit correspondre à la boîte
+authentifiée.
+
+Les variables SMTP sont `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`,
+`SMTP_PASSWORD`, `SMTP_FROM_EMAIL` et `SMTP_FROM_NAME`. Aucun de ces secrets ne
+doit être placé dans l'application Windows ou la landing page.
+
+`SAAS_INVITATION_URL` doit pointer vers
+`https://ticketpro.autoticket-ne.com/accept-invitation`. Une identité existante
+accepte l'invitation sans changer son mot de passe. Une nouvelle identité crée
+son mot de passe pendant l'acceptation.
+
+Le lien expire après 30 minutes et son utilisation révoque toutes les anciennes
+sessions du compte. Un propriétaire peut vérifier la configuration avec
+`POST /v1/admin/email/test`.
 
 ## Démarrage VPS
 

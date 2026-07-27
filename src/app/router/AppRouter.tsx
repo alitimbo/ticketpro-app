@@ -1,10 +1,10 @@
 import { useState } from "react";
-import { HashRouter, Navigate, Route, Routes, useNavigate } from "react-router-dom";
+import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { ProtectedRoute } from "../auth/ProtectedRoute";
 import { DesktopLayout } from "../layouts/DesktopLayout";
 import { getFirstLaunchRequired } from "../../services/auth";
-import { FirstLaunchPage, ResellerAccessStep } from "../../pages/auth/FirstLaunchPage";
-import { AccessChoicePage } from "../../pages/auth/AccessChoicePage";
+import { SaasFirstLaunchPage } from "../../pages/auth/SaasFirstLaunchPage";
+import { PasswordResetPage } from "../../pages/auth/PasswordResetPage";
 import { SuperAdminPage } from "../../pages/dev/SuperAdminPage";
 import { LoginPage } from "../../pages/auth/LoginPage";
 import { AccountPage } from "../../pages/global/AccountPage";
@@ -14,6 +14,7 @@ import { InvoicesPage } from "../../pages/global/InvoicesPage";
 import { RoutersPage } from "../../pages/global/RoutersPage";
 import { VpnPage } from "../../pages/global/VpnPage";
 import { SubscriptionPage } from "../../pages/global/SubscriptionPage";
+import { TeamPage } from "../../pages/global/TeamPage";
 import { ConnectedClientsPage } from "../../pages/router/ConnectedClientsPage";
 import { FilesPage } from "../../pages/router/FilesPage";
 import { LogsPage } from "../../pages/router/LogsPage";
@@ -24,26 +25,9 @@ import { RouterHomePage } from "../../pages/router/RouterHomePage";
 import { RouterSettingsPage } from "../../pages/router/RouterSettingsPage";
 import { TicketGenerationPage } from "../../pages/router/TicketGenerationPage";
 import { TicketsPage } from "../../pages/router/TicketsPage";
-import { ResellerDashboardPage } from "../../pages/reseller/ResellerDashboardPage";
-import { appModeStorageKey } from "../../services/reseller";
 
 export function AppRouter() {
   const [firstLaunchRequired, setFirstLaunchRequired] = useState(() => getFirstLaunchRequired());
-  const [resellerMode, setResellerMode] = useState(() => localStorage.getItem(appModeStorageKey) === "reseller");
-
-  if (resellerMode) {
-    return (
-      <HashRouter>
-        <Routes>
-          <Route
-            path="/revendeur"
-            element={<ResellerDashboardPage onExit={() => setResellerMode(false)} />}
-          />
-          <Route path="*" element={<Navigate to="/revendeur" replace />} />
-        </Routes>
-      </HashRouter>
-    );
-  }
 
   if (firstLaunchRequired) {
     return (
@@ -51,12 +35,7 @@ export function AppRouter() {
         <Routes>
           <Route
             path="/premier-lancement"
-            element={(
-              <FirstLaunchPage
-                onComplete={() => setFirstLaunchRequired(false)}
-                onResellerAccess={() => setResellerMode(true)}
-              />
-            )}
+            element={<SaasFirstLaunchPage onComplete={() => setFirstLaunchRequired(false)} />}
           />
           <Route path="*" element={<Navigate to="/premier-lancement" replace />} />
         </Routes>
@@ -67,17 +46,23 @@ export function AppRouter() {
   return (
     <HashRouter>
       <Routes>
-        <Route path="/acces" element={<AccessChoicePage />} />
-        <Route
-          path="/connexion-revendeur"
-          element={<ResellerLoginRoute onSuccess={() => setResellerMode(true)} />}
-        />
+        <Route path="/acces" element={<Navigate to="/login" replace />} />
         <Route path="/dev-super-admin" element={<SuperAdminPage />} />
         <Route path="/login" element={<LoginPage />} />
+        <Route
+          path="/inscription"
+          element={<SaasFirstLaunchPage onComplete={() => setFirstLaunchRequired(false)} />}
+        />
+        <Route path="/mot-de-passe-oublie" element={<PasswordResetPage />} />
 
         <Route element={<ProtectedRoute permissions={["global.home"]} />}>
           <Route element={<DesktopLayout scope="global" />}>
             <Route index element={<GlobalHomePage />} />
+          </Route>
+        </Route>
+
+        <Route element={<ProtectedRoute permissions={["global.home"]} requireSubscription={false} />}>
+          <Route element={<DesktopLayout scope="global" />}>
             <Route path="mon-compte" element={<AccountPage />} />
           </Route>
         </Route>
@@ -88,13 +73,19 @@ export function AppRouter() {
           </Route>
         </Route>
 
-        <Route element={<ProtectedRoute permissions={["global.subscription"]} />}>
+        <Route element={<ProtectedRoute permissions={["global.team"]} />}>
+          <Route element={<DesktopLayout scope="global" />}>
+            <Route path="equipe" element={<TeamPage />} />
+          </Route>
+        </Route>
+
+        <Route element={<ProtectedRoute permissions={["global.subscription"]} requireSubscription={false} />}>
           <Route element={<DesktopLayout scope="global" />}>
             <Route path="abonnement" element={<SubscriptionPage />} />
           </Route>
         </Route>
 
-        <Route element={<ProtectedRoute permissions={["global.invoices"]} />}>
+        <Route element={<ProtectedRoute permissions={["global.invoices"]} requireSubscription={false} />}>
           <Route element={<DesktopLayout scope="global" />}>
             <Route path="factures" element={<InvoicesPage />} />
           </Route>
@@ -149,16 +140,5 @@ export function AppRouter() {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </HashRouter>
-  );
-}
-
-function ResellerLoginRoute({ onSuccess }: { onSuccess: () => void }) {
-  const navigate = useNavigate();
-
-  return (
-    <ResellerAccessStep
-      onBack={() => navigate("/acces", { replace: true })}
-      onSuccess={onSuccess}
-    />
   );
 }

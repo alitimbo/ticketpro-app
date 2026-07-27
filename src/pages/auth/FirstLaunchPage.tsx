@@ -581,9 +581,9 @@ function OrganizationPaymentStep({
               onChange={(event) => onPaymentTypeChange(event.target.value as IpayPaymentType)}
               value={paymentType}
             >
-              <option value="mobile">Orange / Moov / Zamani</option>
-              <option value="nita_online">Nita</option>
-              <option value="amanata">Amana</option>
+              <option value="mobile">Mobile Money (Airtel, Moov, Zamani)</option>
+              <option value="nita_online">MyNita</option>
+              <option value="amanata">Amanata</option>
             </select>
           </label>
         </div>
@@ -878,9 +878,9 @@ export function ResellerAccessStep({ onBack, onSuccess }: { onBack: () => void; 
               </label>
               <label className="form-field">Moyen de paiement
                 <select onChange={(event) => setPaymentType(event.target.value as IpayPaymentType)} value={paymentType}>
-                  <option value="mobile">Orange / Moov / Zamani</option>
-                  <option value="nita_online">Nita</option>
-                  <option value="amanata">Amana</option>
+                  <option value="mobile">Mobile Money (Airtel, Moov, Zamani)</option>
+                  <option value="nita_online">MyNita</option>
+                  <option value="amanata">Amanata</option>
                 </select>
               </label>
             </div>

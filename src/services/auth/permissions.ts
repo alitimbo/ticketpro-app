@@ -27,6 +27,7 @@ export const allPermissions: Permission[] = [
   "global.vpn",
   "global.settings",
   "global.settings.profiles",
+  "global.team",
   "router.home",
   "router.plans.read",
   "router.plans.write",

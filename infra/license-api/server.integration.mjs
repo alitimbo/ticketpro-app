@@ -5,6 +5,7 @@ import { once } from "node:events";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 const port = 20_000 + Math.floor(Math.random() * 10_000);
 const ipayPort = 30_000 + Math.floor(Math.random() * 10_000);
@@ -131,7 +132,8 @@ before(async () => {
       IPAY_PRIVATE_KEY: "ipay-private-test",
       IPAY_SECRET_HASH: "ipay-webhook-secret-test",
       VPN_HUB_URL: `http://127.0.0.1:${hubPort}`,
-      VPN_HUB_MASTER_TOKEN: hubMasterToken
+      VPN_HUB_MASTER_TOKEN: hubMasterToken,
+      SAAS_EXPOSE_RESET_TOKEN: "true"
     },
     stdio: ["ignore", "ignore", "pipe"]
   });
@@ -153,6 +155,372 @@ after(async () => {
       if (error.code !== "ENOENT") throw error;
     }
   }
+});
+
+test("l'essai SaaS dure 7 jours, limite à un routeur et un forfait payant le remplace immédiatement", async () => {
+  const trial = await api("/v1/saas/register-trial", {
+    body: {
+      organization_name: "Essai WiFi Niger",
+      name: "Client Essai",
+      email: "trial.saas@example.com",
+      password: "EssaiSimple123",
+      confirm_password: "EssaiSimple123"
+    }
+  });
+  assert.equal(trial.status, 200);
+  assert.equal(trial.payload.organization.status, "active");
+  assert.equal(trial.payload.subscription.status, "active");
+  assert.equal(trial.payload.subscription.router_limit, 1);
+  assert.equal(trial.payload.subscription.plan.code, "TRIAL-7D");
+  assert.equal(trial.payload.access.can_manage_routers, true);
+  const trialDurationDays = (
+    Date.parse(trial.payload.subscription.current_period_end)
+    - Date.parse(trial.payload.subscription.current_period_start)
+  ) / 86_400_000;
+  assert.ok(trialDurationDays > 6.99 && trialDurationDays <= 7.01);
+
+  const services = await api("/v1/saas/services/access", {
+    method: "GET",
+    token: trial.payload.session.token
+  });
+  assert.equal(services.status, 200);
+  assert.equal(services.payload.router_limit, 1);
+
+  const plans = await api("/v1/plans", { method: "GET" });
+  const paidPlan = plans.payload.plans[0];
+  const purchase = await api("/v1/saas/subscriptions/purchase", {
+    token: trial.payload.session.token,
+    body: {
+      plan_id: paidPlan.id,
+      msisdn: "90909090",
+      payment_type: "mobile"
+    }
+  });
+  assert.equal(purchase.status, 200);
+  const paid = await api("/v1/payments/orders/status", {
+    body: {
+      order_id: purchase.payload.order.order_id,
+      order_token: purchase.payload.order_token
+    }
+  });
+  assert.equal(paid.status, 200);
+  assert.equal(paid.payload.order.fulfillment_status, "fulfilled");
+
+  const upgraded = await api("/v1/saas/auth/me", {
+    method: "GET",
+    token: trial.payload.session.token
+  });
+  assert.equal(upgraded.status, 200);
+  assert.equal(upgraded.payload.subscription.plan.code, paidPlan.code);
+  assert.equal(upgraded.payload.subscription.router_limit, paidPlan.router_limit);
+  assert.ok(Date.parse(upgraded.payload.subscription.current_period_start) <= Date.now() + 5_000);
+
+  const secondTrial = await api("/v1/saas/register-trial", {
+    body: {
+      organization_name: "Essai WiFi Niger",
+      name: "Client Essai",
+      email: "trial.saas@example.com",
+      password: "EssaiSimple123",
+      confirm_password: "EssaiSimple123"
+    }
+  });
+  assert.equal(secondTrial.status, 409);
+});
+
+test("une inscription abandonnée sans essai ni paiement ne peut pas ouvrir de session", async () => {
+  const plans = await api("/v1/plans", { method: "GET" });
+  const registration = await api("/v1/saas/register-and-pay", {
+    body: {
+      organization_name: "Paiement Abandonné",
+      name: "Client Pending",
+      email: "pending.saas@example.com",
+      password: "PendingSimple123",
+      confirm_password: "PendingSimple123",
+      plan_id: plans.payload.plans[0].id,
+      msisdn: "91919191",
+      payment_type: "mobile"
+    }
+  });
+  assert.equal(registration.status, 200);
+
+  const login = await api("/v1/saas/auth/login", {
+    body: {
+      email: "pending.saas@example.com",
+      password: "PendingSimple123"
+    }
+  });
+  assert.equal(login.status, 403);
+
+  const recoveredWithTrial = await api("/v1/saas/register-trial", {
+    body: {
+      organization_name: "Paiement Abandonné",
+      name: "Client Pending",
+      email: "pending.saas@example.com",
+      password: "PendingSimple123",
+      confirm_password: "PendingSimple123"
+    }
+  });
+  assert.equal(recoveredWithTrial.status, 200);
+  assert.equal(recoveredWithTrial.payload.subscription.plan.code, "TRIAL-7D");
+});
+
+test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une session", async () => {
+  const plans = await api("/v1/plans", { method: "GET" });
+  assert.equal(plans.status, 200);
+  assert.ok(plans.payload.plans.length >= 1);
+  assert.equal(plans.payload.plans.some((plan) => plan.is_reseller), false);
+  const plan = plans.payload.plans[0];
+
+  const registration = await api("/v1/saas/register-and-pay", {
+    body: {
+      organization_name: "WiFi Sahel",
+      name: "Amina Test",
+      email: "amina.saas@example.com",
+      password: "SaaSsimple123",
+      confirm_password: "SaaSsimple123",
+      plan_id: plan.id,
+      msisdn: "90909090",
+      payment_type: "mobile"
+    }
+  });
+  assert.equal(registration.status, 200);
+  assert.equal(registration.payload.registration.next_step, "confirm_payment");
+
+  const paid = await api("/v1/payments/orders/status", {
+    body: {
+      order_id: registration.payload.order.order_id,
+      order_token: registration.payload.order_token
+    }
+  });
+  assert.equal(paid.status, 200);
+  assert.equal(paid.payload.order.fulfillment_status, "fulfilled");
+  assert.equal("license_key" in paid.payload.order, false);
+
+  const completion = await api("/v1/saas/registration/complete", {
+    body: {
+      order_id: registration.payload.order.order_id,
+      order_token: registration.payload.order_token
+    }
+  });
+  assert.equal(completion.status, 200);
+  assert.equal(completion.payload.organization.name, "WiFi Sahel");
+  assert.equal(completion.payload.subscription.status, "active");
+  assert.equal(completion.payload.subscription.router_limit, plan.router_limit);
+  assert.equal(completion.payload.access.can_manage_routers, true);
+  const sessionToken = completion.payload.session.token;
+
+  const invitation = await api("/v1/saas/team/members", {
+    token: sessionToken,
+    body: {
+      name: "Moussa Opérateur",
+      email: "moussa.operator@example.com",
+      app_role: "operator",
+      router_access_mode: "selected",
+      router_ids: ["router-niger-1"]
+    }
+  });
+  assert.equal(invitation.status, 200);
+  assert.equal(invitation.payload.member.app_role, "operator");
+  assert.deepEqual(invitation.payload.member.router_access.router_ids, ["router-niger-1"]);
+  assert.equal(invitation.payload.member.invitation_pending, true);
+  assert.ok(invitation.payload.invitation_token);
+
+  const invitationInspection = await api("/v1/saas/invitations/inspect", {
+    body: { invitation_token: invitation.payload.invitation_token }
+  });
+  assert.equal(invitationInspection.status, 200);
+  assert.equal(invitationInspection.payload.requires_password, true);
+
+  const employeePassword = await api("/v1/saas/invitations/accept", {
+    body: {
+      invitation_token: invitation.payload.invitation_token,
+      new_password: "EmployeSimple123",
+      confirm_password: "EmployeSimple123"
+    }
+  });
+  assert.equal(employeePassword.status, 200);
+
+  const employeeLogin = await api("/v1/saas/auth/login", {
+    body: {
+      email: "moussa.operator@example.com",
+      password: "EmployeSimple123"
+    }
+  });
+  assert.equal(employeeLogin.status, 200);
+  assert.equal(employeeLogin.payload.user.app_role, "operator");
+  assert.equal(employeeLogin.payload.user.permissions.includes("global.subscription"), false);
+  assert.deepEqual(employeeLogin.payload.user.router_access.router_ids, ["router-niger-1"]);
+
+  const employeeTeamAccess = await api("/v1/saas/team", {
+    method: "GET",
+    token: employeeLogin.payload.session.token
+  });
+  assert.equal(employeeTeamAccess.status, 403);
+
+  const employeeVpnAccess = await api("/v1/saas/vpn/bootstrap", {
+    token: employeeLogin.payload.session.token,
+    body: {}
+  });
+  assert.equal(employeeVpnAccess.status, 403);
+
+  const secondOrganization = await api("/v1/saas/register-trial", {
+    body: {
+      organization_name: "Deuxième Organisation",
+      name: "Deuxième Propriétaire",
+      email: "second.owner@example.com",
+      password: "SecondOwner123",
+      confirm_password: "SecondOwner123"
+    }
+  });
+  assert.equal(secondOrganization.status, 200);
+
+  const existingIdentityInvitation = await api("/v1/saas/team/members", {
+    token: secondOrganization.payload.session.token,
+    body: {
+      name: "Moussa Opérateur",
+      email: "moussa.operator@example.com",
+      app_role: "agent",
+      router_access_mode: "selected",
+      router_ids: ["router-niger-2"]
+    }
+  });
+  assert.equal(existingIdentityInvitation.status, 200);
+  assert.ok(existingIdentityInvitation.payload.invitation_token);
+
+  const existingInspection = await api("/v1/saas/invitations/inspect", {
+    body: { invitation_token: existingIdentityInvitation.payload.invitation_token }
+  });
+  assert.equal(existingInspection.status, 200);
+  assert.equal(existingInspection.payload.requires_password, false);
+
+  const acceptedSecondOrganization = await api("/v1/saas/invitations/accept", {
+    body: { invitation_token: existingIdentityInvitation.payload.invitation_token }
+  });
+  assert.equal(acceptedSecondOrganization.status, 200);
+
+  const multiOrganizationLogin = await api("/v1/saas/auth/login", {
+    body: {
+      email: "moussa.operator@example.com",
+      password: "EmployeSimple123"
+    }
+  });
+  assert.equal(multiOrganizationLogin.status, 200);
+  assert.equal(multiOrganizationLogin.payload.requires_organization_selection, true);
+  assert.equal(multiOrganizationLogin.payload.organizations.length, 2);
+  const secondMembership = multiOrganizationLogin.payload.organizations.find(
+    (organization) => organization.organization_name === "Deuxième Organisation"
+  );
+  assert.ok(secondMembership);
+
+  const switchedOrganization = await api("/v1/saas/auth/switch-organization", {
+    token: multiOrganizationLogin.payload.session.token,
+    body: { membership_id: secondMembership.membership_id }
+  });
+  assert.equal(switchedOrganization.status, 200);
+  assert.equal(switchedOrganization.payload.organization.name, "Deuxième Organisation");
+  assert.equal(switchedOrganization.payload.user.app_role, "agent");
+  assert.deepEqual(switchedOrganization.payload.user.router_access.router_ids, ["router-niger-2"]);
+  assert.equal(switchedOrganization.payload.requires_organization_selection, false);
+
+  const me = await api("/v1/saas/auth/me", {
+    method: "GET",
+    token: sessionToken
+  });
+  assert.equal(me.status, 200);
+  assert.equal(me.payload.user.email, "amina.saas@example.com");
+
+  const services = await api("/v1/saas/services/access", {
+    method: "GET",
+    token: sessionToken
+  });
+  assert.equal(services.status, 200);
+  assert.equal(services.payload.allowed, true);
+
+  const saasVpn = await api("/v1/saas/vpn/bootstrap", {
+    token: sessionToken,
+    body: {}
+  });
+  assert.equal(saasVpn.status, 200);
+  assert.equal(saasVpn.payload.server_endpoint, "vpn.integration.test");
+  assert.equal(hubRequests.at(-1).body.account_id, completion.payload.organization.id);
+  assert.equal(hubRequests.at(-1).body.router_limit, plan.router_limit);
+
+  const saasPeer = await api("/v1/saas/vpn/peers", {
+    token: sessionToken,
+    body: {
+      action: "upsert",
+      name: "Routeur SaaS",
+      peer_type: "router",
+      public_key: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
+    }
+  });
+  assert.equal(saasPeer.status, 200);
+  assert.equal(saasPeer.payload.assigned_address, "10.250.7.2/32");
+  assert.equal(hubRequests.at(-1).body.account_id, completion.payload.organization.id);
+
+  const login = await api("/v1/saas/auth/login", {
+    body: {
+      email: "amina.saas@example.com",
+      password: "SaaSsimple123"
+    }
+  });
+  assert.equal(login.status, 200);
+  assert.equal(login.payload.subscription.is_active, true);
+
+  const forgot = await api("/v1/saas/auth/forgot-password", {
+    body: { email: "amina.saas@example.com" }
+  });
+  assert.equal(forgot.status, 200);
+  assert.ok(forgot.payload.reset_token);
+
+  const reset = await api("/v1/saas/auth/reset-password", {
+    body: {
+      reset_token: forgot.payload.reset_token,
+      new_password: "NouveauSimple123",
+      confirm_password: "NouveauSimple123"
+    }
+  });
+  assert.equal(reset.status, 200);
+
+  const oldSession = await api("/v1/saas/auth/me", {
+    method: "GET",
+    token: sessionToken
+  });
+  assert.equal(oldSession.status, 401);
+
+  const loginAfterReset = await api("/v1/saas/auth/login", {
+    body: {
+      email: "amina.saas@example.com",
+      password: "NouveauSimple123"
+    }
+  });
+  assert.equal(loginAfterReset.status, 200);
+
+  const integrationDb = new DatabaseSync(databasePath);
+  integrationDb.prepare(`
+    UPDATE organization_subscriptions
+    SET current_period_end = ?, updated_at = ?
+    WHERE organization_id = ?
+  `).run(
+    new Date(Date.now() - 60_000).toISOString(),
+    new Date().toISOString(),
+    completion.payload.organization.id
+  );
+  integrationDb.close();
+
+  const expiredServices = await api("/v1/saas/services/access", {
+    method: "GET",
+    token: loginAfterReset.payload.session.token
+  });
+  assert.equal(expiredServices.status, 402);
+  assert.equal(expiredServices.payload.details.code, "SUBSCRIPTION_REQUIRED");
+
+  const expiredAccountStillAccessible = await api("/v1/saas/auth/me", {
+    method: "GET",
+    token: loginAfterReset.payload.session.token
+  });
+  assert.equal(expiredAccountStillAccessible.status, 200);
+  assert.equal(expiredAccountStillAccessible.payload.subscription.is_active, false);
 });
 
 test("authentification, licences, paiements iPay et crédits revendeur restent cohérents", async () => {
@@ -189,6 +557,12 @@ test("authentification, licences, paiements iPay et crédits revendeur restent c
   assert.equal(adminPasswordChange.status, 200);
   const adminToken = adminPasswordChange.payload.session_token;
 
+  const smtpUnavailable = await api("/v1/admin/email/test", {
+    token: adminToken,
+    body: {}
+  });
+  assert.equal(smtpUnavailable.status, 503);
+
   const admins = await api("/v1/admin/admins/list", {
     token: adminToken,
     body: {}
@@ -214,6 +588,48 @@ test("authentification, licences, paiements iPay et crédits revendeur restent c
     }
   });
   assert.equal(organizationPlan.status, 200);
+
+  const invalidPricelessPlan = await api("/v1/admin/plans", {
+    token: adminToken,
+    body: {
+      id: "integration-invalid-price",
+      code: "INVALID-PRICE",
+      name: "Prix invalide",
+      router_limit: 1,
+      max_devices: 1,
+      duration_days: 30,
+      is_active: true,
+      is_reseller: false
+    }
+  });
+  assert.equal(invalidPricelessPlan.status, 400);
+
+  const recommendedOrganizationPlan = await api("/v1/admin/plans", {
+    token: adminToken,
+    body: {
+      id: "integration-organization-2",
+      code: "INTEGRATION-ORG-2",
+      name: "Organisation 2",
+      router_limit: 2,
+      max_devices: 2,
+      duration_days: 30,
+      price_cfa: 3000,
+      billing_period: "monthly",
+      is_recommended: true,
+      is_reseller: false
+    }
+  });
+  assert.equal(recommendedOrganizationPlan.status, 200);
+  const allPlansAfterRecommendation = await api("/v1/admin/plans/list", {
+    token: adminToken,
+    body: {}
+  });
+  assert.equal(
+    allPlansAfterRecommendation.payload.plans.filter(
+      (plan) => !plan.is_reseller && plan.is_recommended
+    ).length,
+    1
+  );
 
   const organizationLicense = await api("/v1/admin/licenses", {
     token: adminToken,
@@ -462,6 +878,29 @@ test("authentification, licences, paiements iPay et crédits revendeur restent c
   });
   assert.equal(vpnPeer.status, 200);
   assert.equal(vpnPeer.payload.assigned_address, "10.250.7.2/32");
+
+  const migrated = await api("/v1/saas/migrate-license", {
+    body: {
+      license_id: activationA.payload.license_id,
+      activation_token: activationA.payload.activation_token,
+      account_id: "client-a",
+      device_id: "device-a",
+      device_proof: "proof-a",
+      install_id: "install-a",
+      organization_name: "Client A historique",
+      name: "Propriétaire A",
+      email: "client-a@example.com",
+      password: "Migration123",
+      confirm_password: "Migration123"
+    }
+  });
+  assert.equal(migrated.status, 200);
+  assert.equal(migrated.payload.subscription.status, "active");
+  assert.equal(migrated.payload.subscription.router_limit, 6);
+  assert.equal(
+    migrated.payload.subscription.current_period_end,
+    activationA.payload.expires_at
+  );
 
   const rejectedVpnDevice = await api("/v1/vpn/bootstrap", {
     body: {

@@ -1,9 +1,10 @@
-import { ArrowLeft, LogOut, PanelLeftClose, PanelLeftOpen, Router, UserRound } from "lucide-react";
+import { ArrowLeft, LogOut, PanelLeftClose, PanelLeftOpen, Router } from "lucide-react";
 import { useState } from "react";
 import { Outlet, useNavigate, useParams } from "react-router-dom";
 import { useAuth } from "../auth/AuthProvider";
 import { getRouterNavigation, globalNavigation } from "../navigation/routes";
 import { Button, SidebarItem, StatusDot } from "../../shared/ui";
+import ticketProLogo from "../../../src-tauri/icons/icon.png";
 
 type DesktopLayoutProps = {
   scope: "global" | "router";
@@ -13,16 +14,11 @@ export function DesktopLayout({ scope }: DesktopLayoutProps) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const navigate = useNavigate();
   const { routerId = "" } = useParams();
-  const { accountSession, logoutAccount, logoutProfile, session } = useAuth();
+  const { accountSession, logoutAccount, saasAccount, session, switchOrganization } = useAuth();
   const isRouterScope = scope === "router";
   const navigation = (isRouterScope ? getRouterNavigation(routerId, session?.internal_profile_role) : globalNavigation).filter(
     (item) => session && (item.permissions.length === 0 || item.permissions.some((permission) => session.permissions.includes(permission)))
   );
-
-  const handleProfileLogout = () => {
-    logoutProfile();
-    navigate("/login", { replace: true });
-  };
 
   const handleAccountLogout = () => {
     logoutAccount();
@@ -35,7 +31,7 @@ export function DesktopLayout({ scope }: DesktopLayoutProps) {
     <div className={sidebarCollapsed ? "app-shell app-shell--sidebar-collapsed" : "app-shell"}>
       <aside className="sidebar" aria-label="Navigation principale">
         <div className="sidebar__brand">
-          <div className="sidebar__mark">GH</div>
+          <img className="sidebar__mark" src={ticketProLogo} alt="" aria-hidden="true" />
           <div className="sidebar__brand-copy">
             <p className="sidebar__title">TicketPro</p>
             <p className="sidebar__subtitle">
@@ -75,11 +71,27 @@ export function DesktopLayout({ scope }: DesktopLayoutProps) {
             status={session ? "active" : "offline"}
           />
           {accountSession ? <p className="sidebar__footer-label">{accountSession.companyLabel}</p> : null}
-          <Button icon={UserRound} onClick={handleProfileLogout} variant="ghost">
-            Quitter le profil
-          </Button>
+          {saasAccount && saasAccount.organizations.length > 1 ? (
+            <label className="sidebar__footer-label">
+              Organisation
+              <select
+                onChange={(event) => {
+                  void switchOrganization(event.target.value).then((result) => {
+                    if (result.ok) navigate("/", { replace: true });
+                  });
+                }}
+                value={saasAccount.user.membership_id}
+              >
+                {saasAccount.organizations.map((organization) => (
+                  <option key={organization.membership_id} value={organization.membership_id}>
+                    {organization.organization_name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           <Button icon={LogOut} onClick={handleAccountLogout} variant="ghost">
-            Déconnexion complète
+            Changer d'utilisateur
           </Button>
         </div>
       </aside>

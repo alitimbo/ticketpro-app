@@ -1,15 +1,35 @@
 :root {
-  --color-primary: #b3194b;
-  --color-primary-strong: #861138;
-  --color-primary-soft: #fff0f5;
-  --color-bg: #f7f8fb;
+  /* Identité visuelle TicketPro — couleurs issues du logo */
+  --color-brand-navy: #051b5b;
+  --color-brand-blue: #0666fd;
+  --color-brand-cyan: #38a5ff;
+  --color-brand-gradient: linear-gradient(135deg, #051b5b 0%, #0666fd 68%, #38a5ff 100%);
+
+  /* Couleur principale et interactions */
+  --color-primary: #0666fd;
+  --color-primary-hover: #0759d9;
+  --color-primary-active: #0649b8;
+  --color-primary-strong: #051b5b;
+  --color-primary-soft: #eaf2ff;
+  --color-primary-soft-hover: #dceaff;
+  --color-primary-border: #bfd6ff;
+  --color-primary-border-strong: #8fb8ff;
+  --color-focus-ring: rgba(6, 102, 253, 0.22);
+  --color-selection: rgba(6, 102, 253, 0.14);
+
+  /* Arrière-plans, surfaces et bordures */
+  --color-bg: #f5f8fd;
   --color-surface: #ffffff;
-  --color-surface-muted: #fbfcfe;
-  --color-border: #e3e7ee;
-  --color-border-strong: #cdd5df;
-  --color-text: #172033;
-  --color-muted: #647083;
-  --color-subtle: #8a94a6;
+  --color-surface-muted: #f8fafe;
+  --color-border: #dce5f2;
+  --color-border-strong: #bfccdf;
+
+  /* Typographie */
+  --color-text: #0b1739;
+  --color-muted: #53627a;
+  --color-subtle: #7f8ba0;
+
+  /* États fonctionnels */
   --color-success: #168a55;
   --color-success-soft: #eaf8f1;
   --color-warning: #b7791f;
@@ -18,8 +38,12 @@
   --color-error-soft: #fff0f0;
   --color-offline: #7a8494;
   --color-offline-soft: #f0f2f5;
-  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
-  --shadow-md: 0 12px 28px rgba(16, 24, 40, 0.08);
+
+  /* Profondeur */
+  --shadow-sm: 0 1px 2px rgba(5, 27, 91, 0.07);
+  --shadow-md: 0 12px 28px rgba(5, 27, 91, 0.1);
+  --shadow-lg: 0 20px 45px rgba(5, 27, 91, 0.14);
+
   --radius-sm: 6px;
   --radius-md: 8px;
   --radius-lg: 10px;
@@ -32,6 +56,10 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: var(--color-selection);
 }
 
 * {
@@ -80,14 +108,10 @@ a {
 }
 
 .sidebar__mark {
-  display: grid;
-  place-items: center;
   width: 40px;
   height: 40px;
-  border-radius: var(--radius-md);
-  color: #ffffff;
-  background: linear-gradient(145deg, var(--color-primary), var(--color-primary-strong));
-  font-weight: 800;
+  flex: 0 0 40px;
+  object-fit: contain;
 }
 
 .sidebar__title {
@@ -157,7 +181,7 @@ a {
 }
 
 .sidebar-item--active {
-  border-color: #f2c6d4;
+  border-color: var(--color-primary-border);
   color: var(--color-primary-strong);
   background: var(--color-primary-soft);
 }
@@ -220,15 +244,15 @@ a {
 }
 
 .button:hover {
-  border-color: #d99aaf;
+  border-color: var(--color-primary-border-strong);
   color: var(--color-primary-strong);
-  background: #fff8fb;
+  background: var(--color-primary-soft-hover);
 }
 
 .button:focus-visible,
 .action-menu__button:focus-visible,
 .filter-button:focus-visible {
-  outline: 3px solid rgba(179, 25, 75, 0.22);
+  outline: 3px solid var(--color-focus-ring);
   outline-offset: 2px;
 }
 
@@ -240,8 +264,8 @@ a {
 
 .button--primary:hover {
   color: #ffffff;
-  border-color: var(--color-primary-strong);
-  background: var(--color-primary-strong);
+  border-color: var(--color-primary-hover);
+  background: var(--color-primary-hover);
 }
 
 .button--ghost {
@@ -278,7 +302,7 @@ a {
 }
 
 .card--interactive:hover {
-  border-color: #e7a8bb;
+  border-color: var(--color-primary-border-strong);
   box-shadow: var(--shadow-md);
   transform: translateY(-1px);
 }
@@ -686,7 +710,7 @@ a {
 }
 
 .filter-button--active {
-  border-color: #f2c6d4;
+  border-color: var(--color-primary-border);
   color: var(--color-primary-strong);
   background: var(--color-primary-soft);
 }
@@ -781,7 +805,7 @@ a {
   min-height: 100vh;
   padding: 24px;
   background:
-    linear-gradient(180deg, rgba(179, 25, 75, 0.06), transparent 34%),
+    linear-gradient(180deg, rgba(6, 102, 253, 0.06), transparent 34%),
     var(--color-bg);
 }
 
@@ -886,7 +910,7 @@ a {
 
 .profile-card:hover,
 .profile-card--active {
-  border-color: #f2c6d4;
+  border-color: var(--color-primary-border);
   color: var(--color-primary-strong);
   background: var(--color-primary-soft);
 }
@@ -916,7 +940,7 @@ a {
 }
 
 .profile-choice-card:hover:not(:disabled) {
-  border-color: #f2c6d4;
+  border-color: var(--color-primary-border);
   background: var(--color-primary-soft);
 }
 
@@ -1155,7 +1179,7 @@ a {
 }
 
 .subscription-plan-card--current {
-  border-color: #f2c6d4;
+  border-color: var(--color-primary-border);
   background: var(--color-primary-soft);
 }
 
@@ -1329,7 +1353,7 @@ a {
 
 .first-launch-journey:hover,
 .first-launch-journey:focus-visible {
-  border-color: var(--primary-color, #1367d1);
+  border-color: var(--primary-color, #0666fd);
   box-shadow: 0 14px 30px rgb(20 45 80 / 12%);
   outline: none;
   transform: translateY(-2px);
@@ -1352,8 +1376,8 @@ a {
 }
 
 .payment-code {
-  background: rgb(19 103 209 / 9%);
-  border: 1px solid rgb(19 103 209 / 20%);
+  background: rgb(6 102 253 / 9%);
+  border: 1px solid rgb(6 102 253 / 20%);
   border-radius: 12px;
   padding: 14px 16px;
 }
@@ -1491,13 +1515,13 @@ a {
 }
 
 .router-card:hover {
-  border-color: #e7a8bb;
+  border-color: var(--color-primary-border-strong);
   box-shadow: var(--shadow-md);
   transform: translateY(-1px);
 }
 
 .router-card:focus-visible {
-  outline: 3px solid rgba(179, 25, 75, 0.22);
+  outline: 3px solid var(--color-focus-ring);
   outline-offset: 2px;
 }
 
@@ -1650,7 +1674,7 @@ a {
 }
 
 .connection-option:hover {
-  border-color: #e7a8bb;
+  border-color: var(--color-primary-border-strong);
   background: var(--color-primary-soft);
 }
 
@@ -1777,7 +1801,7 @@ a {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, var(--color-primary), #d95a83);
+  background: linear-gradient(90deg, var(--color-primary), var(--color-brand-cyan));
   transition: width 240ms ease;
 }
 
@@ -1970,7 +1994,7 @@ a {
 
 .wizard-step--active {
   background: var(--color-primary-soft);
-  border-color: rgba(190, 24, 93, 0.28);
+  border-color: rgba(6, 102, 253, 0.28);
   color: var(--color-primary-strong);
 }
 
@@ -2007,7 +2031,7 @@ a {
 }
 
 .choice-card:hover {
-  border-color: rgba(190, 24, 93, 0.38);
+  border-color: rgba(6, 102, 253, 0.38);
   box-shadow: var(--shadow-sm);
 }
 
@@ -2018,7 +2042,7 @@ a {
 
 .choice-card--selected {
   border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px rgba(190, 24, 93, 0.11);
+  box-shadow: 0 0 0 3px rgba(6, 102, 253, 0.11);
 }
 
 .choice-card strong {
@@ -2069,6 +2093,12 @@ a {
 .toggle-option span {
   color: var(--color-text);
   font-weight: 800;
+}
+
+.team-dialog {
+  width: min(760px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
 }
 
 .summary-grid {
@@ -2309,8 +2339,8 @@ a {
 }
 
 .client-row:hover {
-  border-color: rgba(209, 20, 82, 0.25);
-  background: #fffafb;
+  border-color: rgba(6, 102, 253, 0.25);
+  background: var(--color-primary-soft-hover);
 }
 
 .client-row__identity {
@@ -3102,7 +3132,7 @@ a {
 
 .report-summary-row:hover,
 .report-group-row:hover {
-  border-color: rgba(190, 24, 93, 0.32);
+  border-color: rgba(6, 102, 253, 0.32);
   box-shadow: var(--shadow-sm);
 }
 
@@ -3336,12 +3366,12 @@ a {
 }
 
 .ticket-row:hover {
-  border-color: rgba(190, 24, 93, 0.32);
+  border-color: rgba(6, 102, 253, 0.32);
   box-shadow: var(--shadow-sm);
 }
 
 .ticket-row:focus-visible {
-  outline: 3px solid rgba(190, 24, 93, 0.22);
+  outline: 3px solid rgba(6, 102, 253, 0.22);
   outline-offset: 2px;
 }
 
@@ -3637,7 +3667,7 @@ a {
 .ticket-password-value button {
   align-items: center;
   background: var(--color-primary-soft);
-  border: 1px solid rgba(190, 24, 93, 0.22);
+  border: 1px solid rgba(6, 102, 253, 0.22);
   border-radius: 999px;
   color: var(--color-primary-strong);
   cursor: pointer;
@@ -3751,8 +3781,8 @@ a {
 }
 
 .super-admin-account--active .data-list-item {
-  border-color: rgba(207, 23, 82, 0.35);
-  box-shadow: 0 0 0 3px rgba(207, 23, 82, 0.08);
+  border-color: rgba(6, 102, 253, 0.35);
+  box-shadow: 0 0 0 3px rgba(6, 102, 253, 0.08);
 }
 
 @media (max-width: 980px) {
@@ -3928,7 +3958,7 @@ a {
 }
 
 .sidebar__toggle:focus-visible {
-  outline: 3px solid rgba(179, 25, 75, 0.22);
+  outline: 3px solid var(--color-focus-ring);
   outline-offset: 2px;
 }
 

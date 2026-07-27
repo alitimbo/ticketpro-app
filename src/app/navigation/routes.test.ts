@@ -7,6 +7,7 @@ describe("navigation", () => {
       "Maison",
       "Mon compte",
       "Routeurs",
+      "Équipe & accès",
       "VPN distant",
       "Abonnement",
       "Factures",
