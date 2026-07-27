@@ -1,8 +1,10 @@
 import type { AuthSession } from "../../domain/auth";
-import type { RouterConnectionRecord, RouterRecord } from "../../domain/database";
+import type { HotspotPlanRecord, RouterConnectionRecord, RouterRecord } from "../../domain/database";
 import type { DatabaseClient } from "../database/DatabaseClient";
 import { DatabaseRouterActionLogger } from "../logging";
 import { decryptLocalSecret, isEncryptedLocalSecret } from "../security/localSecrets";
+import { MikroTikRouterAdapter } from "./MikroTikRouterAdapter";
+import { PersistedPlanMappingRouterAdapter } from "./PersistedPlanMappingRouterAdapter";
 import { RouterService, type RouterActionLogger } from "./RouterService";
 
 export async function createPersistedRouterService(input: {
@@ -28,19 +30,29 @@ export async function createPersistedRouterService(input: {
       }
     : undefined;
 
+  const mikrotikAdapter = new MikroTikRouterAdapter({
+    connectionMode: connection?.mode ?? router.connection_mode,
+    host: connection?.host ?? router.local_ip,
+    password,
+    port: connection?.port ?? router.api_port,
+    timeoutMs: 5000,
+    useSsl: connection ? connection.use_ssl === 1 : false,
+    username: router.username
+  });
+  const plans = input.database
+    ? await input.database.query<HotspotPlanRecord>(
+        "SELECT * FROM hotspot_plans WHERE router_id = ?1 AND deleted_at IS NULL",
+        [router.id]
+      )
+    : [];
+  const adapter = plans.length > 0
+    ? new PersistedPlanMappingRouterAdapter(mikrotikAdapter, plans)
+    : mikrotikAdapter;
+
   return new RouterService({
+    adapter,
     authSession: input.authSession,
-    logger,
-    mikrotik: {
-      connectionMode: router.connection_mode,
-      host: connection?.host ?? router.local_ip,
-      password,
-      port: connection?.port ?? router.api_port,
-      timeoutMs: 5000,
-      useSsl: connection ? connection.use_ssl === 1 : false,
-      username: router.username
-    },
-    mode: "mikrotik"
+    logger
   });
 }
 
