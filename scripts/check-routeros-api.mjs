@@ -1,40 +1,6 @@
 import net from "node:net";
 import process from "node:process";
 
-const options = parseArguments(process.argv.slice(2));
-const password = options.password ?? process.env.TICKETPRO_ROUTER_PASSWORD ?? "";
-
-const socket = net.createConnection({ host: options.host, port: options.port });
-const reader = new RouterOsReader(socket);
-
-try {
-  await waitForConnection(socket, options.timeoutMs);
-  socket.setNoDelay(true);
-
-  socket.write(encodeSentence([
-    "/login",
-    `=name=${options.username}`,
-    `=password=${password}`
-  ]));
-  await readResponse(reader, options.timeoutMs, "authentification");
-  console.log(`Authentification RouterOS : OK (${options.username}@${options.host}:${options.port})`);
-
-  socket.write(encodeSentence(["/system/resource/print"]));
-  const rows = await readResponse(reader, options.timeoutMs, "lecture /system/resource/print");
-
-  if (rows.length === 0) {
-    throw new Error("RouterOS a répondu sans retourner les informations système.");
-  }
-
-  console.log("Commande /system/resource/print : OK");
-  console.log(JSON.stringify(rows[0], null, 2));
-} catch (error) {
-  console.error(`ÉCHEC API RouterOS : ${error instanceof Error ? error.message : String(error)}`);
-  process.exitCode = 1;
-} finally {
-  socket.destroy();
-}
-
 function parseArguments(args) {
   const result = {
     host: "192.168.88.1",
@@ -44,11 +10,14 @@ function parseArguments(args) {
     username: "admin"
   };
 
-  for (let index = 0; index < args.length; index += 1) {
+  for (let index = 0; index < args.length; index += 2) {
     const key = args[index];
     const value = args[index + 1];
 
-    if (["--host", "--password", "--port", "--timeout", "--username"].includes(key) && value === undefined) {
+    if (!["--host", "--password", "--port", "--timeout", "--username"].includes(key)) {
+      throw new Error(`Argument inconnu : ${key}`);
+    }
+    if (value === undefined) {
       throw new Error(`Valeur manquante pour ${key}.`);
     }
 
@@ -57,9 +26,6 @@ function parseArguments(args) {
     else if (key === "--port") result.port = parsePositiveInteger(value, "port");
     else if (key === "--timeout") result.timeoutMs = parsePositiveInteger(value, "timeout");
     else if (key === "--username") result.username = value;
-    else throw new Error(`Argument inconnu : ${key}`);
-
-    index += 1;
   }
 
   return result;
@@ -163,6 +129,44 @@ function encodeLength(length) {
   ]);
 }
 
+function decodeLength(buffer, offset) {
+  if (buffer.length <= offset) return null;
+  const first = buffer[offset];
+
+  if ((first & 0x80) === 0) return { bytesRead: 1, length: first };
+  if ((first & 0xc0) === 0x80) {
+    if (buffer.length < offset + 2) return null;
+    return { bytesRead: 2, length: ((first & 0x3f) << 8) + buffer[offset + 1] };
+  }
+  if ((first & 0xe0) === 0xc0) {
+    if (buffer.length < offset + 3) return null;
+    return {
+      bytesRead: 3,
+      length: ((first & 0x1f) << 16) + (buffer[offset + 1] << 8) + buffer[offset + 2]
+    };
+  }
+  if ((first & 0xf0) === 0xe0) {
+    if (buffer.length < offset + 4) return null;
+    return {
+      bytesRead: 4,
+      length:
+        ((first & 0x0f) * 0x1000000) +
+        (buffer[offset + 1] << 16) +
+        (buffer[offset + 2] << 8) +
+        buffer[offset + 3]
+    };
+  }
+  if (buffer.length < offset + 5) return null;
+  return {
+    bytesRead: 5,
+    length:
+      (buffer[offset + 1] * 0x1000000) +
+      (buffer[offset + 2] << 16) +
+      (buffer[offset + 3] << 8) +
+      buffer[offset + 4]
+  };
+}
+
 class RouterOsReader {
   constructor(socket) {
     this.buffer = Buffer.alloc(0);
@@ -237,40 +241,48 @@ class RouterOsReader {
   }
 }
 
-function decodeLength(buffer, offset) {
-  if (buffer.length <= offset) return null;
-  const first = buffer[offset];
+async function main() {
+  const options = parseArguments(process.argv.slice(2));
+  const password = options.password ?? process.env.TICKETPRO_ROUTER_PASSWORD ?? "";
 
-  if ((first & 0x80) === 0) return { bytesRead: 1, length: first };
-  if ((first & 0xc0) === 0x80) {
-    if (buffer.length < offset + 2) return null;
-    return { bytesRead: 2, length: ((first & 0x3f) << 8) + buffer[offset + 1] };
+  if (!password) {
+    throw new Error(
+      "Mot de passe absent. Définissez TICKETPRO_ROUTER_PASSWORD ou utilisez --password."
+    );
   }
-  if ((first & 0xe0) === 0xc0) {
-    if (buffer.length < offset + 3) return null;
-    return {
-      bytesRead: 3,
-      length: ((first & 0x1f) << 16) + (buffer[offset + 1] << 8) + buffer[offset + 2]
-    };
+
+  const socket = net.createConnection({ host: options.host, port: options.port });
+  const reader = new RouterOsReader(socket);
+
+  try {
+    await waitForConnection(socket, options.timeoutMs);
+    socket.setNoDelay(true);
+
+    socket.write(encodeSentence([
+      "/login",
+      `=name=${options.username}`,
+      `=password=${password}`
+    ]));
+    await readResponse(reader, options.timeoutMs, "authentification");
+    console.log(`Authentification RouterOS : OK (${options.username}@${options.host}:${options.port})`);
+
+    socket.write(encodeSentence(["/system/resource/print"]));
+    const rows = await readResponse(reader, options.timeoutMs, "lecture /system/resource/print");
+
+    if (rows.length === 0) {
+      throw new Error("RouterOS a répondu sans retourner les informations système.");
+    }
+
+    console.log("Commande /system/resource/print : OK");
+    console.log(JSON.stringify(rows[0], null, 2));
+  } finally {
+    socket.destroy();
   }
-  if ((first & 0xf0) === 0xe0) {
-    if (buffer.length < offset + 4) return null;
-    return {
-      bytesRead: 4,
-      length:
-        ((first & 0x0f) * 0x1000000) +
-        (buffer[offset + 1] << 16) +
-        (buffer[offset + 2] << 8) +
-        buffer[offset + 3]
-    };
-  }
-  if (buffer.length < offset + 5) return null;
-  return {
-    bytesRead: 5,
-    length:
-      (buffer[offset + 1] * 0x1000000) +
-      (buffer[offset + 2] << 16) +
-      (buffer[offset + 3] << 8) +
-      buffer[offset + 4]
-  };
+}
+
+try {
+  await main();
+} catch (error) {
+  console.error(`ÉCHEC API RouterOS : ${error instanceof Error ? error.message : String(error)}`);
+  process.exitCode = 1;
 }
