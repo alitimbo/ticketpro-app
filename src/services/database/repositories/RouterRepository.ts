@@ -1,4 +1,9 @@
-import type { CreateRouterConnectionInput, CreateRouterInput, RouterRecord } from "../../../domain/database";
+import type {
+  CreateRouterConnectionInput,
+  CreateRouterInput,
+  RouterConnectionRecord,
+  RouterRecord
+} from "../../../domain/database";
 import type { RouterConnectionMode } from "../../../domain/router";
 import type { DatabaseClient, DatabaseStatement } from "../DatabaseClient";
 import { assertAccountProfileOwnership } from "../ownership";
@@ -143,6 +148,16 @@ export class RouterRepository {
   }): Promise<void> {
     assertAccountProfileOwnership(input.accountId, input.internalProfileId);
 
+    const connections = await this.database.query<RouterConnectionRecord>(
+      "SELECT * FROM router_connections WHERE router_id = ?1 AND deleted_at IS NULL",
+      [input.routerId]
+    );
+    const connection = connections.find((item) => item.mode === input.mode);
+
+    if (!connection) {
+      throw new Error(`La connexion ${input.mode} de ce routeur est introuvable.`);
+    }
+
     const routerStatus = input.status === "connected" ? "active" : input.status;
     const statements: DatabaseStatement[] = [
       {
@@ -154,12 +169,11 @@ export class RouterRepository {
           input.status === "connected" ? "active" : "inactive",
           input.errorMessage,
           input.checkedAt,
-          input.routerId,
-          input.mode
+          connection.id
         ],
         sql: `UPDATE router_connections
               SET status = ?1, last_error = ?2, updated_at = ?3
-              WHERE router_id = ?4 AND mode = ?5 AND deleted_at IS NULL`
+              WHERE id = ?4`
       }
     ];
 
@@ -170,10 +184,10 @@ export class RouterRepository {
           sql: "UPDATE routers SET last_seen_at = ?1 WHERE id = ?2 AND account_id = ?3"
         },
         {
-          params: [input.checkedAt, input.checkedAt, input.routerId, input.mode],
+          params: [input.checkedAt, input.checkedAt, connection.id],
           sql: `UPDATE router_connections
                 SET last_connected_at = ?1, updated_at = ?2
-                WHERE router_id = ?3 AND mode = ?4 AND deleted_at IS NULL`
+                WHERE id = ?3`
         }
       );
     }
