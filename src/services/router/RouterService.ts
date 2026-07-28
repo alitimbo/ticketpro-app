@@ -18,13 +18,14 @@ import type {
 } from "../../domain/router";
 import type { AuthSession, Permission } from "../../domain/auth";
 import { AuthorizationError, requireProfilePermission } from "../auth";
+import { CompatibleMikroTikRouterAdapter } from "./CompatibleMikroTikRouterAdapter";
 import { FakeRouterAdapter } from "./FakeRouterAdapter";
 import {
   FakeLocalRouterDiscoveryProvider,
   type DiscoveredRouterCandidate,
   type LocalRouterDiscoveryProvider
 } from "./LocalRouterDiscoveryProvider";
-import { MikroTikRouterAdapter, type MikroTikRouterAdapterOptions } from "./MikroTikRouterAdapter";
+import type { MikroTikRouterAdapterOptions } from "./MikroTikRouterAdapter";
 import {
   PreparedRemoteConnectionProvider,
   type RemoteConnectionProvider,
@@ -216,7 +217,7 @@ export class RouterService {
       throw new Error("Configuration routeur manquante.");
     }
 
-    return new MikroTikRouterAdapter(mikrotikOptions);
+    return new CompatibleMikroTikRouterAdapter(mikrotikOptions);
   }
 
   private async run<T>(action: string, callback: () => Promise<T>, permission?: Permission): Promise<T> {
