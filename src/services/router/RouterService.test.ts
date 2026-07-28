@@ -42,8 +42,32 @@ describe("RouterService", () => {
     expect(tickets[0]).not.toHaveProperty("password");
   });
 
-  it("detecte un routeur local par scan simule", async () => {
-    const service = new RouterService({ adapter: new FakeRouterAdapter({ latencyMs: 0 }) });
+  it("utilise un fournisseur de découverte injecté sans fabriquer de routeur par défaut", async () => {
+    const service = new RouterService({
+      adapter: new FakeRouterAdapter({ latencyMs: 0 }),
+      discoveryProvider: {
+        scan: async () => [
+          {
+            apiPort: 8728,
+            apiSslPort: 8729,
+            host: "192.168.88.1",
+            id: "discovered-192-168-88-1",
+            isReachable: true,
+            mode: "local",
+            name: "MikroTik détecté",
+            systemInfo: {
+              architecture: "arm64",
+              boardName: "hAP ax²",
+              identity: "MikroTik",
+              model: "hAP ax²",
+              routerOsVersion: "7.15.3",
+              serialNumber: "TEST-SERIAL",
+              uptime: "1d"
+            }
+          }
+        ]
+      }
+    });
 
     await expect(service.scanLocalRouters()).resolves.toEqual(
       expect.arrayContaining([
@@ -97,6 +121,7 @@ describe("RouterService", () => {
       message: "Le service de tickets est introuvable sur ce routeur."
     });
   });
+
   it("vérifie les permissions du profil interne sur les actions sensibles", async () => {
     const logs: RouterActionLog[] = [];
     const service = new RouterService({
