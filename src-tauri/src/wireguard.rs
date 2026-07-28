@@ -70,11 +70,14 @@ pub fn wireguard_tunnel_up(
     let config_path = directory.join(format!("{}.conf", input.tunnel_name));
     fs::write(&config_path, input.config.as_bytes()).map_err(|error| error.to_string())?;
 
-    let _ = run_wireguard(
+    // L'installation d'un service de tunnel WireGuard nécessite des droits
+    // administrateur même lorsque TicketPro est installé pour l'utilisateur courant.
+    // Une élévation UAC explicite évite l'échec silencieux observé depuis l'interface.
+    let _ = run_wireguard_elevated(
         &executable,
         ["/uninstalltunnelservice", input.tunnel_name.as_str()],
     );
-    run_wireguard(
+    run_wireguard_elevated(
         &executable,
         [
             "/installtunnelservice",
@@ -94,7 +97,7 @@ pub fn wireguard_tunnel_down(app: AppHandle, tunnel_name: String) -> Result<(), 
     validate_tunnel_name(&tunnel_name)?;
     let executable = wireguard_executable()
         .ok_or_else(|| "WireGuard Windows n'est pas installé.".to_string())?;
-    run_wireguard(
+    run_wireguard_elevated(
         &executable,
         ["/uninstalltunnelservice", tunnel_name.as_str()],
     )?;
@@ -168,6 +171,53 @@ fn run_wireguard<const N: usize>(executable: &Path, args: [&str; N]) -> Result<(
     } else {
         format!("WireGuard n'a pas pu démarrer le tunnel : {message}")
     })
+}
+
+#[cfg(windows)]
+fn run_wireguard_elevated<const N: usize>(
+    executable: &Path,
+    args: [&str; N],
+) -> Result<(), String> {
+    let executable = powershell_quote(&executable.to_string_lossy());
+    let argument_list = args
+        .iter()
+        .map(|argument| format!("'{}'", powershell_quote(argument)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let script = format!(
+        "$process = Start-Process -FilePath '{}' -ArgumentList @({}) -Verb RunAs -Wait -PassThru; if ($process.ExitCode -ne 0) {{ Write-Error ('WireGuard a retourné le code ' + $process.ExitCode); exit $process.ExitCode }}",
+        executable, argument_list
+    );
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ])
+        .output()
+        .map_err(|error| error.to_string())?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if stderr.is_empty() {
+            "L'élévation administrateur WireGuard a été refusée ou le service de tunnel n'a pas pu démarrer.".to_string()
+        } else {
+            format!("WireGuard n'a pas pu gérer le service de tunnel : {stderr}")
+        })
+    }
+}
+
+#[cfg(not(windows))]
+fn run_wireguard_elevated<const N: usize>(
+    executable: &Path,
+    args: [&str; N],
+) -> Result<(), String> {
+    run_wireguard(executable, args)
 }
 
 #[cfg(windows)]
