@@ -6,8 +6,12 @@ const localKeyStorageKey = "hotspot:local_secret_key";
 
 export async function encryptLocalSecret(secret: string): Promise<string> {
   if (isTauriRuntime()) {
-    const protectedValue = await invoke<string>("license_protect_value", { value: secret });
-    return `${protectedSecretPrefix}${protectedValue}`;
+    try {
+      const protectedValue = await invoke<string>("license_protect_value", { value: secret });
+      return `${protectedSecretPrefix}${protectedValue}`;
+    } catch (error) {
+      throw normalizeTauriError(error, "Windows DPAPI n'a pas pu protéger le secret local.");
+    }
   }
 
   return encryptLegacySecret(secret);
@@ -18,9 +22,14 @@ export async function decryptLocalSecret(value: string): Promise<string> {
     if (!isTauriRuntime()) {
       throw new Error("Ce secret protégé par Windows doit être lu depuis l'application TicketPro.");
     }
-    return invoke<string>("license_unprotect_value", {
-      value: value.slice(protectedSecretPrefix.length)
-    });
+
+    try {
+      return await invoke<string>("license_unprotect_value", {
+        value: value.slice(protectedSecretPrefix.length)
+      });
+    } catch (error) {
+      throw normalizeTauriError(error, "Windows DPAPI n'a pas pu lire le secret local.");
+    }
   }
 
   if (value.startsWith(legacySecretPrefix) && value.includes(".")) {
@@ -80,6 +89,17 @@ async function getOrCreateLocalKey(): Promise<CryptoKey> {
 
 function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+function normalizeTauriError(error: unknown, fallback: string): Error {
+  if (error instanceof Error) return error;
+  if (typeof error === "string" && error.trim()) return new Error(error.trim());
+  if (error && typeof error === "object") {
+    const candidate = error as { message?: unknown; error?: unknown };
+    if (typeof candidate.message === "string" && candidate.message.trim()) return new Error(candidate.message.trim());
+    if (typeof candidate.error === "string" && candidate.error.trim()) return new Error(candidate.error.trim());
+  }
+  return new Error(fallback);
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
