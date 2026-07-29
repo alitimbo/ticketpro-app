@@ -2971,9 +2971,13 @@ a {
 }
 
 .file-row__identity {
-  align-items: center;
+  align-items: flex-start;
   display: flex;
   gap: 10px;
+  min-width: 0;
+}
+
+.file-row__identity > div {
   min-width: 0;
 }
 
@@ -2999,9 +3003,9 @@ a {
   font-size: 14px;
   font-weight: 850;
   margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .file-row p {
@@ -3009,9 +3013,9 @@ a {
   font-size: 12px;
   font-weight: 700;
   margin: 3px 0 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .file-row__meta {
@@ -3242,7 +3246,7 @@ a {
   border-radius: var(--radius-md);
   display: grid;
   gap: 10px;
-  grid-template-columns: 110px minmax(0, 1fr) 120px 110px auto;
+  grid-template-columns: 110px minmax(0, 1fr) 120px minmax(180px, 1.4fr) auto;
   min-height: 42px;
   padding: 7px 10px;
 }
@@ -3259,6 +3263,11 @@ a {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.report-ticket-row > span:nth-of-type(3) {
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .tickets-toolbar {

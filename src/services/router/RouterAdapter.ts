@@ -5,6 +5,7 @@ import type {
   HotspotServer,
   HotspotUser,
   HotspotUserDraft,
+  HotspotUserLimits,
   HotspotUsersBatchDraft,
   InterfaceTraffic,
   RouterConnectionTest,
@@ -22,10 +23,11 @@ export interface RouterAdapter {
   updateHotspotPlan(planId: string, updates: Partial<HotspotPlanDraft>): Promise<HotspotPlan>;
   deleteHotspotPlan(planId: string): Promise<void>;
   listHotspotUsers(): Promise<HotspotUser[]>;
-  updateHotspotUser(username: string, planId: string): Promise<HotspotUser>;
+  updateHotspotUser(username: string, planId: string, limits?: HotspotUserLimits): Promise<HotspotUser>;
   createHotspotUser(user: HotspotUserDraft): Promise<HotspotUser>;
   createHotspotUsersBatch(batch: HotspotUsersBatchDraft): Promise<HotspotUser[]>;
   disableHotspotUser(username: string): Promise<HotspotUser>;
+  enableHotspotUser(username: string): Promise<HotspotUser>;
   removeHotspotUser(username: string): Promise<void>;
   listActiveUsers(): Promise<ActiveHotspotUser[]>;
   disconnectActiveUser(username: string): Promise<void>;

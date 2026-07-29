@@ -34,6 +34,10 @@ const plans = [
 ];
 
 describe("ticketGenerationModel", () => {
+  it("désactive le QR code par défaut", () => {
+    expect(defaultTicketGenerationOptions.generateQrCode).toBe(false);
+  });
+
   it("valide un lot simple de 20 tickets pour opérateur", () => {
     const state = {
       ...createInitialTicketGenerationState("routeur-demo"),
@@ -55,7 +59,7 @@ describe("ticketGenerationModel", () => {
       options: {
         ...defaultTicketGenerationOptions,
         codeLength: 6,
-        createPdf: true,
+        createPdf: false,
         excludeAmbiguous: true,
         generateQrCode: false,
         prefix: "",
@@ -77,6 +81,7 @@ describe("ticketGenerationModel", () => {
     expect(batch).toMatchObject({
       created_by_profile: "operator",
       created_by_profile_id: "account-douma-demo:internal-profile-operator",
+      generated_file_id: "batch-test-pdf",
       quantity: 20,
       status: "terminé",
       sync_status: "synced"

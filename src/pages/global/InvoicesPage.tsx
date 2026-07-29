@@ -73,6 +73,7 @@ export function InvoicesPage() {
         action,
         category: "systeme",
         internalProfileId: session.internal_profile_id,
+        internalProfileRole: session.internal_profile_role,
         level,
         message: messageText
       });

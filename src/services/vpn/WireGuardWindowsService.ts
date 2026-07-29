@@ -7,6 +7,12 @@ export type WireGuardTunnelStatus = {
   tunnelName: string;
 };
 
+export function buildWireGuardTunnelName(peerId: string): string {
+  const normalized = peerId.replace(/[^a-zA-Z0-9_=+.-]/g, "-");
+  const suffix = normalized.slice(-29) || "tunnel";
+  return `tp-${suffix}`;
+}
+
 export async function isWireGuardAvailable(): Promise<boolean> {
   if (!isTauriRuntime()) {
     return false;

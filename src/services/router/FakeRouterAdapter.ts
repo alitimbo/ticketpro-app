@@ -301,6 +301,15 @@ export class FakeRouterAdapter implements RouterAdapter {
     return { ...updated };
   }
 
+  async enableHotspotUser(username: string): Promise<HotspotUser> {
+    await this.guard("enableHotspotUser");
+    const user = this.findUser(username);
+    const updated: HotspotUser = { ...user, status: "available" };
+
+    this.users = this.users.map((item) => (item.username === username ? updated : item));
+    return { ...updated };
+  }
+
   async removeHotspotUser(username: string): Promise<void> {
     await this.guard("removeHotspotUser");
     this.findUser(username);

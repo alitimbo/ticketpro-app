@@ -14,14 +14,17 @@ describe("AuditLogService", () => {
       action: "invoice.created",
       category: "systeme",
       internalProfileId: "account-a:internal-profile-admin",
-      message: "Facture créée."
+      message: "Facture créée.",
+      routerId: "router-a"
     });
 
     await expect(new AppLogRepository(database).listByAccount("account-a")).resolves.toMatchObject([
       expect.objectContaining({
         category: "systeme",
+        created_by_profile: "admin",
         internal_profile_id: "account-a:internal-profile-admin",
-        user_message: "[invoice.created] Facture créée."
+        router_id: "router-a",
+        user_message: "Facture créée."
       })
     ]);
   });

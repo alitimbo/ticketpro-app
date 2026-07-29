@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { createSession } from "../../services/auth";
 import {
+  appLogFromRecord,
   canCleanLogs,
   createDemoLogs,
   emptyLogFilters,
   exportLogsToCsv,
   filterLogs,
+  getLogPageCount,
+  paginateLogs,
   scopeLogsForSession,
   translateTechnicalError
 } from "./logsPageModel";
@@ -40,6 +43,14 @@ describe("logsPageModel", () => {
     expect(filtered[0].action).toBe("createTickets");
   });
 
+  it("recherche dans le message, l'action et le routeur sans tenir compte de la casse", () => {
+    const logs = createDemoLogs();
+
+    expect(filterLogs(logs, { ...emptyLogFilters, query: "ROUTEUR DÉMO" }).length).toBeGreaterThan(0);
+    expect(filterLogs(logs, { ...emptyLogFilters, query: "createTickets" })).toHaveLength(1);
+    expect(filterLogs(logs, { ...emptyLogFilters, query: "introuvable" })).toHaveLength(0);
+  });
+
   it("exporte les logs sans détail technique masqué", () => {
     const csv = exportLogsToCsv(createDemoLogs().slice(0, 1));
 
@@ -47,10 +58,51 @@ describe("logsPageModel", () => {
     expect(csv).not.toContain("session=local");
   });
 
+  it("neutralise les formules tableur dans l'export CSV", () => {
+    const csv = exportLogsToCsv([
+      { ...createDemoLogs()[0], userMessage: "=HYPERLINK(\"https://example.test\")" }
+    ]);
+
+    expect(csv).toContain("\"'=HYPERLINK(\"\"https://example.test\"\")\"");
+  });
+
   it("réserve le nettoyage à l’Admin", () => {
     expect(canCleanLogs("admin")).toBe(true);
     expect(canCleanLogs("operator")).toBe(false);
     expect(canCleanLogs(null)).toBe(false);
+  });
+
+  it("normalise un journal persistant et masque ses secrets", () => {
+    const log = appLogFromRecord({
+      account_id: "account-a",
+      category: "categorie-inconnue",
+      created_at: "2026-07-29T10:00:00.000Z",
+      created_by_profile: "account-a:internal-profile-admin",
+      id: "log-1",
+      internal_profile_id: "account-a:internal-profile-admin",
+      level: "error",
+      router_id: "router-a",
+      technical_message:
+        '{"version":1,"action":"testConnection","code":"router_rejected","detail":"password=secret token=abc"}',
+      user_message: "Connexion refusée."
+    }, new Map([["router-a", "Routeur A"]]));
+
+    expect(log).toMatchObject({
+      action: "testConnection",
+      category: "systeme",
+      routerName: "Routeur A",
+      userProfile: "admin"
+    });
+    expect(log.technicalDetail).toContain("password=[MASQUÉ]");
+    expect(log.technicalDetail).toContain("token=[MASQUÉ]");
+    expect(log.technicalDetail).not.toContain("secret");
+  });
+
+  it("pagine les journaux sans produire de page zéro", () => {
+    const logs = createDemoLogs();
+    expect(getLogPageCount(0, 5)).toBe(1);
+    expect(getLogPageCount(12, 5)).toBe(3);
+    expect(paginateLogs(logs, 2, 5)).toEqual(logs.slice(5, 10));
   });
   it("rattache les logs au compte et limite les profils sans lecture globale", () => {
     const logs = [

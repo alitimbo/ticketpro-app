@@ -164,6 +164,7 @@ export function GlobalSettingsPage() {
           action: "settings.updated",
           category: "systeme",
           internalProfileId: session?.internal_profile_id ?? null,
+          internalProfileRole: session?.internal_profile_role ?? null,
           message: "Paramètres avancés mis à jour."
         });
       }
@@ -233,6 +234,7 @@ export function GlobalSettingsPage() {
         action,
         category: "systeme",
         internalProfileId: session?.internal_profile_id ?? null,
+        internalProfileRole: session?.internal_profile_role ?? null,
         message: userMessage
       });
     }

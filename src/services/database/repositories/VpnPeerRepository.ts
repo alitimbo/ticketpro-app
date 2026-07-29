@@ -1,6 +1,8 @@
 import type { VpnPeerRecord } from "../../../domain/database";
 import type { DatabaseClient } from "../DatabaseClient";
 
+type VpnPeerInput = Omit<VpnPeerRecord, "created_at" | "updated_at">;
+
 export class VpnPeerRepository {
   constructor(private readonly database: DatabaseClient) {}
 
@@ -20,17 +22,71 @@ export class VpnPeerRepository {
     return rows.find((row) => row.router_id === routerId && row.status !== "revoked") ?? null;
   }
 
-  async create(input: Omit<VpnPeerRecord, "created_at" | "updated_at">): Promise<VpnPeerRecord> {
+  async findAssignmentConflicts(
+    accountId: string,
+    networkId: string,
+    assignedAddress: string,
+    publicKey: string
+  ): Promise<VpnPeerRecord[]> {
+    const rows = await this.listByAccount(accountId);
+    return rows.filter(
+      (row) =>
+        row.network_id === networkId
+        && (row.assigned_address === assignedAddress || row.public_key === publicKey)
+        && !(row.assigned_address === assignedAddress && row.public_key === publicKey)
+    );
+  }
+
+  async create(input: VpnPeerInput): Promise<VpnPeerRecord> {
     try {
-      await this.database.execute(
-        `INSERT INTO vpn_peers (
-          id, account_id, network_id, router_id, peer_type, name, public_key,
-          private_key_encrypted, assigned_address, allowed_ips, endpoint_address,
-          endpoint_port, status, last_handshake_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`,
-        [input.id, input.account_id, input.network_id, input.router_id, input.peer_type, input.name, input.public_key, input.private_key_encrypted, input.assigned_address, input.allowed_ips, input.endpoint_address, input.endpoint_port, input.status, input.last_handshake_at]
+      const existingRows = await this.listByAccount(input.account_id);
+      const exactExisting = existingRows.find(
+        (row) =>
+          row.network_id === input.network_id
+          && row.assigned_address === input.assigned_address
+          && row.public_key === input.public_key
       );
-      const created = await this.database.query<VpnPeerRecord>("SELECT * FROM vpn_peers WHERE id = ?1", [input.id]);
+      if (exactExisting) return exactExisting;
+
+      const conflicts = await this.findAssignmentConflicts(
+        input.account_id,
+        input.network_id,
+        input.assigned_address,
+        input.public_key
+      );
+      await this.database.transaction([
+        ...conflicts.map((conflict) => ({
+          sql: "DELETE FROM vpn_peers WHERE id = ?1",
+          params: [conflict.id]
+        })),
+        {
+          sql: `INSERT INTO vpn_peers (
+            id, account_id, network_id, router_id, peer_type, name, public_key,
+            private_key_encrypted, assigned_address, allowed_ips, endpoint_address,
+            endpoint_port, status, last_handshake_at
+          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`,
+          params: [
+            input.id,
+            input.account_id,
+            input.network_id,
+            input.router_id,
+            input.peer_type,
+            input.name,
+            input.public_key,
+            input.private_key_encrypted,
+            input.assigned_address,
+            input.allowed_ips,
+            input.endpoint_address,
+            input.endpoint_port,
+            input.status,
+            input.last_handshake_at
+          ]
+        }
+      ]);
+      const created = await this.database.query<VpnPeerRecord>(
+        "SELECT * FROM vpn_peers WHERE id = ?1",
+        [input.id]
+      );
       if (!created[0]) {
         throw new Error("La ligne du pair VPN est absente après l'insertion.");
       }

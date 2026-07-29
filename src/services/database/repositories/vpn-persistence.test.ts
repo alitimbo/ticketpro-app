@@ -57,4 +57,74 @@ describe("VPN persistence", () => {
     expect(await peers.findByRouter("account-b", "router-a")).toBeNull();
     expect((await peers.listByAccount("account-b"))).toHaveLength(0);
   });
+
+  it("remplace atomiquement un ancien pair quand le hub réattribue son adresse", async () => {
+    const database = new InMemoryDatabaseClient();
+    await database.initialize();
+    const peers = new VpnPeerRepository(database);
+
+    await peers.create(peerInput({
+      id: "old-peer",
+      name: "PC Ali Test",
+      public_key: "old-public-key",
+      status: "active"
+    }));
+
+    const conflicts = await peers.findAssignmentConflicts(
+      "account-a",
+      "network-a",
+      "10.250.0.2/32",
+      "new-public-key"
+    );
+    expect(conflicts.map((peer) => peer.id)).toEqual(["old-peer"]);
+
+    const replacement = await peers.create(peerInput({
+      id: "new-peer",
+      name: "PC Ali Test2",
+      public_key: "new-public-key",
+      status: "draft"
+    }));
+
+    expect(replacement.id).toBe("new-peer");
+    expect(await peers.listByAccount("account-a")).toEqual([
+      expect.objectContaining({
+        id: "new-peer",
+        assigned_address: "10.250.0.2/32",
+        public_key: "new-public-key"
+      })
+    ]);
+  });
+
+  it("retourne le pair existant lors d'une répétition strictement identique", async () => {
+    const database = new InMemoryDatabaseClient();
+    await database.initialize();
+    const peers = new VpnPeerRepository(database);
+    const existing = await peers.create(peerInput({ id: "peer-a" }));
+    const repeated = await peers.create(peerInput({ id: "peer-b" }));
+
+    expect(repeated.id).toBe(existing.id);
+    expect(await peers.listByAccount("account-a")).toHaveLength(1);
+  });
 });
+
+function peerInput(
+  overrides: Partial<Parameters<VpnPeerRepository["create"]>[0]> = {}
+): Parameters<VpnPeerRepository["create"]>[0] {
+  return {
+    id: "peer-a",
+    account_id: "account-a",
+    network_id: "network-a",
+    router_id: null,
+    peer_type: "operator",
+    name: "PC",
+    public_key: "public-key",
+    private_key_encrypted: "encrypted:a.b",
+    assigned_address: "10.250.0.2/32",
+    allowed_ips: "10.250.0.2/32",
+    endpoint_address: "vpn.example.com",
+    endpoint_port: 51820,
+    status: "active",
+    last_handshake_at: null,
+    ...overrides
+  };
+}

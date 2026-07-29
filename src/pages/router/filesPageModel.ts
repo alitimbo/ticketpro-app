@@ -3,7 +3,7 @@ import type { GeneratedFileRecord } from "../../domain/database";
 
 export type GeneratedFileType = "csv_export" | "report_csv" | "report_pdf" | "tickets_pdf";
 
-export type GeneratedFileStatus = "available" | "missing";
+export type GeneratedFileStatus = "available" | "missing" | "unknown";
 
 export type ArchivedGeneratedFile = {
   accountId: string;
@@ -16,6 +16,7 @@ export type ArchivedGeneratedFile = {
   format: string;
   id: string;
   localPath: string;
+  metadataJson: string | null;
   operatorProfile: string;
   planId: string | null;
   planName: string | null;
@@ -37,7 +38,7 @@ export type FileFilters = {
 export function archivedFileFromRecord(
   record: GeneratedFileRecord,
   input: {
-    fileExists: boolean;
+    fileExists: boolean | null;
     planId?: string | null;
     planName?: string | null;
     routerName: string;
@@ -47,7 +48,7 @@ export function archivedFileFromRecord(
   return {
     accountId: record.account_id,
     batchId: record.batch_id,
-    canRegenerate: !["csv_export", "report_csv", "report_pdf"].includes(record.type) || Boolean(record.batch_id),
+    canRegenerate: record.type === "tickets_pdf" && Boolean(record.batch_id),
     createdByProfileId: record.created_by_profile_id,
     createdAt: record.created_at,
     fileName: record.file_name,
@@ -55,12 +56,13 @@ export function archivedFileFromRecord(
     format: record.format,
     id: record.id,
     localPath: record.file_path,
+    metadataJson: record.metadata_json,
     operatorProfile: record.created_by_profile,
     planId: input.planId ?? null,
     planName: input.planName ?? null,
     routerId: record.router_id,
     routerName: input.routerName,
-    status: input.fileExists ? "available" : "missing",
+    status: input.fileExists === null ? "unknown" : input.fileExists ? "available" : "missing",
     ticketQuantity: input.ticketQuantity ?? null
   };
 }
@@ -87,6 +89,7 @@ export function createDemoArchivedFiles(): ArchivedGeneratedFile[] {
       format: "PDF A4",
       id: "file-ticket-a4-demo",
       localPath: "output/pdf/tickets-demo-a4.pdf",
+      metadataJson: null,
       operatorProfile: "operator",
       planId: "plan-3h",
       planName: "3h-2Go",
@@ -106,6 +109,7 @@ export function createDemoArchivedFiles(): ArchivedGeneratedFile[] {
       format: "PDF 80 mm",
       id: "file-ticket-jour-20",
       localPath: "files/tickets-jour-20.pdf",
+      metadataJson: null,
       operatorProfile: "agent",
       planId: "plan-jour",
       planName: "Journée",
@@ -117,7 +121,7 @@ export function createDemoArchivedFiles(): ArchivedGeneratedFile[] {
     {
       accountId: "account-douma-demo",
       batchId: null,
-      canRegenerate: true,
+      canRegenerate: false,
       createdByProfileId: "account-douma-demo:internal-profile-operator",
       createdAt: "2026-07-07T18:30:00.000Z",
       fileName: "rapport-journalier-2026-07-07.pdf",
@@ -125,6 +129,7 @@ export function createDemoArchivedFiles(): ArchivedGeneratedFile[] {
       format: "PDF",
       id: "file-report-2026-07-07",
       localPath: "files/rapport-journalier-2026-07-07.pdf",
+      metadataJson: null,
       operatorProfile: "operator",
       planId: null,
       planName: null,
@@ -144,6 +149,7 @@ export function createDemoArchivedFiles(): ArchivedGeneratedFile[] {
       format: "CSV",
       id: "file-csv-2026-07-06",
       localPath: "files/tickets-export-2026-07-06.csv",
+      metadataJson: null,
       operatorProfile: "admin",
       planId: "plan-1h",
       planName: "1h",
@@ -223,7 +229,9 @@ export function fileTypeLabel(type: GeneratedFileType): string {
 }
 
 export function fileStatusLabel(status: GeneratedFileStatus): string {
-  return status === "available" ? "Disponible" : "Fichier introuvable";
+  if (status === "available") return "Disponible";
+  if (status === "missing") return "Fichier introuvable";
+  return "État à vérifier";
 }
 
 export function formatFileDate(value: string): string {

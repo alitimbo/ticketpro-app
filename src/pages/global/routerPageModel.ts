@@ -10,6 +10,7 @@ import type { DiscoveredRouterCandidate } from "../../services/router";
 export type RouterCardStatus = "active" | "offline" | "warning";
 
 export type RouterConnectionPreference = RouterConnectionMode;
+export type RouterRemoteConnectionMode = Extract<RouterConnectionMode, "distant_ip" | "vpn">;
 
 export type RouterConnectionTestStatus =
   | "api_disabled"
@@ -26,6 +27,7 @@ export type RouterConnectionTestStatus =
 export type RouterCardData = {
   accountId: string;
   createdByProfileId: string | null;
+  hotspotAddress?: string | null;
   id: string;
   zoneName: string;
   model: string;
@@ -37,6 +39,7 @@ export type RouterCardData = {
   username: string;
   encryptedPassword: string;
   preferredMode: RouterConnectionPreference;
+  remoteMode: RouterRemoteConnectionMode;
   remoteHost: string;
   remotePort: number;
   remoteUseSsl: boolean;
@@ -105,6 +108,7 @@ export const demoRouters: RouterCardData[] = [
     model: "hAP ax²",
     notes: "Routeur de démonstration local.",
     preferredMode: "local",
+    remoteMode: "vpn",
     remoteHost: "vpn-boutique-centre.local",
     remotePort: 8728,
     remoteUseSsl: false,
@@ -132,6 +136,7 @@ export const demoRouters: RouterCardData[] = [
     model: "hEX",
     notes: "À vérifier sur site.",
     preferredMode: "local",
+    remoteMode: "distant_ip",
     remoteHost: "",
     remotePort: 8728,
     remoteUseSsl: false,
@@ -159,6 +164,7 @@ export const demoRouters: RouterCardData[] = [
     model: "hAP ac²",
     notes: "API à activer après validation admin.",
     preferredMode: "local",
+    remoteMode: "distant_ip",
     remoteHost: "10.50.5.1",
     remotePort: 8728,
     remoteUseSsl: false,
@@ -222,6 +228,7 @@ export function routerCardFromRecord(
     boardName: record.board_name ?? "Non détecté",
     createdByProfileId: record.created_by_profile_id,
     encryptedPassword: record.encrypted_password,
+    hotspotAddress: record.hotspot_address,
     id: record.id,
     ipAddress: localConnection?.host || record.local_ip,
     lastSeenAt: record.last_seen_at ?? "Jamais",
@@ -231,6 +238,7 @@ export function routerCardFromRecord(
     model: record.model ?? "Modèle non renseigné",
     notes: record.notes ?? "",
     preferredMode: record.connection_mode,
+    remoteMode: remoteConnection?.mode === "vpn" ? "vpn" : "distant_ip",
     remoteEnabled: Boolean(remoteConnection),
     remoteHost: remoteConnection?.host ?? "",
     remotePort: remoteConnection?.port ?? record.api_port,
@@ -253,6 +261,7 @@ export function routerRecordFromCard(router: RouterCardData): CreateRouterInput 
     connection_mode: router.preferredMode,
     created_by_profile_id: router.createdByProfileId ?? "",
     encrypted_password: router.encryptedPassword,
+    hotspot_address: router.hotspotAddress,
     id: router.id,
     label: router.zoneName,
     last_seen_at: router.lastTestStatus === "connected" ? new Date().toISOString() : null,
@@ -285,13 +294,14 @@ export function routerConnectionInputsFromCard(router: RouterCardData): CreateRo
   ];
 
   if (router.remoteHost.trim()) {
-    const isVpn = router.preferredMode === "vpn";
+    const remoteMode = router.preferredMode === "vpn" ? "vpn" : router.remoteMode;
+    const isVpn = remoteMode === "vpn";
     connections.push({
       host: router.remoteHost.trim(),
       id: `${router.id}:remote`,
       last_connected_at: router.preferredMode !== "local" ? router.lastTestedAt : null,
       last_error: router.preferredMode !== "local" ? router.lastTestMessage : null,
-      mode: router.preferredMode === "local" ? "distant_ip" : router.preferredMode,
+      mode: remoteMode,
       port: isVpn ? 8728 : router.remotePort,
       router_id: router.id,
       status: router.preferredMode !== "local" && router.status === "active" ? "active" : "inactive",
@@ -325,6 +335,7 @@ export function createRouterFromForm(
     model: values.model || systemInfo?.model || "Modèle non renseigné",
     notes: values.notes,
     preferredMode: values.preferredMode,
+    remoteMode: values.preferredMode === "vpn" ? "vpn" : "distant_ip",
     remoteHost: values.remoteHost,
     remotePort: Number(values.remotePort),
     remoteUseSsl: values.remoteUseSsl,
@@ -392,6 +403,7 @@ export function mapRouterErrorToTestStatus(code: RouterErrorCode): RouterConnect
     permission_denied: "permission_denied",
     remote_not_configured: "remote_not_configured",
     remote_unavailable: "remote_unavailable",
+    router_rejected: "timeout",
     router_offline: "offline",
     timeout: "timeout",
     vpn_required: "remote_unavailable"

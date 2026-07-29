@@ -73,10 +73,12 @@ pub fn wireguard_tunnel_up(
     // L'installation d'un service de tunnel WireGuard nécessite des droits
     // administrateur même lorsque TicketPro est installé pour l'utilisateur courant.
     // Une élévation UAC explicite évite l'échec silencieux observé depuis l'interface.
-    let _ = run_wireguard_elevated(
-        &executable,
-        ["/uninstalltunnelservice", input.tunnel_name.as_str()],
-    );
+    if tunnel_service_exists(&input.tunnel_name) {
+        run_wireguard_elevated(
+            &executable,
+            ["/uninstalltunnelservice", input.tunnel_name.as_str()],
+        )?;
+    }
     run_wireguard_elevated(
         &executable,
         [
@@ -84,6 +86,12 @@ pub fn wireguard_tunnel_up(
             config_path.to_string_lossy().as_ref(),
         ],
     )?;
+    if !tunnel_service_exists(&input.tunnel_name) {
+        return Err(
+            "WireGuard a terminé sans installer le service du tunnel. Vérifiez l'autorisation administrateur."
+                .to_string(),
+        );
+    }
 
     Ok(WireGuardTunnelStatus {
         active: true,
@@ -97,10 +105,12 @@ pub fn wireguard_tunnel_down(app: AppHandle, tunnel_name: String) -> Result<(), 
     validate_tunnel_name(&tunnel_name)?;
     let executable = wireguard_executable()
         .ok_or_else(|| "WireGuard Windows n'est pas installé.".to_string())?;
-    run_wireguard_elevated(
-        &executable,
-        ["/uninstalltunnelservice", tunnel_name.as_str()],
-    )?;
+    if tunnel_service_exists(&tunnel_name) {
+        run_wireguard_elevated(
+            &executable,
+            ["/uninstalltunnelservice", tunnel_name.as_str()],
+        )?;
+    }
 
     let config_path = wireguard_directory(&app)?.join(format!("{tunnel_name}.conf"));
     let _ = fs::remove_file(config_path);
@@ -118,10 +128,20 @@ fn wireguard_directory(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn validate_tunnel_name(name: &str) -> Result<(), String> {
+    const RESERVED_NAMES: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    let reserved_stem = name.split('.').next().unwrap_or_default();
     if name.is_empty()
-        || name.len() > 48
+        || name.len() > 32
+        || name.starts_with('.')
+        || name.ends_with('.')
+        || RESERVED_NAMES
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(reserved_stem))
         || !name.chars().all(|character| {
-            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '=' | '+' | '.' | '-')
         })
     {
         return Err("Nom de tunnel WireGuard invalide.".to_string());
@@ -157,6 +177,7 @@ fn wireguard_executable() -> Option<PathBuf> {
     None
 }
 
+#[cfg(not(windows))]
 fn run_wireguard<const N: usize>(executable: &Path, args: [&str; N]) -> Result<(), String> {
     let output = Command::new(executable)
         .args(args)
@@ -323,4 +344,49 @@ fn install_elevated(_path: &Path) -> Result<(), String> {
 
 fn powershell_quote(value: &str) -> String {
     value.replace('\'', "''")
+}
+
+fn tunnel_service_name(tunnel_name: &str) -> String {
+    format!("WireGuardTunnel${tunnel_name}")
+}
+
+#[cfg(windows)]
+fn tunnel_service_exists(tunnel_name: &str) -> bool {
+    Command::new("sc.exe")
+        .args(["query", tunnel_service_name(tunnel_name).as_str()])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn tunnel_service_exists(_tunnel_name: &str) -> bool {
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{tunnel_service_name, validate_tunnel_name};
+
+    #[test]
+    fn accepts_wireguard_windows_compatible_tunnel_names() {
+        assert!(validate_tunnel_name("tp-1234567890_abc=def+ghi.jkl").is_ok());
+        assert!(validate_tunnel_name("a").is_ok());
+    }
+
+    #[test]
+    fn rejects_names_wireguard_windows_will_reject() {
+        assert!(validate_tunnel_name("ticketpro-vpn-peer-12345678-1234-1234-1234").is_err());
+        assert!(validate_tunnel_name("CON").is_err());
+        assert!(validate_tunnel_name(".hidden").is_err());
+        assert!(validate_tunnel_name("invalid name").is_err());
+    }
+
+    #[test]
+    fn builds_the_wireguard_windows_service_name() {
+        assert_eq!(
+            tunnel_service_name("tp-demo"),
+            "WireGuardTunnel$tp-demo"
+        );
+    }
 }

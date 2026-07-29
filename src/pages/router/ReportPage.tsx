@@ -15,8 +15,15 @@ import {
 } from "lucide-react";
 import { useAuth } from "../../app/auth/AuthProvider";
 import { useAppDatabase } from "../../services/database";
-import { GeneratedFileRepository, HotspotPlanRepository, RouterRepository, TicketRepository } from "../../services/database/repositories";
+import {
+  GeneratedFileRepository,
+  HotspotPlanRepository,
+  PrintHistoryRepository,
+  RouterRepository,
+  TicketRepository
+} from "../../services/database/repositories";
 import { TauriFileService } from "../../services/files";
+import { AuditLogService } from "../../services/logging";
 import { generateReportPdf } from "../../services/pdf";
 import { Badge, Button, Card, EmptyState, PageHeader, StatCard } from "../../shared/ui";
 import type { IconComponent } from "../../shared/ui";
@@ -55,13 +62,18 @@ export function ReportPage() {
   );
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [selectedTickets, setSelectedTickets] = useState<SelectedReportTickets | null>(null);
+  const [selectedTicketLimit, setSelectedTicketLimit] = useState(20);
   const [message, setMessage] = useState<string | null>(null);
+  const [messageIsError, setMessageIsError] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
   const ticketRepository = useMemo(() => new TicketRepository(database), [database]);
   const planRepository = useMemo(() => new HotspotPlanRepository(database), [database]);
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
+  const printHistoryRepository = useMemo(() => new PrintHistoryRepository(database), [database]);
   const generatedFileRepository = useMemo(() => new GeneratedFileRepository(database), [database]);
+  const auditLogService = useMemo(() => new AuditLogService(database), [database]);
   const fileService = useMemo(() => new TauriFileService(), []);
 
   const loadReport = async () => {
@@ -71,12 +83,17 @@ export function ReportPage() {
 
     setIsLoading(true);
     setMessage(null);
+    setMessageIsError(false);
 
     try {
-      const [router, records, plans] = await Promise.all([
+      const profileScope = session.permissions.includes("router.report.read")
+        ? undefined
+        : session.internal_profile_id;
+      const [router, records, plans, printHistory] = await Promise.all([
         routerRepository.findById(routerId),
-        ticketRepository.listByAccount(session.account_id),
-        planRepository.listByRouter(routerId)
+        ticketRepository.listForReportByAccount(session.account_id, profileScope),
+        planRepository.listByRouter(routerId),
+        printHistoryRepository.listByAccount(session.account_id)
       ]);
 
       if (!router || router.account_id !== session.account_id) {
@@ -84,6 +101,20 @@ export function ReportPage() {
       }
 
       const plansById = new Map(plans.map((plan) => [plan.id, plan]));
+      const printDatesByBatch = new Map<string, string[]>();
+      printHistory
+        .filter(
+          (entry) =>
+            entry.router_id === routerId &&
+            entry.batch_id &&
+            entry.status === "printed" &&
+            entry.mode !== "test"
+        )
+        .forEach((entry) => {
+          const dates = printDatesByBatch.get(entry.batch_id!) ?? [];
+          dates.push(entry.created_at);
+          printDatesByBatch.set(entry.batch_id!, dates);
+        });
       setTickets(
         records
           .filter((record) => record.router_id === routerId)
@@ -91,13 +122,17 @@ export function ReportPage() {
             const ticket = ticketFromRecord(record, plansById.get(record.plan_id) ?? null, router.name);
             return {
               ...ticket,
-              deletedAt: ticket.status === "supprimé" ? ticket.completedAt : null,
+              deletedAt: record.deleted_at,
+              printedAt:
+                printDatesByBatch.get(record.batch_id) ??
+                (record.printed_count > 0 ? [record.updated_at] : []),
               priceHint: plansById.get(ticket.planId)?.price_hint ?? null
             };
           })
       );
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Impossible de charger le rapport.");
+      setMessageIsError(true);
     } finally {
       setIsLoading(false);
     }
@@ -105,7 +140,7 @@ export function ReportPage() {
 
   useEffect(() => {
     void loadReport();
-  }, [isInitialized, isPersistent, planRepository, routerId, routerRepository, session, ticketRepository]);
+  }, [isInitialized, isPersistent, planRepository, printHistoryRepository, routerId, routerRepository, session, ticketRepository]);
 
   const scopedTickets = useMemo(() => scopeReportTicketsForSession(tickets, session), [session, tickets]);
   const filteredTickets = useMemo(() => filterReportTickets(scopedTickets, filters), [filters, scopedTickets]);
@@ -115,20 +150,29 @@ export function ReportPage() {
   const updateFilters = (partial: Partial<ReportFilters>) => {
     setFilters((current) => ({ ...current, ...partial }));
     setMessage(null);
+    setMessageIsError(false);
     setSelectedTickets(null);
   };
 
   const openMetric = (metric: ReportMetric) => {
+    setSelectedTicketLimit(20);
     setSelectedTickets({
       tickets: getTicketsForMetric(filteredTickets, metric.id, filters),
       title: metric.label
     });
   };
 
+  const openGroup = (group: ReportGroupRow) => {
+    setSelectedTicketLimit(20);
+    setSelectedTickets({ title: group.label, tickets: group.tickets });
+  };
+
   const resetFilters = () => {
     setFilters(isPersistent ? { ...emptyReportFilters, dateFrom: "", dateTo: "" } : emptyReportFilters);
     setMessage(null);
+    setMessageIsError(false);
     setSelectedTickets(null);
+    setSelectedTicketLimit(20);
   };
 
   return (
@@ -136,10 +180,10 @@ export function ReportPage() {
       <PageHeader
         actions={
           <div className="button-row">
-            <Button disabled={isLoading || filteredTickets.length === 0} icon={FileText} onClick={() => void exportReport("pdf")}>
+            <Button disabled={isLoading || isExporting || filteredTickets.length === 0} icon={FileText} onClick={() => void exportReport("pdf")}>
               Exporter PDF
             </Button>
-            <Button disabled={isLoading || filteredTickets.length === 0} icon={Download} onClick={() => void exportReport("csv")}>
+            <Button disabled={isLoading || isExporting || filteredTickets.length === 0} icon={Download} onClick={() => void exportReport("csv")}>
               Exporter CSV
             </Button>
             <Button disabled={isLoading} icon={RefreshCw} onClick={() => void loadReport()}>
@@ -178,7 +222,7 @@ export function ReportPage() {
         ) : null}
       </Card>
 
-      {message ? <p className="form-error form-error--success">{message}</p> : null}
+      {message ? <p className={messageIsError ? "form-error" : "form-error form-error--success"}>{message}</p> : null}
 
       <div className="page-grid">
         <div className="span-4">
@@ -202,13 +246,13 @@ export function ReportPage() {
 
       <div className="page-grid">
         <Card className="span-4" title="Activité par plan">
-          <ReportGroupList groups={summary.byPlan} onOpen={(group) => setSelectedTickets({ title: group.label, tickets: group.tickets })} />
+          <ReportGroupList groups={summary.byPlan} onOpen={openGroup} />
         </Card>
         <Card className="span-4" title="Activité par profil">
-          <ReportGroupList groups={summary.byOperator} onOpen={(group) => setSelectedTickets({ title: group.label, tickets: group.tickets })} />
+          <ReportGroupList groups={summary.byOperator} onOpen={openGroup} />
         </Card>
         <Card className="span-4" title="Activité par jour">
-          <ReportGroupList groups={summary.byDay} onOpen={(group) => setSelectedTickets({ title: group.label, tickets: group.tickets })} />
+          <ReportGroupList groups={summary.byDay} onOpen={openGroup} />
         </Card>
       </div>
 
@@ -223,15 +267,27 @@ export function ReportPage() {
         >
           {selectedTickets.tickets.length > 0 ? (
             <div className="report-ticket-list">
-              {selectedTickets.tickets.slice(0, 20).map((ticket) => (
+              {selectedTickets.tickets.slice(0, selectedTicketLimit).map((ticket) => (
                 <div className="report-ticket-row" key={ticket.id}>
                   <strong>{ticket.code}</strong>
                   <span>{ticket.planName}</span>
                   <span>{internalProfileLabel(ticket.createdByProfileId)}</span>
-                  <span>{formatReportDate(ticket.createdAt)}</span>
+                  <span>{ticketActivityLabel(ticket)}</span>
                   <Badge status={ticketStatusToBadge(ticket.status)}>{ticketStatusLabel(ticket.status)}</Badge>
                 </div>
               ))}
+              {selectedTicketLimit < selectedTickets.tickets.length ? (
+                <Button
+                  onClick={() =>
+                    setSelectedTicketLimit((current) =>
+                      Math.min(current + 20, selectedTickets.tickets.length)
+                    )
+                  }
+                  variant="secondary"
+                >
+                  Afficher 20 tickets supplémentaires
+                </Button>
+              ) : null}
             </div>
           ) : (
             <EmptyState description="Aucun ticket ne correspond à cette ligne de rapport." icon={Ticket} title="Aucun ticket" />
@@ -244,12 +300,13 @@ export function ReportPage() {
   async function exportReport(format: "csv" | "pdf") {
     if (filteredTickets.length === 0) {
       setMessage("Aucune donnée à exporter.");
+      setMessageIsError(true);
       return;
     }
 
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const fileName = `rapport-${routerId}-${stamp}.${format}`;
-    const relativePath = `files/reports/${fileName}`;
+    const relativePath = `files/${fileName}`;
     const bytes =
       format === "csv"
         ? new TextEncoder().encode(buildReportCsv(filteredTickets))
@@ -264,33 +321,81 @@ export function ReportPage() {
               router: ticket.routerName,
               status: ticket.status
             })),
-            summary: summary.metrics.map((metric) => `${metric.label}: ${metric.value}`),
+            summary: [
+              `Période: ${filters.dateFrom || "début"} au ${filters.dateTo || "aujourd'hui"}`,
+              `Tickets visibles: ${filteredTickets.length}`,
+              ...summary.metrics.map((metric) => `${metric.label}: ${metric.value}`)
+            ],
             title: "Rapport d'activité TicketPro"
           });
 
+    setIsExporting(true);
+    let managedPath: string | null = null;
+    let historyCreated = false;
     try {
       if (isPersistent && session) {
-        await fileService.writeBytes(relativePath, bytes);
+        const savedFile = await fileService.writeBytes(relativePath, bytes);
+        managedPath = savedFile.relative_path;
         await generatedFileRepository.create({
           account_id: session.account_id,
           batch_id: null,
           created_by_profile: session.internal_profile_role,
           created_by_profile_id: session.internal_profile_id,
           file_name: fileName,
-          file_path: relativePath,
+          file_path: savedFile.relative_path,
           format,
           id: createId("report"),
           router_id: routerId,
           sync_status: "local",
           type: format === "csv" ? "report_csv" : "report_pdf"
         });
+        historyCreated = true;
+        try {
+          const exported = await fileService.exportToDownloads(savedFile.relative_path);
+          await auditLogService.write({
+            accountId: session.account_id,
+            action: `report.export.${format}`,
+            category: "rapport",
+            internalProfileId: session.internal_profile_id,
+            internalProfileRole: session.internal_profile_role,
+            message: `${fileName} exporté avec ${filteredTickets.length} ticket(s).`,
+            routerId,
+            technicalMessage: `file=${fileName};format=${format};tickets=${filteredTickets.length}`
+          });
+          setMessage(
+            `${format.toUpperCase()} archivé dans Fichiers et exporté sous Téléchargements/TicketPro/${exported.file_name}.`
+          );
+          setMessageIsError(false);
+        } catch {
+          await auditLogService.write({
+            accountId: session.account_id,
+            action: `report.export.${format}.partial`,
+            category: "rapport",
+            internalProfileId: session.internal_profile_id,
+            internalProfileRole: session.internal_profile_role,
+            level: "warning",
+            message: `${fileName} archivé, mais la copie vers Téléchargements a échoué.`,
+            routerId,
+            technicalMessage: `file=${fileName};format=${format};tickets=${filteredTickets.length}`
+          });
+          setMessage(
+            `${format.toUpperCase()} archivé dans Fichiers, mais la copie vers Téléchargements a échoué.`
+          );
+          setMessageIsError(true);
+        }
       } else {
         downloadBytes(bytes, fileName, format === "csv" ? "text/csv;charset=utf-8" : "application/pdf");
+        setMessage(`${format.toUpperCase()} du rapport exporté avec succès.`);
+        setMessageIsError(false);
       }
-
-      setMessage(`${format.toUpperCase()} du rapport exporté avec succès.`);
     } catch (error) {
+      if (managedPath && !historyCreated) {
+        await fileService.remove(managedPath).catch(() => undefined);
+      }
       setMessage(error instanceof Error ? error.message : "L'export a échoué.");
+      setMessageIsError(true);
+    } finally {
+      setIsExporting(false);
     }
   }
 }
@@ -310,6 +415,18 @@ function downloadBytes(bytes: Uint8Array, fileName: string, mimeType: string): v
 function createId(prefix: string): string {
   const randomUuid = globalThis.crypto?.randomUUID?.();
   return randomUuid ? `${prefix}-${randomUuid}` : `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function ticketActivityLabel(ticket: ReportTicket): string {
+  return [
+    `Créé ${formatReportDate(ticket.createdAt)}`,
+    ticket.printedAt[0] ? `Imprimé ${formatReportDate(ticket.printedAt[0])}` : null,
+    ticket.activatedAt ? `Activé ${formatReportDate(ticket.activatedAt)}` : null,
+    ticket.completedAt ? `Terminé ${formatReportDate(ticket.completedAt)}` : null,
+    ticket.deletedAt ? `Supprimé ${formatReportDate(ticket.deletedAt)}` : null
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 type FilterOptions = {

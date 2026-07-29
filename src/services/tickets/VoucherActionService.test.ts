@@ -53,4 +53,19 @@ describe("VoucherActionService", () => {
     await service.remove("999999");
     expect(removeHotspotUser).toHaveBeenCalledWith("999999");
   });
+
+  it("réactive un voucher désactivé sur RouterOS", async () => {
+    const enableHotspotUser = vi.fn(async () => ({} as never));
+    const service = new VoucherActionService({
+      disableHotspotUser: vi.fn(async () => ({} as never)),
+      disconnectActiveUser: vi.fn(async () => undefined),
+      enableHotspotUser,
+      listActiveUsers: vi.fn(async () => []),
+      removeHotspotUser: vi.fn(async () => undefined)
+    });
+
+    await service.enable("123456");
+
+    expect(enableHotspotUser).toHaveBeenCalledWith("123456");
+  });
 });

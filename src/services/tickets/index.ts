@@ -4,6 +4,11 @@ export {
   normalizeTicketPrefix,
   secretRefForTicket
 } from "./TicketCodeGenerator";
+export {
+  protectTicketPassword,
+  resolveTicketPasswordValue,
+  type TicketPasswordReference
+} from "./TicketPasswordService";
 export { VoucherActionService } from "./VoucherActionService";
 export type {
   ExistingTicketLike,

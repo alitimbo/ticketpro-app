@@ -7,7 +7,7 @@ import {
 } from "./TicketPdfService";
 
 describe("TicketPdfService", () => {
-  it("génère un PDF A4 multi-tickets avec 40 tickets par page", () => {
+  it("génère un PDF A4 lisible avec 28 tickets par page", () => {
     const input = buildPdfInput(41);
     const pdf = generateTicketPdf(input);
     const text = new TextDecoder().decode(pdf);
@@ -16,8 +16,12 @@ describe("TicketPdfService", () => {
     expect(text).toContain("/MediaBox [0 0 595.28 841.89]");
     expect(text).toContain("/Count 2");
     expect(text).toContain("(Zone Centre)");
+    expect(text).toContain("(LOGIN)");
     expect(text).toContain("(123001)");
-    expect(text).toContain("(Passe 123001)");
+    expect(text).not.toContain("(MOT DE PASSE)");
+    expect(text).toContain("(Portail wifi.ticketpro.local)");
+    expect(text).toContain("(Contact +227 90 12 34 56)");
+    expect(text).not.toContain("(Lot ");
   });
 
   it("prépare l'enregistrement generated_files du lot", () => {
@@ -28,8 +32,9 @@ describe("TicketPdfService", () => {
       batch_id: "batch-test",
       file_name: "tickets-batch-test.pdf",
       file_path: "files/tickets-batch-test.pdf",
-      format: "pdf",
+      format: "a4",
       id: "batch-test-pdf",
+      metadata_json: expect.stringContaining('"format":"a4"'),
       router_id: "routeur-demo",
       type: "tickets_pdf"
     });
@@ -49,6 +54,18 @@ describe("TicketPdfService", () => {
       })
     ).toBe("******");
   });
+
+  it("inclut un véritable QR code et le mot de passe distinct dans le PDF", () => {
+    const input = buildPdfInput(1);
+    input.qrCodeEnabled = true;
+    input.tickets[0].password = "847295";
+    const text = new TextDecoder().decode(generateTicketPdf(input));
+    const filledModules = text.match(/ re f/g) ?? [];
+
+    expect(text).toContain("(MOT DE PASSE)");
+    expect(text).toContain("(847295)");
+    expect(filledModules.length).toBeGreaterThan(80);
+  });
 });
 
 function buildPdfInput(quantity: number): TicketPdfInput {
@@ -62,11 +79,12 @@ function buildPdfInput(quantity: number): TicketPdfInput {
     fileName: "tickets-batch-test.pdf",
     format: "a4",
     generatedAt: "2026-07-08T20:00:00.000Z",
+    hotspotAddress: "wifi.ticketpro.local",
+    ownerPhone: "+227 90 12 34 56",
     planName: "3h-2Go",
     priceLabel: "CFA200",
     qrCodeEnabled: false,
     routerId: "routeur-demo",
-    supportPhone: "lineup.net",
     template: "economy",
     tickets: Array.from({ length: quantity }, (_, index) => {
       const username = String(123001 + index);

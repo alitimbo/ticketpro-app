@@ -547,7 +547,7 @@ export function RoutersPage() {
               onEdit={() => openEditForm(router)}
               onLocal={() => void activateRouterMode(router, "local")}
               onOpen={() => setSelectedRouter(router)}
-              onRemote={() => void activateRouterMode(router, router.preferredMode === "vpn" ? "vpn" : "distant_ip")}
+              onRemote={() => void activateRouterMode(router, router.remoteMode)}
               onTest={() => void testConnection(router)}
               router={router}
             />
@@ -567,7 +567,7 @@ export function RoutersPage() {
       <ConnectionChoiceDialog
         onCancel={() => setSelectedRouter(null)}
         onLocal={() => void enterSelectedRouter("local")}
-        onRemote={() => void enterSelectedRouter(selectedRouter?.preferredMode === "vpn" ? "vpn" : "distant_ip")}
+        onRemote={() => void enterSelectedRouter(selectedRouter?.remoteMode ?? "distant_ip")}
         router={selectedRouter}
       />
       <RouterFormDialog
@@ -604,7 +604,11 @@ function RouterCard({ canDelete, canEdit, onDelete, onEdit, onLocal, onOpen, onR
   const menuItems = [
     { icon: Laptop, label: "Connexion locale", onSelect: onLocal },
     ...(router.remoteHost.trim()
-      ? [{ icon: Wifi, label: "Connexion à distance", onSelect: onRemote }]
+      ? [{
+          icon: Wifi,
+          label: router.remoteMode === "vpn" ? "Connexion à distance (VPN)" : "Connexion à distance",
+          onSelect: onRemote
+        }]
       : canEdit
         ? [{ icon: Wifi, label: "Configurer l'accès distant", onSelect: onEdit }]
         : []),
@@ -685,8 +689,12 @@ function ConnectionChoiceDialog({
           <button className="connection-option" disabled={!remoteAvailable} onClick={onRemote} type="button">
             <Wifi aria-hidden="true" />
             <span>
-              <strong>Connexion à distance</strong>
-              <small>{remoteAvailable ? `${router.remoteHost}:${router.remotePort}` : "Adresse distante non configurée"}</small>
+              <strong>{router.remoteMode === "vpn" ? "Connexion à distance (VPN WireGuard)" : "Connexion à distance"}</strong>
+              <small>
+                {remoteAvailable
+                  ? `${router.remoteMode === "vpn" ? "Tunnel VPN · " : ""}${router.remoteHost}:${router.remotePort}`
+                  : "Adresse distante non configurée"}
+              </small>
             </span>
           </button>
         </div>

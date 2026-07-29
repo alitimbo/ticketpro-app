@@ -52,7 +52,15 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
   }
 
   updateHotspotUser(username: string, planId: string) {
-    return this.delegate.updateHotspotUser(username, this.resolveProfileReference(planId));
+    const plan = this.findPlan(planId);
+    return this.delegate.updateHotspotUser(
+      username,
+      this.resolveProfileReference(planId),
+      plan ? {
+        limitBytesTotal: dataLimitMbToBytes(plan?.data_limit_mb),
+        limitUptime: durationMinutesToRouterOs(plan?.duration_minutes)
+      } : undefined
+    );
   }
 
   createHotspotUser(user: HotspotUserDraft) {
@@ -71,6 +79,10 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
 
   disableHotspotUser(username: string) {
     return this.delegate.disableHotspotUser(username);
+  }
+
+  enableHotspotUser(username: string) {
+    return this.delegate.enableHotspotUser(username);
   }
 
   removeHotspotUser(username: string) {

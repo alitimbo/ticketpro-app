@@ -1,10 +1,12 @@
 import type { CreateGeneratedFileInput } from "../../domain/database";
+import QRCode from "qrcode";
 
 export type TicketPdfFormat = "a4" | "a5" | "thermal58" | "thermal80";
 
 export type TicketPdfTemplate = "economy" | "premium" | "qr" | "simple";
 
 export type TicketPdfTicket = {
+  password?: string;
   passwordSecretRef: string;
   username: string;
 };
@@ -19,15 +21,30 @@ export type TicketPdfInput = {
   fileName: string;
   format: TicketPdfFormat;
   generatedAt: string;
+  hotspotAddress: string;
+  ownerPhone: string;
   planName: string;
   priceLabel?: string | null;
   qrCodeEnabled: boolean;
   routerId: string;
-  supportPhone?: string | null;
   template: TicketPdfTemplate;
   tickets: TicketPdfTicket[];
   zoneName: string;
 };
+
+export type TicketPdfArchiveMetadata = Pick<
+  TicketPdfInput,
+  | "dataLimitLabel"
+  | "durationLabel"
+  | "format"
+  | "hotspotAddress"
+  | "ownerPhone"
+  | "planName"
+  | "priceLabel"
+  | "qrCodeEnabled"
+  | "template"
+  | "zoneName"
+>;
 
 type PageSize = {
   height: number;
@@ -48,13 +65,26 @@ const pageSizes: Record<TicketPdfFormat, PageSize> = {
 };
 
 const grids: Record<TicketPdfFormat, TicketGrid> = {
-  a4: { columns: 5, margin: 36, rows: 8 },
-  a5: { columns: 2, margin: 24, rows: 5 },
+  a4: { columns: 4, margin: 36, rows: 7 },
+  a5: { columns: 2, margin: 24, rows: 4 },
   thermal58: { columns: 1, margin: 8, rows: 1 },
   thermal80: { columns: 1, margin: 10, rows: 1 }
 };
 
 export function buildGeneratedTicketPdfRecord(input: TicketPdfInput): CreateGeneratedFileInput {
+  const metadata: TicketPdfArchiveMetadata = {
+    dataLimitLabel: input.dataLimitLabel,
+    durationLabel: input.durationLabel,
+    format: input.format,
+    hotspotAddress: input.hotspotAddress,
+    ownerPhone: input.ownerPhone,
+    planName: input.planName,
+    priceLabel: input.priceLabel ?? null,
+    qrCodeEnabled: input.qrCodeEnabled,
+    template: input.template,
+    zoneName: input.zoneName
+  };
+
   return {
     account_id: input.accountId,
     batch_id: input.batchId,
@@ -62,12 +92,49 @@ export function buildGeneratedTicketPdfRecord(input: TicketPdfInput): CreateGene
     created_by_profile_id: input.createdByProfileId,
     file_name: input.fileName,
     file_path: `files/${input.fileName}`,
-    format: "pdf",
+    format: input.format,
     id: `${input.batchId}-pdf`,
+    metadata_json: JSON.stringify(metadata),
     router_id: input.routerId,
     sync_status: "local",
     type: "tickets_pdf"
   };
+}
+
+export function parseTicketPdfArchiveMetadata(value: string | null | undefined): TicketPdfArchiveMetadata | null {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(value) as Partial<TicketPdfArchiveMetadata>;
+    if (
+      !["a4", "a5", "thermal58", "thermal80"].includes(parsed.format ?? "") ||
+      !["economy", "premium", "qr", "simple"].includes(parsed.template ?? "") ||
+      typeof parsed.durationLabel !== "string" ||
+      typeof parsed.hotspotAddress !== "string" ||
+      typeof parsed.ownerPhone !== "string" ||
+      typeof parsed.planName !== "string" ||
+      typeof parsed.zoneName !== "string"
+    ) {
+      return null;
+    }
+
+    return {
+      dataLimitLabel: typeof parsed.dataLimitLabel === "string" ? parsed.dataLimitLabel : null,
+      durationLabel: parsed.durationLabel,
+      format: parsed.format as TicketPdfFormat,
+      hotspotAddress: parsed.hotspotAddress,
+      ownerPhone: parsed.ownerPhone,
+      planName: parsed.planName,
+      priceLabel: typeof parsed.priceLabel === "string" ? parsed.priceLabel : null,
+      qrCodeEnabled: parsed.qrCodeEnabled === true,
+      template: parsed.template as TicketPdfTemplate,
+      zoneName: parsed.zoneName
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function generateTicketPdf(input: TicketPdfInput): Uint8Array {
@@ -87,6 +154,9 @@ export function generateTicketPdf(input: TicketPdfInput): Uint8Array {
 }
 
 export function resolveTicketPdfPassword(ticket: TicketPdfTicket): string {
+  if (ticket.password) {
+    return ticket.password;
+  }
   const expectedRef = `/${ticket.username}/password`;
   return ticket.passwordSecretRef.endsWith(expectedRef) ? ticket.username : "******";
 }
@@ -100,15 +170,16 @@ function drawTicketPage(
 ) {
   const availableWidth = page.size.width - grid.margin * 2;
   const availableHeight = page.size.height - grid.margin * 2;
-  const cellWidth = availableWidth / grid.columns;
-  const cellHeight = availableHeight / grid.rows;
   const isThermal = input.format === "thermal58" || input.format === "thermal80";
+  const ticketGap = isThermal ? 0 : 5;
+  const cellWidth = (availableWidth - ticketGap * (grid.columns - 1)) / grid.columns;
+  const cellHeight = (availableHeight - ticketGap * (grid.rows - 1)) / grid.rows;
 
   tickets.forEach((ticket, index) => {
     const row = Math.floor(index / grid.columns);
     const column = index % grid.columns;
-    const x = grid.margin + column * cellWidth;
-    const y = page.size.height - grid.margin - (row + 1) * cellHeight;
+    const x = grid.margin + column * (cellWidth + ticketGap);
+    const y = page.size.height - grid.margin - (row + 1) * cellHeight - row * ticketGap;
 
     drawTicket(page, {
       cellHeight,
@@ -149,110 +220,136 @@ function drawTicket(
   const centerX = x + cellWidth / 2;
   const top = y + cellHeight - padding;
   const password = resolveTicketPdfPassword(ticket);
+  const isSingleCode = password === ticket.username;
   const showQr = input.qrCodeEnabled || input.template === "qr";
-  const isEconomy = input.template === "economy";
   const isPremium = input.template === "premium";
 
   page.rect(x, y, cellWidth, cellHeight);
 
   if (isPremium) {
-    page.fillRect(x, y + cellHeight - 5, cellWidth, 5, 0.72);
+    page.fillRect(x, y + cellHeight - 4, cellWidth, 4, 0.72);
   }
 
-  page.text(input.zoneName, centerX, top - 8, { align: "center", font: "bold", size: isThermal ? 11 : 7.6 });
-  page.text(`#${index}`, centerX, top - (isThermal ? 21 : 18), { align: "center", size: isThermal ? 7 : 4.9 });
+  const contentWidth = cellWidth - padding * 2;
+  const titleSize = fitTextSize(input.zoneName, contentWidth, isThermal ? 11 : 8.4, isThermal ? 8 : 6);
+  page.text(input.zoneName, centerX, top - 8, { align: "center", font: "bold", size: titleSize });
+  page.text(`TICKET ${index}`, centerX, top - (isThermal ? 20 : 17), {
+    align: "center",
+    size: isThermal ? 6.4 : 4.2
+  });
 
-  const codeBoxY = top - (isThermal ? 49 : 31);
-  page.rect(x + padding, codeBoxY, cellWidth - padding * 2, isThermal ? 22 : 16);
-  if (!isEconomy) {
-    drawSmallUserIcon(page, x + padding + 5, codeBoxY + (isThermal ? 6 : 4));
+  const credentialTop = top - (isThermal ? 27 : 21);
+  const credentialHeight = isSingleCode ? (isThermal ? 34 : 25) : (isThermal ? 58 : 38);
+  const credentialBottom = credentialTop - credentialHeight;
+  const credentialX = x + padding;
+  page.rect(credentialX, credentialBottom, contentWidth, credentialHeight);
+
+  const credentialLabelSize = isThermal ? 6.2 : 4.2;
+  if (isSingleCode) {
+    page.text("LOGIN", centerX, credentialTop - (isThermal ? 10 : 8), {
+      align: "center",
+      font: "bold",
+      size: credentialLabelSize
+    });
+    page.text(ticket.username, centerX, credentialTop - (isThermal ? 27 : 21), {
+      align: "center",
+      font: "bold",
+      size: fitTextSize(ticket.username, contentWidth - 8, isThermal ? 15 : 11, isThermal ? 9 : 7)
+    });
+  } else {
+    const dividerY = credentialTop - credentialHeight / 2;
+    page.line(credentialX, dividerY, credentialX + contentWidth, dividerY);
+    page.text("LOGIN", centerX, credentialTop - (isThermal ? 8 : 6), {
+      align: "center",
+      font: "bold",
+      size: credentialLabelSize
+    });
+    page.text(ticket.username, centerX, credentialTop - (isThermal ? 21 : 16), {
+      align: "center",
+      font: "bold",
+      size: fitTextSize(ticket.username, contentWidth - 8, isThermal ? 12 : 8.5, isThermal ? 8 : 5.8)
+    });
+    page.text("MOT DE PASSE", centerX, dividerY - (isThermal ? 9 : 7), {
+      align: "center",
+      font: "bold",
+      size: credentialLabelSize
+    });
+    page.text(password, centerX, dividerY - (isThermal ? 23 : 17), {
+      align: "center",
+      font: "bold",
+      size: fitTextSize(password, contentWidth - 8, isThermal ? 12 : 8.5, isThermal ? 8 : 5.8)
+    });
   }
-  page.text(ticket.username, centerX + (isEconomy ? 0 : 5), codeBoxY + (isThermal ? 7 : 5), {
+
+  const smallSize = isThermal ? 7 : 4.5;
+  const lineGap = isThermal ? 10 : 6.2;
+  let lineY = credentialBottom - (isThermal ? 11 : 8);
+  page.text(input.planName, centerX, lineY, {
     align: "center",
     font: "bold",
-    size: isThermal ? 14 : 9.6
+    size: fitTextSize(input.planName, contentWidth, isThermal ? 10 : 6.6, isThermal ? 7 : 4.5)
   });
-
-  const smallSize = isThermal ? 7.2 : 4.45;
-  const lineGap = isThermal ? 10 : 5.9;
-  let lineY = codeBoxY - (isThermal ? 12 : 7);
-  page.text(input.planName, centerX, lineY, { align: "center", font: "bold", size: isThermal ? 10 : 6.2 });
   lineY -= lineGap;
-  page.text(["Duree " + input.durationLabel, input.dataLimitLabel].filter(Boolean).join(" - "), centerX, lineY, {
+  const allowanceLabel = [`Duree ${input.durationLabel}`, input.dataLimitLabel].filter(Boolean).join(" - ");
+  page.text(allowanceLabel, centerX, lineY, {
     align: "center",
-    size: smallSize
+    size: fitTextSize(allowanceLabel, contentWidth, smallSize, isThermal ? 5.2 : 3.5)
   });
-
-  lineY -= lineGap;
-  page.text(`Passe ${password}`, centerX, lineY, { align: "center", font: "bold", size: smallSize });
 
   if (input.priceLabel) {
     lineY -= lineGap;
-    page.text(input.priceLabel, centerX, lineY, { align: "center", size: smallSize });
+    page.text(input.priceLabel, centerX, lineY, { align: "center", font: "bold", size: smallSize });
   }
 
+  const qrSize = isThermal ? 42 : 28;
   if (showQr && cellWidth > 85) {
-    drawQrPattern(page, x + cellWidth - padding - 24, y + padding + 13, 19, `${ticket.username}:${password}`);
+    drawQrPattern(
+      page,
+      x + cellWidth - padding - qrSize,
+      y + padding,
+      qrSize,
+      `${ticket.username}:${password}`
+    );
   }
 
   const footerSize = isThermal ? 6.2 : 3.9;
-  page.text(formatPdfDate(input.generatedAt), centerX, y + padding + 18, { align: "center", size: footerSize });
-  page.text(`Lot ${input.batchId}`, centerX, y + padding + 11, { align: "center", size: footerSize });
-
-  if (input.supportPhone) {
-    page.text(input.supportPhone, centerX, y + padding + 5, { align: "center", size: footerSize });
-  } else {
-    page.text("Conservez le ticket pendant le service", centerX, y + padding + 5, {
-      align: "center",
-      size: footerSize
-    });
-  }
-}
-
-function drawSmallUserIcon(page: PdfPage, x: number, y: number) {
-  page.circle(x + 4, y + 6, 3);
-  page.fillCircle(x + 4, y + 1, 4);
-  page.fillCircle(x + 12, y + 3, 2.5);
-  page.line(x + 11, y, x + 16, y);
+  const footerCenterX = showQr
+    ? x + padding + (cellWidth - padding * 3 - qrSize) / 2
+    : centerX;
+  const footerWidth = showQr ? cellWidth - padding * 3 - qrSize : cellWidth - padding * 2;
+  const hotspotLabel = `Portail ${input.hotspotAddress}`;
+  page.text(hotspotLabel, footerCenterX, y + padding + 8, {
+    align: "center",
+    font: "bold",
+    size: fitTextSize(hotspotLabel, footerWidth, isThermal ? 7 : 4.6, isThermal ? 4.8 : 3.2)
+  });
+  const ownerPhoneLabel = `Contact ${input.ownerPhone}`;
+  page.text(ownerPhoneLabel, footerCenterX, y + padding + 2, {
+    align: "center",
+    size: fitTextSize(ownerPhoneLabel, footerWidth, footerSize, isThermal ? 4.8 : 3.1)
+  });
 }
 
 function drawQrPattern(page: PdfPage, x: number, y: number, size: number, value: string) {
-  const modules = 11;
-  const moduleSize = size / modules;
-  let seed = hash(value);
+  const qr = QRCode.create(value, { errorCorrectionLevel: "M" });
+  const quietZone = 2;
+  const totalModules = qr.modules.size + quietZone * 2;
+  const moduleSize = size / totalModules;
 
-  page.rect(x, y, size, size);
+  page.fillRect(x, y, size, size, 1);
 
-  for (let row = 0; row < modules; row += 1) {
-    for (let column = 0; column < modules; column += 1) {
-      const finder =
-        (row < 3 && column < 3) ||
-        (row < 3 && column >= modules - 3) ||
-        (row >= modules - 3 && column < 3);
-
-      seed = (seed * 1_103_515_245 + 12_345) & 0x7fffffff;
-
-      if (finder || seed % 3 === 0) {
-        page.fillRect(x + column * moduleSize, y + row * moduleSize, moduleSize, moduleSize);
+  for (let row = 0; row < qr.modules.size; row += 1) {
+    for (let column = 0; column < qr.modules.size; column += 1) {
+      if (qr.modules.get(row, column)) {
+        page.fillRect(
+          x + (column + quietZone) * moduleSize,
+          y + (qr.modules.size - row - 1 + quietZone) * moduleSize,
+          moduleSize,
+          moduleSize
+        );
       }
     }
   }
-}
-
-function formatPdfDate(value: string): string {
-  const date = new Date(value);
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  const hours = String(date.getHours()).padStart(2, "0");
-  const minutes = String(date.getMinutes()).padStart(2, "0");
-  const seconds = String(date.getSeconds()).padStart(2, "0");
-
-  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
-}
-
-function hash(value: string): number {
-  return Array.from(value).reduce((result, character) => (result * 31 + character.charCodeAt(0)) & 0x7fffffff, 17);
 }
 
 function chunk<T>(items: T[], size: number): T[][] {
@@ -428,4 +525,13 @@ function normalizePdfText(value: string): string {
 
 function estimateTextWidth(value: string, size: number, isBold: boolean): number {
   return value.length * size * (isBold ? 0.58 : 0.52);
+}
+
+function fitTextSize(value: string, maxWidth: number, preferredSize: number, minimumSize: number): number {
+  const estimatedAtPreferred = estimateTextWidth(normalizePdfText(value), preferredSize, true);
+  if (estimatedAtPreferred <= maxWidth) {
+    return preferredSize;
+  }
+
+  return Math.max(minimumSize, preferredSize * (maxWidth / estimatedAtPreferred));
 }

@@ -5,6 +5,7 @@ import type {
   HotspotServer,
   HotspotUser,
   HotspotUserDraft,
+  HotspotUserLimits,
   HotspotUsersBatchDraft,
   InterfaceTraffic,
   RouterConnectionMode,
@@ -15,6 +16,7 @@ import type {
   RouterSystemInfo
 } from "../../domain/router";
 import { TicketCodeGenerator } from "../tickets";
+import { resolveTicketPasswordValue } from "../tickets/TicketPasswordService";
 import type { RouterAdapter } from "./RouterAdapter";
 import { RouterAdapterError } from "./RouterAdapterError";
 import {
@@ -102,7 +104,6 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     const profileName = plan.profileName || slugify(plan.name);
 
     await this.call("/ip/hotspot/user/profile/add", {
-      comment: buildPlanComment(plan),
       name: profileName,
       "rate-limit": buildRateLimit(plan),
       "session-timeout": minutesToRouterOsDuration(plan.durationMinutes),
@@ -123,7 +124,6 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     };
 
     await this.call("/ip/hotspot/user/profile/set", {
-      comment: buildPlanComment(next),
       name: next.profileName,
       numbers: current.id,
       "rate-limit": buildRateLimit(next),
@@ -146,7 +146,7 @@ export class MikroTikRouterAdapter implements RouterAdapter {
 
   async createHotspotUser(user: HotspotUserDraft): Promise<HotspotUser> {
     const plan = await this.findPlanById(user.planId);
-    const password = resolveTicketPassword(user);
+    const password = await resolveTicketPassword(user);
 
     await this.call("/ip/hotspot/user/add", {
       comment: user.comment ?? "",
@@ -251,11 +251,15 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     }
   }
 
-  async updateHotspotUser(username: string, planId: string): Promise<HotspotUser> {
+  async updateHotspotUser(username: string, planId: string, limits: HotspotUserLimits = {}): Promise<HotspotUser> {
     const user = await this.findUserByName(username);
     const plan = await this.findPlanById(planId);
 
     await this.call("/ip/hotspot/user/set", {
+      // RouterOS requires an explicit empty value to clear an existing limit.
+      // `null` itself is omitted by the transport and would leave the old value.
+      "limit-bytes-total": limits.limitBytesTotal === null ? "" : limits.limitBytesTotal,
+      "limit-uptime": limits.limitUptime === null ? "" : limits.limitUptime,
       numbers: user.id,
       profile: plan.profileName
     });
@@ -295,6 +299,12 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     const user = await this.findUserByName(username);
     await this.call("/ip/hotspot/user/disable", { numbers: user.id });
     return { ...user, status: "disabled" };
+  }
+
+  async enableHotspotUser(username: string): Promise<HotspotUser> {
+    const user = await this.findUserByName(username);
+    await this.call("/ip/hotspot/user/enable", { numbers: user.id });
+    return { ...user, status: "available" };
   }
 
   async removeHotspotUser(username: string): Promise<void> {
@@ -348,17 +358,41 @@ export class MikroTikRouterAdapter implements RouterAdapter {
   }
 
   async getInterfaceTraffic(): Promise<InterfaceTraffic[]> {
-    const rows = await this.call("/interface/monitor-traffic", {
-      interface: "all",
-      once: true
-    });
+    const interfaces = (await this.call("/interface/print"))
+      .map((row) => ({
+        isRunning: isTruthy(pick(row, "running")) && !isTruthy(pick(row, "disabled")),
+        name: pick(row, "name")
+      }))
+      .filter((item): item is { isRunning: boolean; name: string } => Boolean(item.name));
 
-    return rows.map((row) => ({
-      interfaceName: pick(row, "name", "interface") || "interface",
-      isRunning: true,
-      rxBytesPerSecond: bitsToBytes(parseInteger(pick(row, "rx-bits-per-second"))),
-      txBytesPerSecond: bitsToBytes(parseInteger(pick(row, "tx-bits-per-second")))
-    }));
+    return Promise.all(
+      interfaces.map(async (routerInterface) => {
+        try {
+          const row = firstRow(
+            await this.call("/interface/monitor-traffic", {
+              interface: routerInterface.name,
+              once: true
+            })
+          );
+
+          return {
+            interfaceName: routerInterface.name,
+            isRunning: routerInterface.isRunning,
+            rxBytesPerSecond: bitsToBytes(parseInteger(pick(row, "rx-bits-per-second"))),
+            txBytesPerSecond: bitsToBytes(parseInteger(pick(row, "tx-bits-per-second")))
+          };
+        } catch {
+          // Some virtual or unsupported interfaces cannot be monitored. Their
+          // presence must not make the complete monitoring page unavailable.
+          return {
+            interfaceName: routerInterface.name,
+            isRunning: routerInterface.isRunning,
+            rxBytesPerSecond: 0,
+            txBytesPerSecond: 0
+          };
+        }
+      })
+    );
   }
 
   async getRouterDateTime(): Promise<RouterDateTime> {
@@ -428,7 +462,7 @@ export function normalizeMikroTikError(error: unknown): RouterAdapterError {
 
   const message = error instanceof Error ? error.message : String(error);
   const normalized = message.toLowerCase();
-  let code: RouterErrorCode = "timeout";
+  let code: RouterErrorCode = "router_rejected";
 
   if (normalized.includes("invalid user") || normalized.includes("authentication") || normalized.includes("cannot log in")) {
     code = "authentication_failed";
@@ -444,6 +478,8 @@ export function normalizeMikroTikError(error: unknown): RouterAdapterError {
     code = "timeout";
   } else if (normalized.includes("offline") || normalized.includes("unreachable") || normalized.includes("network")) {
     code = "router_offline";
+  } else if (normalized.includes("router rejected")) {
+    code = "router_rejected";
   }
 
   return new RouterAdapterError(code, `RouterOS API error: ${code}: ${sanitizeRouterMessage(message)}`);
@@ -464,7 +500,7 @@ function profileRowToPlan(row: RouterOsApiRow): HotspotPlan {
     priceHint: metadata.priceHint ?? null,
     profileName: pick(row, "name") || "default",
     sharedUsers: parseInteger(pick(row, "shared-users")) || 1,
-    status: isTruthy(pick(row, "disabled")) ? "disabled" : "active",
+    status: metadata.status === "disabled" || isTruthy(pick(row, "disabled")) ? "disabled" : "active",
     uploadLimit,
     validityMinutes: metadata.validityMinutes ?? durationMinutes
   };
@@ -472,6 +508,15 @@ function profileRowToPlan(row: RouterOsApiRow): HotspotPlan {
 
 function userRowToHotspotUser(row: RouterOsApiRow): HotspotUser {
   const username = pick(row, "name", "user") || "";
+  const downloadedBytes = parseInteger(pick(row, "bytes-out"));
+  const uploadedBytes = parseInteger(pick(row, "bytes-in"));
+  const limitBytesTotal = parseInteger(pick(row, "limit-bytes-total"));
+  const uptime = pick(row, "uptime") || null;
+  const limitUptime = pick(row, "limit-uptime") || null;
+  const limitReached =
+    (limitBytesTotal > 0 && downloadedBytes + uploadedBytes >= limitBytesTotal) ||
+    (routerOsDurationToSeconds(limitUptime) > 0 &&
+      routerOsDurationToSeconds(uptime) >= routerOsDurationToSeconds(limitUptime));
 
   return {
     comment: pick(row, "comment") || null,
@@ -480,19 +525,14 @@ function userRowToHotspotUser(row: RouterOsApiRow): HotspotUser {
     passwordSecretRef: `secret://mikrotik/${username}/password`,
     planId: pick(row, "profile") || "default",
     profileName: pick(row, "profile") || "default",
-    status: isTruthy(pick(row, "disabled")) ? "disabled" : "available",
-    username
+    status: limitReached ? "expired" : isTruthy(pick(row, "disabled")) ? "disabled" : "available",
+    username,
+    downloadedBytes,
+    uploadedBytes,
+    uptime,
+    limitUptime,
+    limitBytesTotal: limitBytesTotal || null
   };
-}
-
-function buildPlanComment(plan: Partial<HotspotPlanDraft | HotspotPlan>): string {
-  return `hotspot-manager:${JSON.stringify({
-    dataLimitMb: plan.dataLimitMb ?? null,
-    durationMinutes: plan.durationMinutes ?? null,
-    name: plan.name ?? null,
-    priceHint: plan.priceHint ?? null,
-    validityMinutes: plan.validityMinutes ?? null
-  })}`;
 }
 
 function parsePlanComment(comment: string | undefined): Partial<HotspotPlan> {
@@ -507,16 +547,19 @@ function parsePlanComment(comment: string | undefined): Partial<HotspotPlan> {
   }
 }
 
-function resolveTicketPassword(user: HotspotUserDraft): string {
-  if (user.passwordSecretRef.endsWith(`/${user.username}/password`)) {
-    return user.username;
+async function resolveTicketPassword(user: HotspotUserDraft): Promise<string> {
+  try {
+    return await resolveTicketPasswordValue({
+      passwordSecretRef: user.passwordSecretRef,
+      username: user.username
+    });
+  } catch {
+    throw new RouterAdapterError("permission_denied", "Password secret cannot be resolved locally");
   }
-
-  throw new RouterAdapterError("permission_denied", "Password secret cannot be resolved locally");
 }
 
 function buildRateLimit(plan: Pick<HotspotPlanDraft, "downloadLimit" | "uploadLimit">): string | undefined {
-  return [plan.downloadLimit, plan.uploadLimit].filter(Boolean).join("/") || undefined;
+  return [plan.uploadLimit, plan.downloadLimit].filter(Boolean).join("/") || undefined;
 }
 
 function splitRateLimit(value: string | undefined): [string | null, string | null] {
@@ -524,7 +567,7 @@ function splitRateLimit(value: string | undefined): [string | null, string | nul
     return [null, null];
   }
 
-  const [downloadLimit, uploadLimit] = value.split("/");
+  const [uploadLimit, downloadLimit] = value.split("/");
   return [downloadLimit || null, uploadLimit || null];
 }
 
@@ -590,6 +633,22 @@ function routerOsDurationToMinutes(value: string | undefined): number {
   }
 
   return minutes;
+}
+
+function routerOsDurationToSeconds(value: string | null | undefined): number {
+  if (!value) return 0;
+  const units: Record<string, number> = {
+    w: 7 * 24 * 60 * 60,
+    d: 24 * 60 * 60,
+    h: 60 * 60,
+    m: 60,
+    s: 1
+  };
+  let seconds = 0;
+  for (const match of value.matchAll(/(\d+)(w|d|h|m|s)/g)) {
+    seconds += Number(match[1]) * units[match[2]];
+  }
+  return seconds;
 }
 
 function slugify(value: string): string {

@@ -10,8 +10,8 @@ export class GeneratedFileRepository {
     await this.database.execute(
       `INSERT INTO generated_files (
         id, account_id, router_id, batch_id, type, file_name, file_path, format, created_by_profile,
-        created_by_profile_id, sync_status
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`,
+        created_by_profile_id, metadata_json, sync_status
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`,
       [
         input.id,
         input.account_id,
@@ -23,6 +23,7 @@ export class GeneratedFileRepository {
         input.format,
         input.created_by_profile,
         input.created_by_profile_id,
+        input.metadata_json ?? null,
         input.sync_status ?? "local"
       ]
     );
@@ -49,10 +50,25 @@ export class GeneratedFileRepository {
   }
 
   async remove(id: string, accountId: string): Promise<void> {
-    await this.database.execute(
+    const result = await this.database.execute(
       "UPDATE generated_files SET deleted_at = ?1, updated_at = ?2 WHERE id = ?3 AND account_id = ?4",
       [new Date().toISOString(), new Date().toISOString(), id, accountId]
     );
+
+    if (result.rowsAffected === 0) {
+      throw new Error("Le fichier est introuvable dans l'historique de ce compte.");
+    }
+  }
+
+  async markRegenerated(id: string, accountId: string): Promise<void> {
+    const result = await this.database.execute(
+      "UPDATE generated_files SET updated_at = ?1 WHERE id = ?2 AND account_id = ?3 AND deleted_at IS NULL",
+      [new Date().toISOString(), id, accountId]
+    );
+
+    if (result.rowsAffected === 0) {
+      throw new Error("Le fichier régénéré est introuvable dans l'historique.");
+    }
   }
 
   async listByAccount(accountId: string, profileId?: string): Promise<GeneratedFileRecord[]> {

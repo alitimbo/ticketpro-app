@@ -179,6 +179,7 @@ const tableColumns: Record<LocalTableName, string[]> = {
     "serial_number",
     "routeros_version",
     "local_ip",
+    "hotspot_address",
     "notes",
     "api_port",
     "api_ssl_port",

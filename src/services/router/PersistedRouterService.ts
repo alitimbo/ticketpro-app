@@ -3,7 +3,7 @@ import type { HotspotPlanRecord, RouterConnectionRecord, RouterRecord } from "..
 import type { DatabaseClient } from "../database/DatabaseClient";
 import { DatabaseRouterActionLogger } from "../logging";
 import { decryptLocalSecret, isEncryptedLocalSecret } from "../security/localSecrets";
-import { MikroTikRouterAdapter } from "./MikroTikRouterAdapter";
+import { CompatibleMikroTikRouterAdapter } from "./CompatibleMikroTikRouterAdapter";
 import { PersistedPlanMappingRouterAdapter } from "./PersistedPlanMappingRouterAdapter";
 import type { RouterAdapter } from "./RouterAdapter";
 import { RouterService, type RouterActionLogger } from "./RouterService";
@@ -22,9 +22,10 @@ export async function createPersistedRouterService(input: {
   const logger = input.logger || databaseLogger
     ? {
         write: async (log: Parameters<RouterActionLogger["write"]>[0]) => {
+          const routerLog = { ...log, routerId: log.routerId ?? router.id };
           await Promise.all([
-            input.logger?.write(log),
-            databaseLogger?.write(log)
+            input.logger?.write(routerLog),
+            databaseLogger?.write(routerLog)
           ]);
         }
       }
@@ -59,20 +60,21 @@ async function selectReachableAdapter(
   router: RouterRecord,
   storedConnections: RouterConnectionRecord[],
   password: string
-): Promise<MikroTikRouterAdapter> {
+): Promise<CompatibleMikroTikRouterAdapter> {
   const connections = orderConnections(router, storedConnections);
   const adapters = connections.map((connection) =>
-    new MikroTikRouterAdapter({
+    new CompatibleMikroTikRouterAdapter({
       connectionMode: connection.mode,
       host: connection.host,
       password,
       port: connection.port,
-      timeoutMs: 5000,
+      retries: connection.mode === "local" ? 1 : 2,
+      timeoutMs: connection.mode === "local" ? 5000 : 10000,
       useSsl: connection.use_ssl === 1,
       username: router.username
     })
   );
-  const fallback = adapters[0] ?? new MikroTikRouterAdapter({
+  const fallback = adapters[0] ?? new CompatibleMikroTikRouterAdapter({
     connectionMode: "local",
     host: router.local_ip,
     password,

@@ -34,12 +34,24 @@ function createDelegate() {
     status: "available" as const,
     username: user.username
   }));
+  const updateHotspotUser = vi.fn(async (username: string, planId: string) => ({
+    comment: null,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    id: "*1",
+    passwordSecretRef: `secret://router-1/${username}/password`,
+    planId,
+    profileName: planId,
+    status: "available" as const,
+    username
+  }));
 
   return {
     adapter: {
-      createHotspotUser
+      createHotspotUser,
+      updateHotspotUser
     } as unknown as RouterAdapter,
-    createHotspotUser
+    createHotspotUser,
+    updateHotspotUser
   };
 }
 
@@ -81,6 +93,39 @@ describe("PersistedPlanMappingRouterAdapter", () => {
         limitUptime: "10m",
         planId: "plan-3h-2go"
       })
+    );
+  });
+
+  it("réapplique les limites du plan lors de la résolution d'un conflit", async () => {
+    const delegate = createDelegate();
+    const adapter = new PersistedPlanMappingRouterAdapter(delegate.adapter, [plan]);
+
+    await adapter.updateHotspotUser("123456", "plan-local-1");
+
+    expect(delegate.updateHotspotUser).toHaveBeenCalledWith(
+      "123456",
+      "plan-3h-2go",
+      {
+        limitBytesTotal: 2147483648,
+        limitUptime: "3h"
+      }
+    );
+  });
+
+  it("envoie des limites nulles pour effacer les anciennes valeurs d'un plan illimité", async () => {
+    const delegate = createDelegate();
+    const unlimitedPlan = { ...plan, data_limit_mb: null, duration_minutes: 0 };
+    const adapter = new PersistedPlanMappingRouterAdapter(delegate.adapter, [unlimitedPlan]);
+
+    await adapter.updateHotspotUser("123456", unlimitedPlan.id);
+
+    expect(delegate.updateHotspotUser).toHaveBeenCalledWith(
+      "123456",
+      "plan-3h-2go",
+      {
+        limitBytesTotal: null,
+        limitUptime: null
+      }
     );
   });
 });

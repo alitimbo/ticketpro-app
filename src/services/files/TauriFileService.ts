@@ -13,6 +13,11 @@ export type ManagedFileMetadata = {
   size_bytes: number;
 };
 
+export type ExportedFileResult = {
+  absolute_path: string;
+  file_name: string;
+};
+
 export type SystemPrinter = {
   id: string;
   is_default: boolean;
@@ -36,8 +41,16 @@ export class TauriFileService {
     await invoke("file_open", { relativePath });
   }
 
+  async remove(relativePath: string): Promise<void> {
+    await invoke("file_remove", { relativePath });
+  }
+
   async reveal(relativePath: string): Promise<void> {
     await invoke("file_reveal", { relativePath });
+  }
+
+  async exportToDownloads(relativePath: string): Promise<ExportedFileResult> {
+    return invoke<ExportedFileResult>("file_export_to_downloads", { relativePath });
   }
 
   async listPrinters(): Promise<SystemPrinter[]> {

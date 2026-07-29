@@ -8,6 +8,7 @@ export type RouterErrorCode =
   | "permission_denied"
   | "remote_not_configured"
   | "remote_unavailable"
+  | "router_rejected"
   | "router_offline"
   | "timeout"
   | "vpn_required";
@@ -16,6 +17,7 @@ export type RouterSummary = {
   id: string;
   name: string;
   host: string;
+  hotspotAddress?: string | null;
   connectionMode: RouterConnectionMode;
   isReachable: boolean;
 };
@@ -88,6 +90,11 @@ export type HotspotUser = {
   status: "available" | "active" | "disabled" | "expired";
   comment: string | null;
   createdAt: string;
+  downloadedBytes?: number;
+  uploadedBytes?: number;
+  uptime?: string | null;
+  limitUptime?: string | null;
+  limitBytesTotal?: number | null;
 };
 
 export type HotspotUserDraft = {
@@ -99,6 +106,11 @@ export type HotspotUserDraft = {
   /** RouterOS limit-uptime value, for example 3h or 1d. */
   limitUptime?: string | null;
   /** RouterOS limit-bytes-total value in bytes. */
+  limitBytesTotal?: number | null;
+};
+
+export type HotspotUserLimits = {
+  limitUptime?: string | null;
   limitBytesTotal?: number | null;
 };
 

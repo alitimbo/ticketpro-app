@@ -168,6 +168,7 @@ export function AccountPage() {
         action: "account.details_updated",
         category: "authentification",
         internalProfileId: session?.internal_profile_id ?? null,
+        internalProfileRole: session?.internal_profile_role ?? null,
         message: "Informations du compte principal mises à jour."
       });
     }
@@ -211,6 +212,7 @@ export function AccountPage() {
         action: "account.password_changed",
         category: "authentification",
         internalProfileId: session?.internal_profile_id ?? null,
+        internalProfileRole: session?.internal_profile_role ?? null,
         message: "Mot de passe principal modifié."
       });
     }
@@ -290,11 +292,14 @@ export function AccountPage() {
             />
           </label>
           <label className="form-field">
-            Téléphone
+            Téléphone du propriétaire
             <input
+              inputMode="tel"
+              placeholder="Ex. +227 90 12 34 56"
               value={detailsForm.phone}
               onChange={(event) => setDetailsForm((current) => ({ ...current, phone: event.target.value }))}
             />
+            <small>Ce numéro sera centré et imprimé sur chaque ticket généré.</small>
           </label>
         </div>
         <div className="confirm-dialog__actions">

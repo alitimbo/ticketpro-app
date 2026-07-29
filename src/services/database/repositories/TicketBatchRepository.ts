@@ -81,6 +81,26 @@ export class TicketBatchRepository {
     );
   }
 
+  async updateState(
+    id: string,
+    accountId: string,
+    status: string,
+    syncStatus: CreateTicketBatchInput["sync_status"]
+  ): Promise<TicketBatchRecord> {
+    await this.database.execute(
+      `UPDATE ticket_batches
+       SET status = ?1, sync_status = ?2, updated_at = ?3
+       WHERE id = ?4 AND account_id = ?5`,
+      [status, syncStatus ?? "local", new Date().toISOString(), id, accountId]
+    );
+
+    const updated = await this.findById(id);
+    if (!updated || updated.account_id !== accountId) {
+      throw new Error("Le lot de tickets n'a pas pu être mis à jour.");
+    }
+    return updated;
+  }
+
   private buildBatchInsertStatement(input: CreateTicketBatchInput): DatabaseStatement {
     return {
       params: [

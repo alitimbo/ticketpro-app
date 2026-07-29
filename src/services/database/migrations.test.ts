@@ -18,6 +18,22 @@ const disableLegacyDemoAccountMigrationPath = resolve(
   process.cwd(),
   "src-tauri/migrations/017_disable_legacy_demo_account.sql"
 );
+const restoreVpnConnectionModesMigrationPath = resolve(
+  process.cwd(),
+  "src-tauri/migrations/018_restore_vpn_connection_modes.sql"
+);
+const ticketRouterUsernameUniquenessMigrationPath = resolve(
+  process.cwd(),
+  "src-tauri/migrations/019_ticket_router_username_uniqueness.sql"
+);
+const routerHotspotAddressMigrationPath = resolve(
+  process.cwd(),
+  "src-tauri/migrations/020_router_hotspot_address.sql"
+);
+const generatedFileMetadataMigrationPath = resolve(
+  process.cwd(),
+  "src-tauri/migrations/021_generated_file_metadata.sql"
+);
 
 describe("migration comptes et abonnements", () => {
   const migration = readFileSync(migrationPath, "utf8");
@@ -27,6 +43,10 @@ describe("migration comptes et abonnements", () => {
   const accountProfileActivityScopeMigration = readFileSync(accountProfileActivityScopeMigrationPath, "utf8");
   const canonicalAccountProfileIdentityMigration = readFileSync(canonicalAccountProfileIdentityMigrationPath, "utf8");
   const disableLegacyDemoAccountMigration = readFileSync(disableLegacyDemoAccountMigrationPath, "utf8");
+  const restoreVpnConnectionModesMigration = readFileSync(restoreVpnConnectionModesMigrationPath, "utf8");
+  const ticketRouterUsernameUniquenessMigration = readFileSync(ticketRouterUsernameUniquenessMigrationPath, "utf8");
+  const routerHotspotAddressMigration = readFileSync(routerHotspotAddressMigrationPath, "utf8");
+  const generatedFileMetadataMigration = readFileSync(generatedFileMetadataMigrationPath, "utf8");
 
   it("ajoute la grille tarifaire evolutive des abonnements logiciel", () => {
     expect(migration).toContain("price_per_router_cfa");
@@ -94,5 +114,29 @@ describe("migration comptes et abonnements", () => {
     expect(disableLegacyDemoAccountMigration).toContain("id = 'account-douma-demo'");
     expect(disableLegacyDemoAccountMigration).not.toContain("DELETE FROM");
     expect(disableLegacyDemoAccountMigration).not.toContain("DROP TABLE");
+  });
+
+  it("restaure les connexions VPN des routeurs déjà provisionnés", () => {
+    expect(restoreVpnConnectionModesMigration).toContain("vpn_peers");
+    expect(restoreVpnConnectionModesMigration).toContain("distant_ip");
+    expect(restoreVpnConnectionModesMigration).toContain("mode = 'vpn'");
+  });
+
+  it("répare les doublons historiques avant d'imposer l'unicité des vouchers par routeur", () => {
+    expect(ticketRouterUsernameUniquenessMigration).toContain("ROW_NUMBER() OVER");
+    expect(ticketRouterUsernameUniquenessMigration).toContain("PARTITION BY router_id, username");
+    expect(ticketRouterUsernameUniquenessMigration).toContain("duplicate_rank > 1");
+    expect(ticketRouterUsernameUniquenessMigration).toContain("CREATE UNIQUE INDEX IF NOT EXISTS");
+    expect(ticketRouterUsernameUniquenessMigration).toContain("WHERE deleted_at IS NULL");
+  });
+
+  it("ajoute l'adresse du portail captif aux routeurs existants", () => {
+    expect(routerHotspotAddressMigration).toContain("ALTER TABLE routers ADD COLUMN hotspot_address TEXT");
+    expect(routerHotspotAddressMigration).not.toContain("DROP TABLE");
+  });
+
+  it("conserve les paramètres nécessaires à la régénération exacte des fichiers", () => {
+    expect(generatedFileMetadataMigration).toContain("ALTER TABLE generated_files ADD COLUMN metadata_json TEXT");
+    expect(generatedFileMetadataMigration).not.toContain("DROP TABLE");
   });
 });

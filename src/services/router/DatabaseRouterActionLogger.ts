@@ -1,6 +1,7 @@
 import type { DatabaseClient } from "../database";
 import { assertAccountProfileOwnership } from "../database/ownership";
 import type { RouterActionLog, RouterActionLogger } from "./RouterService";
+import { serializeTechnicalMessage } from "../logging/technicalMessage";
 
 type DatabaseRouterActionLoggerOptions = {
   accountId?: string;
@@ -30,7 +31,11 @@ export class DatabaseRouterActionLogger implements RouterActionLogger {
         log.level,
         "router",
         log.userMessage,
-        log.technicalCode ?? log.action,
+        serializeTechnicalMessage({
+          action: log.action,
+          code: log.technicalCode,
+          detail: log.technicalMessage
+        }),
         log.routerId ?? null,
         log.internalProfileRole ?? this.options.internalProfileRole ?? null,
         internalProfileId

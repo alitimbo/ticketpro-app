@@ -54,7 +54,13 @@ impl Write for ApiStream {
 }
 
 #[tauri::command]
-pub fn mikrotik_api_call(request: MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
+pub async fn mikrotik_api_call(request: MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
+    tauri::async_runtime::spawn_blocking(move || mikrotik_api_call_blocking(request))
+        .await
+        .map_err(|error| format!("router offline: tâche RouterOS interrompue: {error}"))?
+}
+
+fn mikrotik_api_call_blocking(request: MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
     let retries = request.retries.unwrap_or(1);
     let mut last_error = "router offline".to_string();
 
@@ -324,7 +330,7 @@ fn map_trap(row: ApiRow) -> String {
         return "hotspot not found".to_string();
     }
 
-    message
+    format!("router rejected: {message}")
 }
 
 fn map_io_error(error: std::io::Error) -> String {
@@ -348,6 +354,7 @@ fn is_non_retryable(error: &str) -> bool {
         || normalized.contains("permission denied")
         || normalized.contains("duplicate user")
         || normalized.contains("hotspot not found")
+        || normalized.contains("router rejected:")
 }
 
 #[cfg(test)]

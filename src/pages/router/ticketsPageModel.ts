@@ -7,6 +7,7 @@ export type TicketListStatus =
   | "activé"
   | "complété"
   | "disponible"
+  | "désactivé"
   | "erreur_sync"
   | "expiré"
   | "imprimé"
@@ -282,6 +283,7 @@ export function ticketStatusLabel(status: TicketListStatus): string {
     activé: "Activé",
     complété: "Complété",
     disponible: "Disponible",
+    désactivé: "Désactivé",
     erreur_sync: "Erreur sync",
     expiré: "Expiré",
     imprimé: "Imprimé",

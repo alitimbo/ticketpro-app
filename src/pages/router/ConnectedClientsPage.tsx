@@ -8,6 +8,7 @@ import {
   Eye,
   Laptop,
   RefreshCw,
+  RotateCcw,
   Router,
   Search,
   ShieldCheck,
@@ -18,7 +19,6 @@ import {
   WifiOff
 } from "lucide-react";
 import { useAuth } from "../../app/auth/AuthProvider";
-import type { ActiveSessionCacheRecord } from "../../domain/database";
 import {
   FakeRouterAdapter,
   RouterService,
@@ -29,10 +29,11 @@ import {
 import { useAppDatabase } from "../../services/database";
 import {
   ActiveSessionCacheRepository,
+  HotspotPlanRepository,
   RouterConnectionRepository,
-  RouterRepository
+  RouterRepository,
+  TicketRepository
 } from "../../services/database/repositories";
-import { DatabaseRouterActionLogger } from "../../services/logging";
 import {
   ActionMenu,
   Badge,
@@ -47,6 +48,7 @@ import {
 } from "../../shared/ui";
 import {
   buildConnectedClientViewModels,
+  buildCachedConnectedClientViewModels,
   emptyConnectedClientFilters,
   filterConnectedClients,
   formatClientBytes,
@@ -69,12 +71,16 @@ export function ConnectedClientsPage() {
   const { routerId = "routeur-demo" } = useParams();
   const { session } = useAuth();
   const { database, isInitialized, isPersistent } = useAppDatabase();
-  const canManage = session?.internal_profile_role === "admin";
+  const canDisconnect = session?.permissions.includes("router.clients.disconnect") ?? false;
+  const canDisable =
+    canDisconnect && (session?.permissions.includes("router.tickets.disable") ?? false);
   const [clients, setClients] = useState<ConnectedClientViewModel[]>([]);
   const [filters, setFilters] = useState<ConnectedClientFilters>(emptyConnectedClientFilters);
-  const [logs, setLogs] = useState<RouterActionLog[]>([]);
+  const [, setLogs] = useState<RouterActionLog[]>([]);
   const [notice, setNotice] = useState<Notice>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [busyUsername, setBusyUsername] = useState<string | null>(null);
+  const [dataSource, setDataSource] = useState<"cache" | "live" | "none">("none");
   const [lastRefreshAt, setLastRefreshAt] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [selectedClient, setSelectedClient] = useState<ConnectedClientViewModel | null>(null);
@@ -82,6 +88,16 @@ export function ConnectedClientsPage() {
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
   const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
   const activeSessionCacheRepository = useMemo(() => new ActiveSessionCacheRepository(database), [database]);
+  const planRepository = useMemo(() => new HotspotPlanRepository(database), [database]);
+  const ticketRepository = useMemo(() => new TicketRepository(database), [database]);
+  const applyClients = (nextClients: ConnectedClientViewModel[]) => {
+    setClients(nextClients);
+    setSelectedClient((current) =>
+      current
+        ? nextClients.find((client) => client.username === current.username) ?? null
+        : null
+    );
+  };
 
   const createService = async () => {
     if (!isPersistent) {
@@ -96,14 +112,14 @@ export function ConnectedClientsPage() {
     }
 
     const router = await routerRepository.findById(routerId);
-    if (!router) {
+    if (!router || router.account_id !== session.account_id) {
       throw new Error("Routeur introuvable dans la base locale.");
     }
 
     return createPersistedRouterService({
       authSession: session,
       connections: await connectionRepository.listByRouter(routerId),
-      logger: new DatabaseRouterActionLogger(database),
+      database,
       router
     });
   };
@@ -130,23 +146,37 @@ export function ConnectedClientsPage() {
       if (isPersistent) {
         await activeSessionCacheRepository.replaceForRouter(routerId, activeUsers);
       }
-      setClients(buildConnectedClientViewModels(activeUsers, hotspotUsers, plans, router));
+      applyClients(buildConnectedClientViewModels(activeUsers, hotspotUsers, plans, router));
+      setDataSource("live");
       setLastRefreshAt(formatRefreshDate(new Date()));
     } catch (error) {
       if (isPersistent) {
-        const [router, cachedUsers] = await Promise.all([
+        const [router, cachedUsers, ticketRecords, planRecords] = await Promise.all([
           routerRepository.findById(routerId),
-          activeSessionCacheRepository.listByRouter(routerId)
+          activeSessionCacheRepository.listByRouter(routerId),
+          ticketRepository.listByRouter(routerId),
+          planRepository.listByRouter(routerId)
         ]);
 
-        if (router && cachedUsers.length > 0) {
-          setClients(buildConnectedClientViewModels(cachedUsers.map(activeUserFromCache), [], [], router));
+        if (router && router.account_id === session?.account_id && cachedUsers.length > 0) {
+          applyClients(
+            buildCachedConnectedClientViewModels(
+              cachedUsers,
+              ticketRecords,
+              planRecords,
+              router
+            )
+          );
+          setDataSource("cache");
           setLastRefreshAt(formatRefreshDate(new Date(cachedUsers[0].cached_at)));
           setNotice({ status: "error", text: "Routeur hors ligne : affichage du dernier cache local." });
           setIsLoading(false);
           return;
         }
       }
+      applyClients([]);
+      setDataSource("none");
+      setLastRefreshAt(null);
       setNotice({
         status: "error",
         text: error instanceof RouterServiceError ? error.message : "Impossible de charger les clients connectés."
@@ -158,12 +188,18 @@ export function ConnectedClientsPage() {
 
   useEffect(() => {
     void loadClients();
-  }, [activeSessionCacheRepository, connectionRepository, database, isInitialized, isPersistent, routerId, routerRepository, session]);
+  }, [activeSessionCacheRepository, connectionRepository, database, isInitialized, isPersistent, planRepository, routerId, routerRepository, session, ticketRepository]);
 
   const filteredClients = useMemo(() => filterConnectedClients(clients, filters), [clients, filters]);
   const planOptions = useMemo(() => getConnectedClientPlanOptions(clients), [clients]);
   const totalDownload = filteredClients.reduce((total, client) => total + client.downloadedBytes, 0);
   const totalUpload = filteredClients.reduce((total, client) => total + client.uploadedBytes, 0);
+  const hasActiveFilters =
+    filters.code !== "" ||
+    filters.duration !== "" ||
+    filters.ipAddress !== "" ||
+    filters.macAddress !== "" ||
+    filters.planId !== "";
 
   const updateFilters = (partial: Partial<ConnectedClientFilters>) => {
     setFilters((current) => ({ ...current, ...partial }));
@@ -184,26 +220,63 @@ export function ConnectedClientsPage() {
     }
 
     const { client, type } = pendingAction;
+    let ticketDisabled = false;
+    let localStatusWarning = false;
     setPendingAction(null);
     setNotice(null);
+    setBusyUsername(client.username);
 
     try {
       const service = await createService();
       if (type === "disable") {
         await service.disableHotspotUser(client.username);
+        ticketDisabled = true;
+        if (isPersistent && session) {
+          try {
+            await ticketRepository.recordRouterStatusByUsername({
+              accountId: session.account_id,
+              routerId,
+              status: "désactivé",
+              username: client.username
+            });
+          } catch {
+            localStatusWarning = true;
+          }
+        }
       }
 
-      await service.disconnectActiveUser(client.username);
+      try {
+        await service.disconnectActiveUser(client.username);
+      } catch (error) {
+        if (!(error instanceof RouterServiceError && error.code === "hotspot_not_found")) {
+          throw error;
+        }
+      }
+      if (isPersistent) {
+        await activeSessionCacheRepository.removeByUsername(routerId, client.username);
+      }
       setClients((current) => current.filter((item) => item.username !== client.username));
+      setSelectedClient((current) => (current?.username === client.username ? null : current));
       setNotice({
-        status: "success",
-        text: type === "disable" ? "Ticket désactivé et client déconnecté." : "Client déconnecté."
+        status: localStatusWarning ? "error" : "success",
+        text:
+          type === "disable"
+            ? localStatusWarning
+              ? "Ticket désactivé et client déconnecté, mais l'état local devra être resynchronisé."
+              : "Ticket désactivé et client déconnecté."
+            : "Client déconnecté."
       });
     } catch (error) {
       setNotice({
         status: "error",
-        text: error instanceof RouterServiceError ? error.message : "Action impossible pour le moment."
+        text: ticketDisabled
+          ? "Le ticket a été désactivé, mais la déconnexion du client a échoué. Rafraîchissez pour vérifier son état."
+          : error instanceof RouterServiceError
+            ? error.message
+            : "Action impossible pour le moment."
       });
+    } finally {
+      setBusyUsername(null);
     }
   };
 
@@ -224,7 +297,18 @@ export function ConnectedClientsPage() {
         <StatCard icon={UserRound} label="Connectés" value={String(filteredClients.length)} hint="Clients visibles" />
         <StatCard icon={Download} label="Download" value={formatClientBytes(totalDownload)} hint="Volume reçu" />
         <StatCard icon={Upload} label="Upload" value={formatClientBytes(totalUpload)} hint="Volume envoyé" />
-        <StatCard icon={RefreshCw} label="Dernière mise à jour" value={lastRefreshAt ?? "En attente"} hint={`${logs.length} log(s)`} />
+        <StatCard
+          icon={RefreshCw}
+          label="Dernière mise à jour"
+          value={lastRefreshAt ?? "En attente"}
+          hint={
+            dataSource === "cache"
+              ? "Cache local hors ligne"
+              : dataSource === "live"
+                ? "Lecture RouterOS"
+                : "Aucune donnée reçue"
+          }
+        />
       </div>
 
       <Card>
@@ -283,7 +367,25 @@ export function ConnectedClientsPage() {
             Plus de 1h
           </FilterButton>
           <span className="muted-inline">Articles ({filteredClients.length})</span>
-          {lastRefreshAt ? <StatusDot label={`Mis à jour ${lastRefreshAt}`} status="active" /> : null}
+          {hasActiveFilters ? (
+            <Button
+              icon={RotateCcw}
+              onClick={() => setFilters(emptyConnectedClientFilters)}
+              variant="ghost"
+            >
+              Réinitialiser
+            </Button>
+          ) : null}
+          {lastRefreshAt ? (
+            <StatusDot
+              label={
+                dataSource === "cache"
+                  ? `Cache du ${lastRefreshAt}`
+                  : `RouterOS actualisé ${lastRefreshAt}`
+              }
+              status={dataSource === "cache" ? "warning" : "active"}
+            />
+          ) : null}
         </div>
       </Card>
 
@@ -296,8 +398,11 @@ export function ConnectedClientsPage() {
           <div className="clients-list">
             {filteredClients.map((client) => (
               <ConnectedClientRow
-                canManage={canManage}
+                canDisable={canDisable}
+                canDisconnect={canDisconnect}
                 client={client}
+                isBusy={busyUsername === client.username}
+                isCached={dataSource === "cache"}
                 key={client.id}
                 onCopyIp={() => void copyValue("IP", client.ipAddress)}
                 onCopyMac={() => void copyValue("MAC", client.macAddress)}
@@ -334,14 +439,21 @@ export function ConnectedClientsPage() {
         title={pendingAction?.type === "disable" ? "Désactiver le ticket ?" : "Déconnecter ce client ?"}
       />
 
-      <ClientDetailDialog client={selectedClient} onClose={() => setSelectedClient(null)} />
+      <ClientDetailDialog
+        client={selectedClient}
+        isCached={dataSource === "cache"}
+        onClose={() => setSelectedClient(null)}
+      />
     </div>
   );
 }
 
 type ConnectedClientRowProps = {
-  canManage: boolean;
+  canDisable: boolean;
+  canDisconnect: boolean;
   client: ConnectedClientViewModel;
+  isBusy: boolean;
+  isCached: boolean;
   onCopyIp: () => void;
   onCopyMac: () => void;
   onDetail: () => void;
@@ -350,8 +462,11 @@ type ConnectedClientRowProps = {
 };
 
 function ConnectedClientRow({
-  canManage,
+  canDisable,
+  canDisconnect,
   client,
+  isBusy,
+  isCached,
   onCopyIp,
   onCopyMac,
   onDetail,
@@ -378,7 +493,9 @@ function ConnectedClientRow({
         <div>
           <div className="client-row__title">
             <strong>{client.username}</strong>
-            <Badge status="active">Actif</Badge>
+            <Badge status={isCached ? "warning" : "active"}>
+              {isCached ? "Cache" : "Actif"}
+            </Badge>
           </div>
           <p>{client.planName} · {client.routerName}</p>
         </div>
@@ -396,15 +513,16 @@ function ConnectedClientRow({
       </div>
 
       <ActionMenu
+        disabled={isBusy}
         items={[
           { icon: Eye, label: "Voir détail ticket", onSelect: onDetail },
           { icon: Copy, label: "Copier MAC", onSelect: onCopyMac },
           { icon: Copy, label: "Copier IP", onSelect: onCopyIp },
-          ...(canManage
-            ? [
-                { icon: WifiOff, label: "Déconnecter", onSelect: onDisconnect },
-                { icon: Ban, label: "Désactiver ticket", onSelect: onDisable }
-              ]
+          ...(canDisconnect
+            ? [{ icon: WifiOff, label: "Déconnecter", onSelect: onDisconnect }]
+            : []),
+          ...(canDisable
+            ? [{ icon: Ban, label: "Désactiver ticket", onSelect: onDisable }]
             : [])
         ]}
       />
@@ -414,9 +532,11 @@ function ConnectedClientRow({
 
 function ClientDetailDialog({
   client,
+  isCached,
   onClose
 }: {
   client: ConnectedClientViewModel | null;
+  isCached: boolean;
   onClose: () => void;
 }) {
   if (!client) {
@@ -434,7 +554,9 @@ function ClientDetailDialog({
             <h2>{client.username}</h2>
             <p>{client.planName} · {client.routerName}</p>
           </div>
-          <Badge status="active">Actif</Badge>
+          <Badge status={isCached ? "warning" : "active"}>
+            {isCached ? "Dernier cache" : "Actif"}
+          </Badge>
         </header>
 
         <dl className="client-detail-grid">
@@ -495,17 +617,4 @@ function formatRefreshDate(date: Date): string {
     minute: "2-digit",
     second: "2-digit"
   });
-}
-
-function activeUserFromCache(record: ActiveSessionCacheRecord) {
-  return {
-    downloadedBytes: record.downloaded_bytes,
-    id: record.id,
-    ipAddress: record.ip_address ?? "",
-    macAddress: record.mac_address ?? "",
-    sessionTimeLeft: record.session_time_left ?? "Non disponible",
-    uploadedBytes: record.uploaded_bytes,
-    uptime: record.uptime ?? "0s",
-    username: record.username
-  };
 }

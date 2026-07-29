@@ -1,74 +1,186 @@
-import { useMemo, useState } from "react";
-import { KeyRound, Link, Phone, Printer, Router, Save, Search, ShieldCheck, Ticket } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { useParams } from "react-router-dom";
+import { Globe2, KeyRound, Link, Phone, Router, Save, Search, ShieldCheck } from "lucide-react";
 import { useAuth } from "../../app/auth/AuthProvider";
+import { TICKETPRO_SUPPORT_PHONE } from "../../config/ticketpro";
+import type { RouterRecord } from "../../domain/database";
+import {
+  RouterConnectionRepository,
+  RouterRepository,
+  useAppDatabase
+} from "../../services/database";
+import { createPersistedRouterService, RouterServiceError } from "../../services/router";
 import { encryptLocalSecret } from "../../services/security/localSecrets";
-import { FakeRouterAdapter, RouterService, RouterServiceError } from "../../services/router";
 import { Badge, Button, Card, DataListItem, PageHeader, PasswordField, StatusDot } from "../../shared/ui";
 import {
   canEditRouterSensitiveSettings,
   canViewRouterSettings,
-  loadRouterSettings,
-  saveRouterSettings,
+  defaultRouterSettings,
+  routerRecordToSettings,
   validateRouterSettings,
   type RouterSettings
 } from "./routerSettingsPageModel";
 
+type Feedback = {
+  kind: "error" | "success";
+  text: string;
+};
+
 export function RouterSettingsPage() {
   const { session } = useAuth();
+  const { routerId = "" } = useParams();
+  const { database, isInitialized, isPersistent } = useAppDatabase();
   const canView = canViewRouterSettings(session?.internal_profile_role);
   const canEditSensitive = canEditRouterSensitiveSettings(session?.internal_profile_role);
-  const [settings, setSettings] = useState<RouterSettings>(() => loadRouterSettings());
-  const [message, setMessage] = useState<string | null>(null);
+  const routerRepository = useMemo(() => new RouterRepository(database), [database]);
+  const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
+  const [router, setRouter] = useState<RouterRecord | null>(null);
+  const [settings, setSettings] = useState<RouterSettings>(defaultRouterSettings);
+  const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [testMessage, setTestMessage] = useState("Non testé");
-  const [passwordChanged, setPasswordChanged] = useState(false);
-  const service = useMemo(
-    () =>
-      new RouterService({
-        adapter: new FakeRouterAdapter({
-          connectionMode: settings.connectionMode,
-          host: settings.ipAddress,
-          latencyMs: 0
-        })
-      }),
-    [settings.connectionMode, settings.ipAddress]
-  );
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isTesting, setIsTesting] = useState(false);
+
+  useEffect(() => {
+    if (!isInitialized || !session || !routerId) {
+      return undefined;
+    }
+
+    let mounted = true;
+
+    void routerRepository.findById(routerId).then((record) => {
+      if (!mounted) return;
+
+      if (!record || record.deleted_at || record.account_id !== session.account_id) {
+        setFeedback({ kind: "error", text: "Routeur introuvable pour cette organisation." });
+        setIsLoading(false);
+        return;
+      }
+
+      setRouter(record);
+      setSettings(routerRecordToSettings(record));
+      setIsLoading(false);
+    }).catch((error) => {
+      if (!mounted) return;
+      setFeedback({
+        kind: "error",
+        text: error instanceof Error ? error.message : "Impossible de charger les paramètres du routeur."
+      });
+      setIsLoading(false);
+    });
+
+    return () => {
+      mounted = false;
+    };
+  }, [isInitialized, routerId, routerRepository, session]);
 
   const updateSettings = (partial: Partial<RouterSettings>) => {
     setSettings((current) => ({ ...current, ...partial }));
-    setMessage(null);
+    setFeedback(null);
+    setTestMessage("À retester");
   };
 
   const saveSettings = async () => {
-    if (!canEditSensitive) {
-      setMessage("Seul l'Admin peut modifier ces paramètres.");
+    if (!canEditSensitive || !router || !session) {
+      setFeedback({ kind: "error", text: "Seul l'Admin peut modifier ces paramètres." });
       return;
     }
 
     const validationError = validateRouterSettings(settings);
-
     if (validationError) {
-      setMessage(validationError);
+      setFeedback({ kind: "error", text: validationError });
       return;
     }
 
-    if (settings.password.trim()) {
-      await encryptLocalSecret(settings.password);
-      setPasswordChanged(true);
-      setSettings((current) => ({ ...current, password: "" }));
-    }
+    setIsSaving(true);
+    setFeedback(null);
 
-    saveRouterSettings(settings);
-    setMessage("Paramètres routeur enregistrés.");
+    try {
+      const encryptedPassword = settings.password.trim()
+        ? await encryptLocalSecret(settings.password)
+        : router.encrypted_password;
+      const name = settings.name.trim();
+      const updated = await routerRepository.update({
+        ...router,
+        api_port: Number(settings.apiPort),
+        api_ssl_port: Number(settings.apiSslPort),
+        connection_mode: settings.connectionMode,
+        encrypted_password: encryptedPassword,
+        hotspot_address: settings.hotspotAddress.trim(),
+        label: name,
+        local_ip: settings.ipAddress.trim(),
+        name,
+        sync_status: "local",
+        username: settings.username.trim()
+      });
+
+      setRouter(updated);
+      setSettings(routerRecordToSettings(updated));
+      setFeedback({
+        kind: "success",
+        text: "Paramètres enregistrés dans la base locale et connexion locale mise à jour."
+      });
+      setTestMessage("À retester");
+    } catch (error) {
+      setFeedback({
+        kind: "error",
+        text: error instanceof Error ? error.message : "L'enregistrement des paramètres a échoué."
+      });
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const testConnection = async () => {
+    if (!router || !session) {
+      setFeedback({ kind: "error", text: "Le routeur n'est pas encore chargé." });
+      return;
+    }
+
+    if (hasUnsavedConnectionChanges(router, settings)) {
+      setFeedback({
+        kind: "error",
+        text: "Enregistrez d'abord les modifications de connexion, puis relancez le test."
+      });
+      return;
+    }
+
+    setIsTesting(true);
+    setFeedback(null);
+
     try {
-      await service.testConnection();
+      const connections = await connectionRepository.listByRouter(router.id);
+      const service = await createPersistedRouterService({
+        authSession: session,
+        connections,
+        database,
+        router
+      });
+      const result = await service.testConnection();
+
+      if (connections.some((connection) => connection.mode === result.mode)) {
+        await routerRepository.recordConnectionTest({
+          accountId: session.account_id,
+          checkedAt: result.checkedAt,
+          errorMessage: null,
+          internalProfileId: session.internal_profile_id,
+          mode: result.mode,
+          routerId: router.id,
+          status: "connected"
+        });
+      }
+      setRouter((current) => current ? { ...current, last_seen_at: result.checkedAt, status: "active" } : current);
       setTestMessage("Routeur connecté");
-      setMessage("Connexion réussie.");
+      setFeedback({ kind: "success", text: `Connexion RouterOS réussie en mode ${result.mode}.` });
     } catch (error) {
-      setTestMessage(error instanceof RouterServiceError ? error.message : "Test impossible.");
-      setMessage("Le test de connexion a échoué.");
+      const detail = error instanceof RouterServiceError || error instanceof Error
+        ? error.message
+        : "Test impossible.";
+      setTestMessage("Connexion échouée");
+      setFeedback({ kind: "error", text: detail });
+    } finally {
+      setIsTesting(false);
     }
   };
 
@@ -86,42 +198,54 @@ export function RouterSettingsPage() {
   return (
     <div className="page-stack">
       <PageHeader
-        actions={
-          canEditSensitive ? (
-            <Button icon={Save} onClick={() => void saveSettings()} variant="primary">
-              Enregistrer
-            </Button>
-          ) : null
-        }
-        description="Configuration du routeur, impression et affichage des tickets."
+        actions={canEditSensitive ? (
+          <Button disabled={isLoading || isSaving || !router} icon={Save} onClick={() => void saveSettings()} variant="primary">
+            {isSaving ? "Enregistrement…" : "Enregistrer"}
+          </Button>
+        ) : null}
+        description="Configuration réelle du routeur et de son portail captif."
         eyebrow="Routeur"
         title="Paramètres routeur"
       />
 
-      {message ? <p className="form-error form-error--success">{message}</p> : null}
+      {feedback ? (
+        <p className={`form-error${feedback.kind === "success" ? " form-error--success" : ""}`}>
+          {feedback.text}
+        </p>
+      ) : null}
 
-      <Card title="Connexion routeur" description="Informations utilisées pour joindre le routeur.">
+      <Card title="Connexion routeur" description="Ces informations sont enregistrées pour ce routeur et utilisées par RouterOS.">
         <div className="router-form-grid">
           <label className="form-field">
-            Nom routeur
-            <input disabled={!canEditSensitive} value={settings.name} onChange={(event) => updateSettings({ name: event.target.value })} />
+            Nom du routeur
+            <input disabled={!canEditSensitive || isLoading} value={settings.name} onChange={(event) => updateSettings({ name: event.target.value })} />
           </label>
           <label className="form-field">
-            Adresse IP
-            <input disabled={!canEditSensitive} value={settings.ipAddress} onChange={(event) => updateSettings({ ipAddress: event.target.value })} />
+            Adresse IP locale
+            <input disabled={!canEditSensitive || isLoading} value={settings.ipAddress} onChange={(event) => updateSettings({ ipAddress: event.target.value })} />
+          </label>
+          <label className="form-field">
+            Adresse Hotspot / portail captif
+            <input
+              disabled={!canEditSensitive || isLoading}
+              placeholder="Ex. wifi.mon-etablissement.com"
+              value={settings.hotspotAddress}
+              onChange={(event) => updateSettings({ hotspotAddress: event.target.value })}
+            />
+            <small>Adresse que les clients saisiront dans leur navigateur. Elle figurera sur chaque ticket.</small>
           </label>
           <label className="form-field">
             Port API
-            <input disabled={!canEditSensitive} value={settings.apiPort} onChange={(event) => updateSettings({ apiPort: event.target.value })} />
+            <input disabled={!canEditSensitive || isLoading} value={settings.apiPort} onChange={(event) => updateSettings({ apiPort: event.target.value })} />
           </label>
           <label className="form-field">
             Port API SSL
-            <input disabled={!canEditSensitive} value={settings.apiSslPort} onChange={(event) => updateSettings({ apiSslPort: event.target.value })} />
+            <input disabled={!canEditSensitive || isLoading} value={settings.apiSslPort} onChange={(event) => updateSettings({ apiSslPort: event.target.value })} />
           </label>
           <label className="form-field">
-            Mode connexion
+            Mode de connexion prioritaire
             <select
-              disabled={!canEditSensitive}
+              disabled={!canEditSensitive || isLoading}
               value={settings.connectionMode}
               onChange={(event) => updateSettings({ connectionMode: event.target.value as RouterSettings["connectionMode"] })}
             >
@@ -133,69 +257,56 @@ export function RouterSettingsPage() {
           </label>
           <label className="form-field">
             Utilisateur MikroTik
-            <input disabled={!canEditSensitive} value={settings.username} onChange={(event) => updateSettings({ username: event.target.value })} />
+            <input disabled={!canEditSensitive || isLoading} value={settings.username} onChange={(event) => updateSettings({ username: event.target.value })} />
           </label>
           <PasswordField
             autoComplete="new-password"
-            disabled={!canEditSensitive}
-            label="Mot de passe MikroTik"
+            disabled={!canEditSensitive || isLoading}
+            label="Nouveau mot de passe MikroTik"
             onChange={(password) => updateSettings({ password })}
-            placeholder={passwordChanged ? "Mot de passe mis à jour" : "Laisser vide pour conserver"}
+            placeholder="Laisser vide pour conserver le mot de passe actuel"
             value={settings.password}
           />
         </div>
         <div className="router-form-result">
-          <Badge status={testMessage === "Routeur connecté" ? "success" : "warning"}>{testMessage}</Badge>
-          <Button disabled={!canEditSensitive} icon={Search} onClick={() => void testConnection()}>
-            Tester connexion
+          <Badge status={testMessage === "Routeur connecté" ? "success" : testMessage === "Connexion échouée" ? "error" : "warning"}>
+            {testMessage}
+          </Badge>
+          <Button disabled={!canEditSensitive || isLoading || isTesting || !router} icon={Search} onClick={() => void testConnection()}>
+            {isTesting ? "Test en cours…" : "Tester la connexion réelle"}
           </Button>
-        </div>
-      </Card>
-
-      <Card title="Tickets et impression" description="Réglages visibles sur les tickets et valeurs par défaut.">
-        <div className="router-form-grid">
-          <label className="form-field">
-            Plan par défaut
-            <select disabled={!canEditSensitive} value={settings.defaultPlanId} onChange={(event) => updateSettings({ defaultPlanId: event.target.value })}>
-              <option value="plan-1h">1h</option>
-              <option value="plan-3h">3h-2Go</option>
-              <option value="plan-jour">Journée</option>
-            </select>
-          </label>
-          <label className="form-field">
-            Imprimante par défaut
-            <select disabled={!canEditSensitive} value={settings.printerId} onChange={(event) => updateSettings({ printerId: event.target.value })}>
-              <option value="pdf-export">Export PDF</option>
-              <option value="thermal-80-demo">Thermique 80 mm</option>
-              <option value="thermal-58-demo">Thermique 58 mm</option>
-            </select>
-          </label>
-          <label className="form-field">
-            Téléphone support
-            <input disabled={!canEditSensitive} value={settings.supportPhone} onChange={(event) => updateSettings({ supportPhone: event.target.value })} />
-          </label>
-          <label className="form-field">
-            Nom affiché sur les tickets
-            <input
-              disabled={!canEditSensitive}
-              value={settings.displayNameOnTickets}
-              onChange={(event) => updateSettings({ displayNameOnTickets: event.target.value })}
-            />
-          </label>
         </div>
       </Card>
 
       <Card title="Résumé">
         <div className="data-list">
-          <DataListItem description={`${settings.ipAddress} · API ${settings.apiPort} / SSL ${settings.apiSslPort}`} icon={Router} title="Routeur" />
+          <DataListItem
+            description={`${settings.ipAddress || "Adresse inconnue"} · API ${settings.apiPort} / SSL ${settings.apiSslPort}`}
+            icon={Router}
+            title={settings.name || "Routeur sans nom"}
+          />
+          <DataListItem description={settings.hotspotAddress || "À configurer"} icon={Globe2} title="Adresse Hotspot" />
           <DataListItem description={settings.connectionMode} icon={Link} meta={<Badge status="active">Configuré</Badge>} title="Mode connexion" />
-          <DataListItem description="Mot de passe masqué et chiffré localement lors de l'enregistrement." icon={KeyRound} meta={<Badge status="success">Protégé</Badge>} title="Secret routeur" />
-          <DataListItem description={settings.displayNameOnTickets} icon={Ticket} title="Nom sur tickets" />
-          <DataListItem description={settings.supportPhone} icon={Phone} title="Téléphone support" />
-          <DataListItem description={settings.printerId} icon={Printer} title="Imprimante" />
+          <DataListItem description="Mot de passe chiffré localement et jamais affiché." icon={KeyRound} meta={<Badge status="success">Protégé</Badge>} title="Secret routeur" />
+          <DataListItem description={TICKETPRO_SUPPORT_PHONE} icon={Phone} title="Support TicketPro" />
           <DataListItem description={canEditSensitive ? "Modification autorisée" : "Lecture seule pour ce profil"} icon={ShieldCheck} title="Permissions" />
         </div>
       </Card>
+
+      {!isPersistent ? (
+        <Card>
+          <StatusDot label="La persistance native est indisponible dans ce mode." status="warning" />
+        </Card>
+      ) : null}
     </div>
   );
+}
+
+function hasUnsavedConnectionChanges(router: RouterRecord, settings: RouterSettings): boolean {
+  return router.local_ip !== settings.ipAddress.trim()
+    || router.api_port !== Number(settings.apiPort)
+    || router.api_ssl_port !== Number(settings.apiSslPort)
+    || router.username !== settings.username.trim()
+    || router.connection_mode !== settings.connectionMode
+    || settings.password.trim().length > 0;
 }

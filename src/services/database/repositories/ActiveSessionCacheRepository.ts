@@ -10,7 +10,7 @@ export class ActiveSessionCacheRepository {
       { params: [routerId], sql: "DELETE FROM active_sessions_cache WHERE router_id = ?1" },
       ...activeUsers.map((user) => ({
         params: [
-          user.id,
+          `${routerId}:${user.id}`,
           routerId,
           user.username,
           user.ipAddress,
@@ -36,6 +36,13 @@ export class ActiveSessionCacheRepository {
     return this.database.query<ActiveSessionCacheRecord>(
       "SELECT * FROM active_sessions_cache WHERE router_id = ?1 AND deleted_at IS NULL ORDER BY cached_at DESC",
       [routerId]
+    );
+  }
+
+  async removeByUsername(routerId: string, username: string): Promise<void> {
+    await this.database.execute(
+      "DELETE FROM active_sessions_cache WHERE router_id = ?1 AND username = ?2",
+      [routerId, username]
     );
   }
 }

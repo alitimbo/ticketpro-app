@@ -11,6 +11,7 @@ import {
 } from "../../services/database";
 import {
   buildOperatorWireGuardConfig,
+  buildWireGuardTunnelName,
   generateWireGuardKeyPair,
   installWireGuard,
   isWireGuardAvailable,
@@ -163,6 +164,20 @@ export function VpnPage() {
     ]);
   };
 
+  const reconcileConflictingLocalPeers = async (conflicts: VpnPeerRecord[]) => {
+    await stopConflictingOperatorTunnels(conflicts);
+    for (const conflict of conflicts.filter((peer) => peer.peer_type === "router" && peer.router_id)) {
+      const router = routers.find((item) => item.id === conflict.router_id);
+      if (!router) continue;
+      await persistVpnConnection(
+        router,
+        conflict.assigned_address.split("/")[0],
+        false,
+        "Ancien pair VPN remplacé après resynchronisation avec le serveur."
+      );
+    }
+  };
+
   const validateDraftRouterPeers = async (): Promise<number> => {
     if (!accountId) return 0;
     let activatedCount = 0;
@@ -223,6 +238,12 @@ export function VpnPage() {
         throw new Error("Le serveur VPN n'a pas attribué d'adresse au routeur.");
       }
       remotePublicKey = keyPair.publicKey;
+      const assignmentConflicts = await peerRepository.findAssignmentConflicts(
+        accountId,
+        network.id,
+        remotePeer.assigned_address,
+        keyPair.publicKey
+      );
       const peer = await peerRepository.create({
         id: `vpn-peer-${crypto.randomUUID()}`,
         account_id: accountId,
@@ -239,6 +260,7 @@ export function VpnPage() {
         status: "draft",
         last_handshake_at: null
       });
+      await reconcileConflictingLocalPeers(assignmentConflicts);
       localPeerId = peer.id;
       const privateKey = await revealWireGuardPrivateKey(peer.private_key_encrypted ?? "");
       const routerPassword = await decryptLocalSecret(router.encrypted_password);
@@ -310,6 +332,12 @@ export function VpnPage() {
         throw new Error("Le serveur VPN n'a pas attribué d'adresse à l'opérateur.");
       }
       remotePublicKey = keyPair.publicKey;
+      const assignmentConflicts = await peerRepository.findAssignmentConflicts(
+        accountId,
+        network.id,
+        remotePeer.assigned_address,
+        keyPair.publicKey
+      );
       const peer = await peerRepository.create({
         id: `vpn-peer-${crypto.randomUUID()}`,
         account_id: accountId,
@@ -326,6 +354,7 @@ export function VpnPage() {
         status: "draft",
         last_handshake_at: null
       });
+      await reconcileConflictingLocalPeers(assignmentConflicts);
       localPeerId = peer.id;
       const privateKey = await revealWireGuardPrivateKey(peer.private_key_encrypted ?? "");
       const operatorConfig = buildOperatorWireGuardConfig({
@@ -335,7 +364,7 @@ export function VpnPage() {
         privateKey,
         publicKey: network.server_public_key
       });
-      const tunnelName = `ticketpro-${peer.id.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 38)}`;
+      const tunnelName = buildWireGuardTunnelName(peer.id);
       let wireGuardAvailable = await isWireGuardAvailable();
       if (!wireGuardAvailable) {
         try {
@@ -381,7 +410,7 @@ export function VpnPage() {
     await revokeSaasVpnPeer({ peerType: peer.peer_type, publicKey: peer.public_key });
     if (peer.peer_type === "operator") {
       try {
-        await stopWireGuardTunnel(`ticketpro-${peer.id.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 38)}`);
+        await stopWireGuardTunnel(buildWireGuardTunnelName(peer.id));
       } catch {
         // La révocation distante reste prioritaire.
       }
@@ -509,6 +538,16 @@ function createRouterService(router: RouterRecord, host: string, port: number, p
     },
     mode: "mikrotik"
   });
+}
+
+async function stopConflictingOperatorTunnels(conflicts: VpnPeerRecord[]): Promise<void> {
+  for (const conflict of conflicts.filter((peer) => peer.peer_type === "operator")) {
+    try {
+      await stopWireGuardTunnel(buildWireGuardTunnelName(conflict.id));
+    } catch {
+      // Le pair n'existe plus sur le hub : l'ancien service local peut déjà être absent.
+    }
+  }
 }
 
 async function verifyRouterOverVpn(router: RouterRecord, host: string, password: string): Promise<void> {

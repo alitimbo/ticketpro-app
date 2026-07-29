@@ -58,6 +58,20 @@ export function RouterHomePage() {
   const navigate = useNavigate();
   const { routerId = "" } = useParams();
   const { session, userCan } = useAuth();
+  const routerSessionScope = session
+    ? JSON.stringify({
+        accountId: session.account_id,
+        email: session.account_email,
+        permissions: session.permissions,
+        profileId: session.internal_profile_id,
+        profileLabel: session.internal_profile_label,
+        profileRole: session.internal_profile_role
+      })
+    : null;
+  // Activity tracking refreshes the session timestamps frequently. Router
+  // loading only depends on identity and permissions, so keep this reference
+  // stable while those values remain unchanged.
+  const routerSession = useMemo(() => session, [routerSessionScope]);
   const { database, isInitialized, isPersistent } = useAppDatabase();
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
   const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
@@ -76,7 +90,7 @@ export function RouterHomePage() {
     let isMounted = true;
 
     async function loadDashboard() {
-      if (!session || !routerId || (isPersistent && !isInitialized)) {
+      if (!routerSession || !routerId || (isPersistent && !isInitialized)) {
         return;
       }
 
@@ -86,7 +100,7 @@ export function RouterHomePage() {
 
         if (isPersistent) {
           const router = await routerRepository.findById(routerId);
-          if (!router || router.account_id !== session.account_id) {
+          if (!router || router.account_id !== routerSession.account_id) {
             throw new Error("Routeur introuvable pour cette organisation.");
           }
           const [connections, ticketRecords, planRecords] = await Promise.all([
@@ -99,7 +113,7 @@ export function RouterHomePage() {
             ticketFromRecord(ticket, plansById.get(ticket.plan_id) ?? null, router.name)
           );
           activeService = await createPersistedRouterService({
-            authSession: session,
+            authSession: routerSession,
             connections,
             database,
             router
@@ -151,7 +165,7 @@ export function RouterHomePage() {
     planRepository,
     routerId,
     routerRepository,
-    session,
+    routerSession,
     ticketRepository
   ]);
 

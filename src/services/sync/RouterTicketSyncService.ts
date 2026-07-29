@@ -1,5 +1,5 @@
 import type { ActiveHotspotUser, HotspotUser, HotspotUserDraft } from "../../domain/router";
-import type { RouterService } from "../router";
+import { RouterServiceError, type RouterService } from "../router";
 
 export type RouterTicketSyncStatus =
   | "conflict"
@@ -23,16 +23,22 @@ export type SyncableLocalTicket = {
   routerId: string;
   status: string;
   syncStatus: RouterTicketSyncStatus;
+  completedAt?: string | null;
+  downloadedBytes?: number;
+  uploadedBytes?: number;
 };
 
 export type SyncedTicketUpdate = {
   activatedAt?: string | null;
+  completedAt?: string | null;
+  downloadedBytes?: number;
   id: string;
   ipAddress?: string | null;
   macAddress?: string | null;
   mikrotikId?: string | null;
   status?: string;
   syncStatus: RouterTicketSyncStatus;
+  uploadedBytes?: number;
 };
 
 export type RouterOnlyTicket = {
@@ -215,7 +221,15 @@ export class RouterTicketSyncService {
         summary: buildSummary([{ id: ticket.id, status: "supprimé", syncStatus: "router_synced" }], []),
         updates: [{ id: ticket.id, status: "supprimé", syncStatus: "router_synced" }]
       };
-    } catch {
+    } catch (error) {
+      if (error instanceof RouterServiceError && error.code === "hotspot_not_found") {
+        return {
+          localMissing: [],
+          logs: [{ level: "warning", message: "Le ticket était déjà absent du routeur.", ticketCode: ticket.code }],
+          summary: buildSummary([{ id: ticket.id, status: "supprimé", syncStatus: "router_synced" }], []),
+          updates: [{ id: ticket.id, status: "supprimé", syncStatus: "router_synced" }]
+        };
+      }
       return {
         localMissing: [],
         logs: [{ level: "error", message: "Suppression impossible sur le routeur.", ticketCode: ticket.code }],
@@ -312,7 +326,19 @@ export function compareLocalAndRouterTickets(
       : Boolean(ticket.planId && routerUser.planId && ticket.planId !== routerUser.planId);
 
     updates.push({
-      activatedAt: activeUser ? ticket.activatedAt ?? new Date().toISOString() : ticket.activatedAt,
+      activatedAt:
+        activeUser || routerOsDurationHasElapsed(routerUser.uptime)
+          ? ticket.activatedAt ?? new Date().toISOString()
+          : ticket.activatedAt,
+      completedAt:
+        routerUser.status === "expired"
+          ? ticket.completedAt ?? new Date().toISOString()
+          : ticket.completedAt,
+      downloadedBytes: Math.max(
+        ticket.downloadedBytes ?? 0,
+        routerUser.downloadedBytes ?? 0,
+        activeUser?.downloadedBytes ?? 0
+      ),
       id: ticket.id,
       ipAddress: activeUser?.ipAddress ?? ticket.ipAddress,
       macAddress: activeUser?.macAddress ?? ticket.macAddress,
@@ -320,12 +346,19 @@ export function compareLocalAndRouterTickets(
       status:
         activeUser
           ? "activé"
-          : routerUser.status === "disabled" || routerUser.status === "expired"
-            ? "expiré"
-            : ticket.status === "erreur_sync"
-              ? "disponible"
-              : ticket.status,
-      syncStatus: hasConflict ? "conflict" : "router_synced"
+          : routerUser.status === "expired"
+            ? "complété"
+            : routerUser.status === "disabled"
+              ? "désactivé"
+              : ticket.status === "erreur_sync"
+                ? "disponible"
+                : ticket.status,
+      syncStatus: hasConflict ? "conflict" : "router_synced",
+      uploadedBytes: Math.max(
+        ticket.uploadedBytes ?? 0,
+        routerUser.uploadedBytes ?? 0,
+        activeUser?.uploadedBytes ?? 0
+      )
     });
 
     if (hasConflict) {
@@ -363,6 +396,10 @@ export function compareLocalAndRouterTickets(
     summary: buildSummary(updates, localMissing),
     updates
   };
+}
+
+function routerOsDurationHasElapsed(value: string | null | undefined): boolean {
+  return Boolean(value && value !== "0s" && value !== "0");
 }
 
 export function syncStatusLabel(status: RouterTicketSyncStatus): string {

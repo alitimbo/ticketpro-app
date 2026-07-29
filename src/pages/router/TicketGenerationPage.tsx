@@ -1,8 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
-import { CheckCircle2, ChevronLeft, ChevronRight, FileText, Hash, Printer, QrCode, Ticket } from "lucide-react";
+import { CheckCircle2, ChevronLeft, ChevronRight, FileText, Hash, Printer, Ticket } from "lucide-react";
 import type { HotspotPlan, HotspotUser, RouterSummary } from "../../domain/router";
-import type { CreateGeneratedFileInput, CreateTicketInput, PrintHistoryRecord, SyncStatus } from "../../domain/database";
+import type {
+  CreateGeneratedFileInput,
+  CreateTicketBatchInput,
+  CreateTicketInput,
+  PrintHistoryRecord,
+  SyncStatus
+} from "../../domain/database";
 import type { UserRole } from "../../domain/auth";
 import { useAuth } from "../../app/auth/AuthProvider";
 import { AuthorizationError, requireProfilePermission } from "../../services/auth";
@@ -14,12 +20,14 @@ import {
   type RouterActionLog
 } from "../../services/router";
 import {
+  AccountRepository,
   GeneratedFileRepository,
   HotspotPlanRepository,
   PrintHistoryRepository,
   RouterConnectionRepository,
   RouterRepository,
   TicketBatchRepository,
+  TicketRepository,
   useAppDatabase
 } from "../../services/database";
 import { buildGeneratedTicketPdfRecord, generateTicketPdf, resolveTicketPdfPassword } from "../../services/pdf";
@@ -60,7 +68,11 @@ import {
   type TicketStatus
 } from "./ticketGenerationModel";
 import { planFromRecord } from "./plansPageModel";
-import { TicketCodeGenerator } from "../../services/tickets";
+import {
+  protectTicketPassword,
+  resolveTicketPasswordValue,
+  TicketCodeGenerator
+} from "../../services/tickets";
 import { TauriFileService } from "../../services/files";
 
 const stepLabels = [
@@ -85,6 +97,7 @@ export function TicketGenerationPage() {
   const [generatedFile, setGeneratedFile] = useState<CreateGeneratedFileInput | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [ownerPhone, setOwnerPhone] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [printers, setPrinters] = useState<LocalPrinter[]>([]);
   const [printSettings, setPrintSettings] = useState<PrintSettings>({
@@ -93,7 +106,9 @@ export function TicketGenerationPage() {
     printerId: "pdf-export"
   });
   const [printHistory, setPrintHistory] = useState<PrintHistoryEntry[]>([]);
+  const accountRepository = useMemo(() => new AccountRepository(database), [database]);
   const batchRepository = useMemo(() => new TicketBatchRepository(database), [database]);
+  const ticketRepository = useMemo(() => new TicketRepository(database), [database]);
   const planRepository = useMemo(() => new HotspotPlanRepository(database), [database]);
   const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
@@ -118,6 +133,27 @@ export function TicketGenerationPage() {
   const codeGenerator = useMemo(() => new TicketCodeGenerator(), []);
   const generatedFiles = useMemo(() => new GeneratedFileRepository(database), [database]);
   const printHistoryRepository = useMemo(() => new PrintHistoryRepository(database), [database]);
+
+  useEffect(() => {
+    if (!isInitialized || !session) {
+      return undefined;
+    }
+
+    let mounted = true;
+    void accountRepository.findById(session.account_id).then((account) => {
+      if (mounted) {
+        setOwnerPhone(account?.phone?.trim() || null);
+      }
+    }).catch(() => {
+      if (mounted) {
+        setOwnerPhone(null);
+      }
+    });
+
+    return () => {
+      mounted = false;
+    };
+  }, [accountRepository, isInitialized, session]);
 
   useEffect(() => {
     if (!isPersistent || !isInitialized || !session) {
@@ -178,6 +214,7 @@ export function TicketGenerationPage() {
               ? [{
                   connectionMode: routerRecord.connection_mode,
                   host: routerRecord.local_ip,
+                  hotspotAddress: routerRecord.hotspot_address,
                   id: routerRecord.id,
                   isReachable: routerRecord.status === "active",
                   name: routerRecord.name
@@ -297,9 +334,12 @@ export function TicketGenerationPage() {
       setError("Le routeur n'est pas prêt ou son mot de passe doit être ressaisi.");
       return;
     }
-
-    if (isPersistent && !state.options.usernameEqualsPassword) {
-      setError("La génération distante exige pour l'instant que le mot de passe soit égal au nom d'utilisateur.");
+    if (isPersistent && !selectedRouter.hotspotAddress?.trim()) {
+      setError("Renseignez et enregistrez l'adresse Hotspot dans Paramètres routeur avant de créer les tickets.");
+      return;
+    }
+    if (isPersistent && !ownerPhone?.trim()) {
+      setError("Renseignez le téléphone du propriétaire dans Mon compte avant de créer les tickets.");
       return;
     }
 
@@ -314,19 +354,89 @@ export function TicketGenerationPage() {
 
     try {
       const generationService = persistedRouterService ?? service;
-      const existingUsers: HotspotUser[] = await generationService.listHotspotUsers();
-      const generatedCredentials = codeGenerator.generate({
+      const [existingUsers, existingLocalTickets, remotePlans] = await Promise.all([
+        generationService.listHotspotUsers(),
+        isPersistent
+          ? ticketRepository.listExistingUsernamesByRouter(state.selectedRouterId)
+          : Promise.resolve([]),
+        generationService.getHotspotPlans()
+      ]);
+      if (
+        isPersistent &&
+        !remotePlans.some((plan) => plan.profileName === selectedPlan.profileName)
+      ) {
+        throw new Error(
+          `Le plan ${selectedPlan.name} n'existe pas encore sur RouterOS. Synchronisez d'abord ce plan.`
+        );
+      }
+      const generatedUsernames = codeGenerator.generate({
         alphabet: "numeric",
         codeLength: state.options.codeLength,
         excludeAmbiguous: state.options.excludeAmbiguous,
-        existingTickets: existingUsers,
+        existingTickets: [...existingUsers, ...existingLocalTickets],
         prefix: state.options.prefix,
         quantity: requestedQuantity,
         routerId: state.selectedRouterId,
-        usernameEqualsPassword: state.options.usernameEqualsPassword
+        usernameEqualsPassword: true
       }).codes;
+      const generatedCredentials = await mapWithConcurrency(
+        generatedUsernames,
+        8,
+        async (credential) => {
+          if (state.options.usernameEqualsPassword) {
+            return credential;
+          }
 
-      for (const credential of generatedCredentials) {
+          const password = codeGenerator.generate({
+            alphabet: "numeric",
+            codeLength: state.options.codeLength,
+            excludeAmbiguous: state.options.excludeAmbiguous,
+            existingTickets: [credential.username],
+            quantity: 1,
+            routerId: state.selectedRouterId,
+            usernameEqualsPassword: true
+          }).codes[0].username;
+
+          return {
+            ...credential,
+            passwordSecretRef: await protectTicketPassword(password)
+          };
+        }
+      );
+      const pendingTickets = generatedCredentials.map((credential) =>
+        buildTicketRecord({
+          accountId: session.account_id,
+          batchId,
+          createdByProfileId: session.internal_profile_id,
+          createdByProfile: session.internal_profile_role,
+          mikrotikId: null,
+          passwordSecretRef: credential.passwordSecretRef,
+          planId: state.selectedPlanId,
+          routerId: state.selectedRouterId,
+          status: "erreur_sync",
+          syncStatus: "pending",
+          username: credential.username
+        })
+      );
+      const pendingBatch = buildTicketBatch({
+        accountId: session.account_id,
+        id: batchId,
+        operatorProfileId: session.internal_profile_id,
+        operatorRole: session.internal_profile_role,
+        options: state.options,
+        planId: state.selectedPlanId,
+        quantity: requestedQuantity,
+        routerId: state.selectedRouterId,
+        syncStatus: "pending"
+      });
+
+      // Persist the complete intent before touching RouterOS. If the process is
+      // interrupted, every unconfirmed voucher remains recoverable from Tickets.
+      if (isPersistent) {
+        await batchRepository.createWithTickets(pendingBatch, pendingTickets);
+      }
+
+      await forEachWithConcurrency(generatedCredentials, 3, async (credential, credentialIndex) => {
         try {
           const createdUser = await generationService.createHotspotUser({
             comment: `Lot ${batchId}`,
@@ -335,18 +445,18 @@ export function TicketGenerationPage() {
             username: credential.username
           });
 
-          succeededTickets.push(
-            userToTicketRecord({
-              accountId: session.account_id,
-              batchId,
-              createdByProfileId: session.internal_profile_id,
-              createdByProfile: session.internal_profile_role,
-              routerId: state.selectedRouterId,
-              passwordSecretRef: credential.passwordSecretRef,
-              planId: state.selectedPlanId,
-              user: createdUser
-            })
-          );
+          const succeededTicket = userToTicketRecord({
+            accountId: session.account_id,
+            batchId,
+            createdByProfileId: session.internal_profile_id,
+            createdByProfile: session.internal_profile_role,
+            routerId: state.selectedRouterId,
+            passwordSecretRef: credential.passwordSecretRef,
+            planId: state.selectedPlanId,
+            user: createdUser
+          });
+          succeededTickets.push(succeededTicket);
+          if (isPersistent) await ticketRepository.update(succeededTicket);
         } catch (creationError) {
           let recoveredUser: HotspotUser | null = null;
 
@@ -360,43 +470,34 @@ export function TicketGenerationPage() {
             }
           }
 
-          if (recoveredUser) {
-            succeededTickets.push(
-              userToTicketRecord({
-                accountId: session.account_id,
-                batchId,
-                createdByProfileId: session.internal_profile_id,
-                createdByProfile: session.internal_profile_role,
-                passwordSecretRef: credential.passwordSecretRef,
-                planId: state.selectedPlanId,
-                routerId: state.selectedRouterId,
-                user: recoveredUser
-              })
-            );
-            continue;
-          }
-
-          failedTickets.push(
-            buildTicketRecord({
+          if (recoveredUser && recoveredUser.profileName === selectedPlan.profileName) {
+            const succeededTicket = userToTicketRecord({
               accountId: session.account_id,
               batchId,
               createdByProfileId: session.internal_profile_id,
               createdByProfile: session.internal_profile_role,
-              mikrotikId: null,
               passwordSecretRef: credential.passwordSecretRef,
               planId: state.selectedPlanId,
               routerId: state.selectedRouterId,
-              status: "erreur_sync",
-              syncStatus: "pending",
-              username: credential.username
-            })
-          );
-
-          if (!(creationError instanceof RouterServiceError)) {
-            throw creationError;
+              user: recoveredUser
+            });
+            succeededTickets.push(succeededTicket);
+            if (isPersistent) await ticketRepository.update(succeededTicket);
+            return;
           }
+
+          failedTickets.push(pendingTickets[credentialIndex]);
+          setLogs((current) => [
+            ...current,
+            {
+              action: "createHotspotUser",
+              level: "error",
+              technicalCode: creationError instanceof RouterServiceError ? creationError.code : undefined,
+              userMessage: `Le voucher ${credential.username} reste en attente de synchronisation.`
+            }
+          ]);
         }
-      }
+      });
 
       const syncStatus: SyncStatus = failedTickets.length > 0 ? "pending" : "synced";
       const batch = buildTicketBatch({
@@ -410,14 +511,23 @@ export function TicketGenerationPage() {
         routerId: state.selectedRouterId,
         syncStatus
       });
-      const fileName = state.options.createPdf ? buildFileName(batchId) : null;
+      const fileName = buildFileName(batchId);
 
-      if (isPersistent) {
-        await batchRepository.createWithTickets(batch, [...succeededTickets, ...failedTickets]);
-      }
+      if (isPersistent) await batchRepository.updateState(batch.id, batch.account_id, batch.status, syncStatus);
 
       setTickets([...succeededTickets, ...failedTickets]);
-      setGeneratedFile(null);
+      let createdPdf: CreateGeneratedFileInput | null = null;
+      let pdfError: string | null = null;
+      if (fileName) {
+        try {
+          if (succeededTickets.length > 0) {
+            createdPdf = await createAndStorePdf(batch, succeededTickets, fileName);
+          }
+        } catch (fileError) {
+          pdfError = fileError instanceof Error ? fileError.message : "Le PDF n'a pas pu être généré.";
+        }
+      }
+      setGeneratedFile(createdPdf);
       setResult({
         batch,
         failedTickets,
@@ -429,9 +539,11 @@ export function TicketGenerationPage() {
       });
       setState((current) => ({ ...current, step: 6 }));
       setMessage(
-        failedTickets.length > 0
+        pdfError
+          ? `${succeededTickets.length} ticket(s) créé(s). PDF à reprendre : ${pdfError}`
+          : failedTickets.length > 0
           ? `${succeededTickets.length} ticket(s) créés, ${failedTickets.length} en attente de reprise depuis Tickets.`
-          : `${succeededTickets.length} ticket(s) créés avec succès.`
+          : `${succeededTickets.length} ticket(s) créés avec succès${createdPdf ? " et PDF enregistré." : "."}`
       );
     } catch (generationError) {
       setError(
@@ -447,21 +559,49 @@ export function TicketGenerationPage() {
   const primaryActionLabel =
     state.step === 5 ? `Créer ${Number.isFinite(quantity) ? quantity : 0} tickets` : "Continuer";
 
-  const generatePdf = async (): Promise<CreateGeneratedFileInput | null> => {
-    if (!result || !selectedPlan || !selectedRouter || !result.fileName) {
-      setMessage("Aucun PDF à générer pour ce lot.");
-      return null;
+  const createAndStorePdf = async (
+    batch: CreateTicketBatchInput,
+    pdfTickets: CreateTicketInput[],
+    fileName: string
+  ): Promise<CreateGeneratedFileInput> => {
+    if (!selectedPlan || !selectedRouter) {
+      throw new Error("Le plan ou le routeur du PDF est introuvable.");
     }
-
-    const pdfInput = buildTicketPdfInputFromOptions({
-      batch: result.batch,
-      fileName: result.fileName,
+    if (isPersistent && !selectedRouter.hotspotAddress?.trim()) {
+      throw new Error(
+        "Configurez d'abord l'adresse Hotspot dans Paramètres routeur afin qu'elle figure sur chaque ticket."
+      );
+    }
+    if (isPersistent && !ownerPhone?.trim()) {
+      throw new Error(
+        "Renseignez le téléphone du propriétaire dans Mon compte avant de générer le PDF."
+      );
+    }
+    const basePdfInput = buildTicketPdfInputFromOptions({
+      batch,
+      fileName,
       generatedAt: new Date().toISOString(),
       options: state.options,
+      ownerPhone: ownerPhone?.trim() || "Contact propriétaire",
       plan: selectedPlan,
       router: selectedRouter,
-      tickets
+      tickets: pdfTickets
     });
+    const pdfInput = {
+      ...basePdfInput,
+      tickets: await mapWithConcurrency(
+        pdfTickets,
+        8,
+        async (ticket) => ({
+          password: await resolveTicketPasswordValue({
+            passwordSecretRef: ticket.password_encrypted,
+            username: ticket.username
+          }),
+          passwordSecretRef: ticket.password_encrypted,
+          username: ticket.username
+        })
+      )
+    };
     const pdfBytes = generateTicketPdf(pdfInput);
     let fileRecord = buildGeneratedTicketPdfRecord(pdfInput);
 
@@ -473,8 +613,31 @@ export function TicketGenerationPage() {
     }
 
     await generatedFiles.create(fileRecord);
+    return fileRecord;
+  };
+
+  const generatePdf = async (): Promise<CreateGeneratedFileInput | null> => {
+    if (!result || !result.fileName) {
+      setMessage("Aucun PDF à générer pour ce lot.");
+      return null;
+    }
+
+    if (generatedFile) {
+      if (isPersistent) {
+        await fileService.open(generatedFile.file_path);
+      }
+      setMessage(`${generatedFile.file_name} ouvert.`);
+      return generatedFile;
+    }
+
+    const printableTickets = tickets.filter((ticket) => ticket.sync_status === "synced");
+    if (printableTickets.length === 0) {
+      setMessage("Aucun voucher synchronisé n'est disponible pour le PDF.");
+      return null;
+    }
+    const fileRecord = await createAndStorePdf(result.batch, printableTickets, result.fileName);
     setGeneratedFile(fileRecord);
-    setMessage(`${pdfInput.fileName} généré et enregistré dans les fichiers.`);
+    setMessage(`${fileRecord.file_name} généré et enregistré dans les fichiers.`);
     return fileRecord;
   };
 
@@ -495,8 +658,20 @@ export function TicketGenerationPage() {
       return;
     }
 
-    const printTickets = tickets.map((ticket) =>
-      buildPrintTicketFromGeneratedTicket(ticket, selectedPlan, selectedRouter.name, result.batch.id)
+    const printTickets = await mapWithConcurrency(
+      tickets.filter((ticket) => ticket.sync_status === "synced"),
+      8,
+      async (ticket) =>
+        buildPrintTicketFromGeneratedTicket(
+          ticket,
+          selectedPlan,
+          selectedRouter.name,
+          result.batch.id,
+          await resolveTicketPasswordValue({
+            passwordSecretRef: ticket.password_encrypted,
+            username: ticket.username
+          })
+        )
     );
     const printResult = await printService.printBatch({
       filePath: fileToPrint?.file_path,
@@ -809,18 +984,9 @@ function StepOptions({
           label="Exclure les chiffres ambigus"
           onChange={(checked) => updateOptions({ excludeAmbiguous: checked })}
         />
-        <ToggleOption
-          checked={state.options.generateQrCode}
-          icon={QrCode}
-          label="Générer QR code"
-          onChange={(checked) => updateOptions({ generateQrCode: checked })}
-        />
-        <ToggleOption
-          checked={state.options.createPdf}
-          icon={FileText}
-          label="Créer PDF après génération"
-          onChange={(checked) => updateOptions({ createPdf: checked })}
-        />
+        {/* QR code volontairement masqué : la fonctionnalité reste conservée dans
+            le modèle pour une réactivation future après validation du parcours captif. */}
+        {/* Le PDF est obligatoire et automatiquement archivé dans Fichiers. */}
       </div>
       <div className="router-form-grid pdf-options-grid">
         <label className="form-field">
@@ -842,20 +1008,14 @@ function StepOptions({
             value={state.options.pdfTemplate}
             onChange={(event) => updateOptions({ pdfTemplate: event.target.value as TicketGenerationState["options"]["pdfTemplate"] })}
           >
-            {Object.entries(ticketPdfTemplateLabels).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
+            {Object.entries(ticketPdfTemplateLabels)
+              .filter(([value]) => value !== "qr")
+              .map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
           </select>
-        </label>
-        <label className="form-field">
-          Téléphone support
-          <input
-            placeholder="Ex. +227 90 00 00 00"
-            value={state.options.supportPhone}
-            onChange={(event) => updateOptions({ supportPhone: event.target.value })}
-          />
         </label>
       </div>
     </Card>
@@ -916,7 +1076,7 @@ function StepConfirmation({
           <SummaryItem label="Routeur" value={`${summary.router} · ${router.host}`} />
           <SummaryItem label="Opérateur" value={summary.operator} />
           <SummaryItem label="Code" value={`${options.prefix ? `${options.prefix} + ` : ""}${options.codeLength} chiffres`} />
-          <SummaryItem label="PDF" value={options.createPdf ? "Oui" : "Non"} />
+          <SummaryItem label="PDF" value="Automatique et archivé" />
         </div>
       </Card>
 
@@ -972,7 +1132,7 @@ function StepResult({
         actions={
           <div className="button-row">
             <Button disabled={!result.fileName} icon={FileText} onClick={onPdf} variant="secondary">
-              PDF
+              {generatedFile ? "Ouvrir PDF" : "Générer PDF"}
             </Button>
             <Button icon={Printer} onClick={onPrint} variant="secondary">
               Impression
@@ -1123,7 +1283,8 @@ function buildPrintTicketFromGeneratedTicket(
   ticket: CreateTicketInput,
   plan: HotspotPlan,
   zoneName: string,
-  batchId: string
+  batchId: string,
+  passwordLabel?: string
 ) {
   return {
     batchId,
@@ -1131,7 +1292,7 @@ function buildPrintTicketFromGeneratedTicket(
     dataLimitLabel: plan.dataLimitMb ? `${plan.dataLimitMb} MB` : null,
     durationLabel: plan.durationMinutes >= 60 && plan.durationMinutes % 60 === 0 ? `${plan.durationMinutes / 60} h` : `${plan.durationMinutes} min`,
     id: ticket.id,
-    passwordLabel: resolveTicketPdfPassword({
+    passwordLabel: passwordLabel ?? resolveTicketPdfPassword({
       passwordSecretRef: ticket.password_encrypted,
       username: ticket.username
     }),
@@ -1200,4 +1361,33 @@ function ticketStatusToBadge(status: string): AppStatus {
 
 function statusToBadge(status: string): AppStatus {
   return ticketStatusToBadge(status);
+}
+
+async function forEachWithConcurrency<T>(
+  values: T[],
+  concurrency: number,
+  operation: (value: T, index: number) => Promise<void>
+): Promise<void> {
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(concurrency, values.length));
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (nextIndex < values.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      await operation(values[index], index);
+    }
+  });
+  await Promise.all(workers);
+}
+
+async function mapWithConcurrency<T, R>(
+  values: T[],
+  concurrency: number,
+  operation: (value: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(values.length);
+  await forEachWithConcurrency(values, concurrency, async (value, index) => {
+    results[index] = await operation(value, index);
+  });
+  return results;
 }

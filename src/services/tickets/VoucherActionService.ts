@@ -4,7 +4,7 @@ export class VoucherActionService {
   constructor(
     private readonly routerService: Pick<
       RouterService,
-      "disableHotspotUser" | "disconnectActiveUser" | "listActiveUsers" | "removeHotspotUser"
+      "disableHotspotUser" | "disconnectActiveUser" | "enableHotspotUser" | "listActiveUsers" | "removeHotspotUser"
     >
   ) {}
 
@@ -18,6 +18,10 @@ export class VoucherActionService {
     }
 
     return { disconnected: isActive };
+  }
+
+  async enable(username: string): Promise<void> {
+    await this.routerService.enableHotspotUser(username);
   }
 
   async remove(username: string): Promise<void> {

@@ -4,6 +4,8 @@ import type { DatabaseClient, DatabaseExecuteResult, DatabaseStatement } from ".
 import { TicketRepository } from "./TicketRepository";
 
 class TicketDatabaseStub implements DatabaseClient {
+  lastQuery = "";
+
   constructor(private record: TicketRecord) {}
 
   async initialize(): Promise<void> {}
@@ -17,7 +19,8 @@ class TicketDatabaseStub implements DatabaseClient {
     return { rowsAffected: 1 };
   }
 
-  async query<T>(): Promise<T[]> {
+  async query<T>(sql: string): Promise<T[]> {
+    this.lastQuery = sql;
     return [this.record as T];
   }
 
@@ -39,6 +42,18 @@ describe("TicketRepository", () => {
 
     expect(updated.status).toBe("expiré");
     expect(updated.sync_status).toBe("synced");
+  });
+
+  it("inclut les tickets supprimés dans la source historique des rapports", async () => {
+    const database = new TicketDatabaseStub({
+      ...createTicketRecord(),
+      deleted_at: "2026-07-10T10:00:00.000Z"
+    });
+    const repository = new TicketRepository(database);
+
+    await expect(repository.listForReportByAccount("account-1")).resolves.toHaveLength(1);
+    expect(database.lastQuery).not.toContain("deleted_at IS NULL");
+    expect(database.lastQuery).toContain("account_id = ?1");
   });
 });
 

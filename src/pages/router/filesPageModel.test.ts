@@ -60,6 +60,7 @@ describe("filesPageModel", () => {
         file_path: "files/tickets-batch-a.pdf",
         format: "pdf",
         id: "file-a",
+        metadata_json: null,
         router_id: "router-a",
         sync_status: "local",
         type: "tickets_pdf",
@@ -69,5 +70,35 @@ describe("filesPageModel", () => {
     );
 
     expect(file).toMatchObject({ fileName: "tickets-batch-a.pdf", status: "missing", ticketQuantity: 10 });
+  });
+
+  it("distingue une vérification disque impossible d'un fichier réellement absent", () => {
+    const record = {
+      account_id: "account-a",
+      batch_id: "batch-a",
+      created_at: "2026-07-13T12:00:00.000Z",
+      created_by_profile: "operator",
+      created_by_profile_id: "account-a:internal-profile-operator",
+      deleted_at: null,
+      file_name: "tickets-batch-a.pdf",
+      file_path: "files/tickets-batch-a.pdf",
+      format: "a4",
+      id: "file-a",
+      metadata_json: null,
+      router_id: "router-a",
+      sync_status: "local" as const,
+      type: "tickets_pdf",
+      updated_at: "2026-07-13T12:00:00.000Z"
+    };
+
+    expect(
+      archivedFileFromRecord(record, { fileExists: null, routerName: "Routeur A" })
+    ).toMatchObject({ canRegenerate: true, status: "unknown" });
+    expect(
+      archivedFileFromRecord(
+        { ...record, batch_id: null, type: "report_pdf" },
+        { fileExists: true, routerName: "Routeur A" }
+      )
+    ).toMatchObject({ canRegenerate: false, status: "available" });
   });
 });

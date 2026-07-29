@@ -22,6 +22,12 @@ pub struct ManagedFileMetadata {
     pub size_bytes: u64,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ExportedFileResult {
+    pub absolute_path: String,
+    pub file_name: String,
+}
+
 fn files_directory(app: &AppHandle) -> Result<PathBuf, String> {
     let data_dir = app
         .path()
@@ -127,4 +133,77 @@ pub fn file_reveal(app: AppHandle, relative_path: String) -> Result<(), String> 
     app.opener()
         .reveal_item_in_dir(path.to_string_lossy().to_string())
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn file_remove(app: AppHandle, relative_path: String) -> Result<(), String> {
+    let (path, _) = managed_path(&app, &relative_path)?;
+
+    if !path.exists() {
+        return Ok(());
+    }
+
+    if !path.is_file() {
+        return Err("Le chemin ne correspond pas à un fichier.".to_string());
+    }
+
+    fs::remove_file(path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn file_export_to_downloads(
+    app: AppHandle,
+    relative_path: String,
+) -> Result<ExportedFileResult, String> {
+    let (source, _) = managed_path(&app, &relative_path)?;
+
+    if !source.is_file() {
+        return Err("Fichier introuvable.".to_string());
+    }
+
+    let downloads = app.path().download_dir().map_err(|error| error.to_string())?;
+    let export_directory = downloads.join("TicketPro");
+    fs::create_dir_all(&export_directory).map_err(|error| error.to_string())?;
+    let original_name = source
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "Nom de fichier invalide.".to_string())?;
+    let destination = available_export_path(&export_directory, original_name);
+    fs::copy(&source, &destination).map_err(|error| error.to_string())?;
+
+    Ok(ExportedFileResult {
+        absolute_path: destination.to_string_lossy().to_string(),
+        file_name: destination
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or(original_name)
+            .to_string(),
+    })
+}
+
+fn available_export_path(directory: &Path, file_name: &str) -> PathBuf {
+    let requested = directory.join(file_name);
+    if !requested.exists() {
+        return requested;
+    }
+
+    let file_path = Path::new(file_name);
+    let stem = file_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("ticketpro");
+    let extension = file_path.extension().and_then(|value| value.to_str());
+
+    for index in 1..10_000 {
+        let candidate_name = match extension {
+            Some(value) => format!("{stem}-{index}.{value}"),
+            None => format!("{stem}-{index}"),
+        };
+        let candidate = directory.join(candidate_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    directory.join(format!("{stem}-{}", std::process::id()))
 }

@@ -32,7 +32,11 @@ export function validateAccountDetails(input: Pick<MainAccountRecord, "companyNa
     return "Entrez le nom de l'entreprise.";
   }
 
-  if (input.phone.trim() && input.phone.trim().length < 6) {
+  if (!input.phone.trim()) {
+    return "Entrez le téléphone du propriétaire.";
+  }
+
+  if (input.phone.trim().length < 6) {
     return "Entrez un téléphone valide.";
   }
 

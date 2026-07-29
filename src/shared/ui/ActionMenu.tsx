@@ -9,13 +9,14 @@ type ActionMenuItem = RoleVisibility & {
 };
 
 type ActionMenuProps = {
+  disabled?: boolean;
   items: ActionMenuItem[];
   open?: boolean;
 };
 
-export function ActionMenu({ items, open }: ActionMenuProps) {
+export function ActionMenu({ disabled = false, items, open }: ActionMenuProps) {
   const [internalOpen, setInternalOpen] = useState(false);
-  const isOpen = open ?? internalOpen;
+  const isOpen = disabled ? false : open ?? internalOpen;
 
   return (
     <div className="action-menu" onClick={(event) => event.stopPropagation()}>
@@ -24,6 +25,7 @@ export function ActionMenu({ items, open }: ActionMenuProps) {
         aria-haspopup="menu"
         aria-label="Actions"
         className="action-menu__button"
+        disabled={disabled}
         onClick={() => setInternalOpen((current) => !current)}
         type="button"
       >

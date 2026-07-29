@@ -1,4 +1,6 @@
 import type { AuthSession, UserRole } from "../../domain/auth";
+import type { AppLogRecord } from "../../domain/database";
+import { parseTechnicalMessage, redactTechnicalMessage } from "../../services/logging";
 import type { AppStatus } from "../../shared/ui";
 
 export type AppLogCategory =
@@ -36,6 +38,7 @@ export type LogFilters = {
   dateFrom: string;
   dateTo: string;
   level: "" | AppLogLevel;
+  query: string;
   routerId: string;
   userProfile: "" | UserRole;
 };
@@ -45,6 +48,7 @@ export const emptyLogFilters: LogFilters = {
   dateFrom: "",
   dateTo: "",
   level: "",
+  query: "",
   routerId: "",
   userProfile: ""
 };
@@ -238,6 +242,7 @@ export function scopeLogsForSession(logs: AppLogEntry[], session: AuthSession | 
 export function filterLogs(logs: AppLogEntry[], filters: LogFilters): AppLogEntry[] {
   const from = filters.dateFrom ? startOfDay(filters.dateFrom) : null;
   const to = filters.dateTo ? endOfDay(filters.dateTo) : null;
+  const query = normalize(filters.query);
 
   return logs.filter((log) => {
     const createdAt = new Date(log.createdAt).getTime();
@@ -266,8 +271,56 @@ export function filterLogs(logs: AppLogEntry[], filters: LogFilters): AppLogEntr
       return false;
     }
 
+    if (
+      query &&
+      ![
+        log.action,
+        log.category,
+        log.routerName,
+        log.technicalDetail,
+        log.userMessage,
+        log.userProfile
+      ].some((value) => normalize(value ?? "").includes(query))
+    ) {
+      return false;
+    }
+
     return true;
-  });
+  }).sort((left, right) => timestamp(right.createdAt) - timestamp(left.createdAt));
+}
+
+export function appLogFromRecord(
+  record: AppLogRecord,
+  routerNames: ReadonlyMap<string, string>
+): AppLogEntry {
+  const prefixedMessage = parseLegacyMessage(record.user_message);
+  const technical = parseTechnicalMessage(record.technical_message);
+  const technicalDetail = [technical.code, technical.detail].filter(Boolean).join(": ") || null;
+
+  return {
+    accountId: record.account_id ?? "",
+    action: prefixedMessage.action ?? technical.action ?? technical.code,
+    category: normalizeCategory(record.category),
+    createdAt: record.created_at,
+    id: record.id,
+    internalProfileId: record.internal_profile_id,
+    level: record.level,
+    routerId: record.router_id,
+    routerName: record.router_id ? routerNames.get(record.router_id) ?? record.router_id : null,
+    technicalDetail: technicalDetail ? redactTechnicalMessage(technicalDetail) : null,
+    userMessage: prefixedMessage.message,
+    userProfile: normalizeProfile(record.created_by_profile, record.internal_profile_id)
+  };
+}
+
+export function paginateLogs(logs: AppLogEntry[], page: number, pageSize: number): AppLogEntry[] {
+  const safePageSize = Math.max(1, Math.floor(pageSize));
+  const safePage = Math.max(1, Math.floor(page));
+  return logs.slice((safePage - 1) * safePageSize, safePage * safePageSize);
+}
+
+export function getLogPageCount(total: number, pageSize: number): number {
+  return Math.max(1, Math.ceil(Math.max(0, total) / Math.max(1, Math.floor(pageSize))));
 }
 
 export function translateTechnicalError(value: string): string {
@@ -415,8 +468,40 @@ export function canCleanLogs(role: UserRole | null | undefined): boolean {
   return role === "admin";
 }
 
+function normalizeCategory(value: string): AppLogCategory {
+  return logCategories.includes(value as AppLogCategory)
+    ? value as AppLogCategory
+    : "systeme";
+}
+
+function normalizeProfile(
+  createdByProfile: string | null,
+  internalProfileId: string | null
+): UserRole | null {
+  const candidates = [createdByProfile, internalProfileId].filter(
+    (value): value is string => Boolean(value)
+  );
+
+  return (["admin", "operator", "agent", "guest"] as UserRole[]).find((role) =>
+    candidates.some(
+      (candidate) =>
+        candidate === role ||
+        candidate.endsWith(`-${role}`) ||
+        candidate.endsWith(`:${role}`)
+    )
+  ) ?? null;
+}
+
+function parseLegacyMessage(value: string): { action: string | null; message: string } {
+  const match = value.match(/^\[([^\]]+)\]\s*(.+)$/);
+  return match
+    ? { action: match[1].trim() || null, message: match[2].trim() || value }
+    : { action: null, message: value };
+}
+
 function escapeCsv(value: string): string {
-  return `"${value.replace(/"/g, '""')}"`;
+  const spreadsheetSafeValue = /^[=+\-@]/.test(value) ? `'${value}` : value;
+  return `"${spreadsheetSafeValue.replace(/"/g, '""')}"`;
 }
 
 function startOfDay(date: string): number {
@@ -429,4 +514,13 @@ function endOfDay(date: string): number {
 
 function pad(value: number): string {
   return String(value).padStart(2, "0");
+}
+
+function normalize(value: string): string {
+  return value.trim().toLocaleLowerCase("fr");
+}
+
+function timestamp(value: string): number {
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
 }
