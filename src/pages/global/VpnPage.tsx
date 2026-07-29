@@ -1,5 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Download, KeyRound, Network, RefreshCw, Shield, ShieldOff } from "lucide-react";
+import {
+  ChevronDown,
+  Download,
+  Globe2,
+  KeyRound,
+  Monitor,
+  Network,
+  RefreshCw,
+  Server,
+  Shield,
+  ShieldOff
+} from "lucide-react";
 import { useAuth } from "../../app/auth/AuthProvider";
 import type { RouterRecord, VpnNetworkRecord, VpnPeerRecord } from "../../domain/database";
 import {
@@ -446,19 +457,40 @@ export function VpnPage() {
       {message ? <div className="notice notice--success">{message}</div> : null}
       {error ? <div className="notice notice--error">{error}</div> : null}
 
-      <Card title="Serveur central" description="La configuration sécurisée est reçue automatiquement depuis TicketPro. Aucun secret VPS n'est demandé.">
+      <Card
+        actions={network ? <Badge status="success">Connecté</Badge> : <Badge status="warning">En attente</Badge>}
+        className="vpn-server-card"
+        title="Serveur central"
+        description="La configuration sécurisée est reçue automatiquement depuis TicketPro. Aucun secret VPS n'est demandé."
+      >
         {network ? (
-          <div className="form-grid">
-            <label>Réseau<input readOnly value={form.name} /></label>
-            <label>Adresse publique<input readOnly value={form.serverEndpoint} /></label>
-            <label>Clé publique du serveur<input readOnly value={form.serverPublicKey} /></label>
-            <label>Port WireGuard<input readOnly value={form.serverPort} /></label>
-            <label>Pool privé de l'organisation<input readOnly value={form.addressPool} /></label>
+          <div className="vpn-server-grid">
+            <label className="vpn-readonly-field">
+              <span className="vpn-field-label"><Network aria-hidden="true" /> Réseau</span>
+              <input readOnly value={form.name} />
+            </label>
+            <label className="vpn-readonly-field">
+              <span className="vpn-field-label"><Globe2 aria-hidden="true" /> Adresse publique</span>
+              <input readOnly value={form.serverEndpoint} />
+            </label>
+            <label className="vpn-readonly-field vpn-readonly-field--wide">
+              <span className="vpn-field-label"><KeyRound aria-hidden="true" /> Clé publique du serveur</span>
+              <input className="vpn-monospace-input" readOnly title={form.serverPublicKey} value={form.serverPublicKey} />
+            </label>
+            <label className="vpn-readonly-field">
+              <span className="vpn-field-label"><Server aria-hidden="true" /> Port WireGuard</span>
+              <input readOnly value={form.serverPort} />
+            </label>
+            <label className="vpn-readonly-field">
+              <span className="vpn-field-label"><Shield aria-hidden="true" /> Pool privé de l'organisation</span>
+              <input className="vpn-monospace-input" readOnly value={form.addressPool} />
+            </label>
           </div>
         ) : (
           <div className="notice">{isSaving ? "Configuration automatique du VPN en cours…" : "Le VPN sera configuré automatiquement avec votre licence."}</div>
         )}
-        <div className="card__footer">
+        <div className="vpn-card-actions">
+          <p>Les paramètres sont gérés automatiquement et restent isolés pour votre organisation.</p>
           <Button icon={Shield} variant="primary" disabled={isSaving} onClick={() => void saveNetwork()}>
             {isSaving ? "Configuration…" : network ? "Resynchroniser" : "Réessayer"}
           </Button>
@@ -468,28 +500,37 @@ export function VpnPage() {
       {!network ? (
         <EmptyState icon={Network} title="Réseau VPN en attente" description="TicketPro récupère automatiquement une configuration isolée depuis le VPS." />
       ) : (
-        <div className="page-grid">
-          <Card className="span-6" title="Ajouter un MikroTik" description="Le pair est injecté en LAN, puis validé dès qu'un tunnel opérateur permet d'atteindre son IP WireGuard.">
-            <label>
-              Routeur
-              <select value={selectedRouterId} onChange={(event) => setSelectedRouterId(event.target.value)}>
-                <option value="">Choisir un routeur</option>
-                {routers.map((router) => <option key={router.id} value={router.id}>{router.name}</option>)}
-              </select>
-            </label>
-            <div className="card__footer">
-              <Button icon={KeyRound} variant="primary" onClick={() => void createRouterPeer()}>
+        <div className="page-grid vpn-provision-grid">
+          <Card className="span-6 vpn-provision-card" title="Ajouter un MikroTik" description="Le pair est injecté en LAN, puis validé dès qu'un tunnel opérateur permet d'atteindre son IP WireGuard.">
+            <div className="vpn-provision-card__body">
+              <label className="vpn-form-field">
+                <span className="vpn-field-label"><Network aria-hidden="true" /> Routeur à provisionner</span>
+                <span className="vpn-select">
+                  <select value={selectedRouterId} onChange={(event) => setSelectedRouterId(event.target.value)}>
+                    <option value="">Sélectionner un routeur</option>
+                    {routers.map((router) => <option key={router.id} value={router.id}>{router.name}</option>)}
+                  </select>
+                  <ChevronDown aria-hidden="true" />
+                </span>
+                <small>Seuls les routeurs enregistrés dans ce compte sont proposés.</small>
+              </label>
+            </div>
+            <div className="vpn-card-actions">
+              <Button icon={KeyRound} variant="primary" disabled={!selectedRouterId} onClick={() => void createRouterPeer()}>
                 Provisionner le MikroTik
               </Button>
             </div>
           </Card>
-          <Card className="span-6" title="Ajouter un poste opérateur" description="Le démarrage du tunnel valide automatiquement les routeurs en attente.">
-            <label>
-              Nom du poste
-              <input placeholder="PC de Paris" value={operatorName} onChange={(event) => setOperatorName(event.target.value)} />
-            </label>
-            <div className="card__footer">
-              <Button icon={Download} variant="primary" onClick={() => void createOperatorPeer()}>
+          <Card className="span-6 vpn-provision-card" title="Ajouter un poste opérateur" description="Le démarrage du tunnel valide automatiquement les routeurs en attente.">
+            <div className="vpn-provision-card__body">
+              <label className="vpn-form-field">
+                <span className="vpn-field-label"><Monitor aria-hidden="true" /> Nom du poste</span>
+                <input placeholder="Ex. PC de Paris" value={operatorName} onChange={(event) => setOperatorName(event.target.value)} />
+                <small>Choisissez un nom clair pour identifier facilement cette machine.</small>
+              </label>
+            </div>
+            <div className="vpn-card-actions">
+              <Button icon={Download} variant="primary" disabled={!operatorName.trim()} onClick={() => void createOperatorPeer()}>
                 Créer le profil WireGuard
               </Button>
             </div>
@@ -501,22 +542,49 @@ export function VpnPage() {
         {peers.length === 0 ? (
           <EmptyState icon={KeyRound} title="Aucun pair" description="Les pairs routeur et opérateur apparaîtront ici." />
         ) : (
-          <div className="data-list">
-            {peers.map((peer) => (
-              <div className="data-list-item" key={peer.id}>
-                <div className="data-list-item__icon"><Shield /></div>
-                <div className="data-list-item__content">
-                  <strong>{peer.name}</strong>
-                  <span>{peer.peer_type === "router" ? "MikroTik" : "Opérateur"} · {peer.assigned_address}</span>
+          <div className="vpn-peer-table">
+            <div aria-hidden="true" className="vpn-peer-table__header">
+              <span>Pair</span>
+              <span>Type</span>
+              <span>Adresse VPN</span>
+              <span>État</span>
+              <span>Action</span>
+            </div>
+            <div className="vpn-peer-list">
+              {peers.map((peer) => (
+                <div className="vpn-peer-row" key={peer.id}>
+                  <div className="vpn-peer-identity">
+                    <div className="data-list-item__icon"><Shield /></div>
+                    <div className="vpn-peer-identity__content">
+                      <strong>{peer.name}</strong>
+                      <span>{peer.peer_type === "router" ? "Accès au routeur" : "Poste de gestion"}</span>
+                    </div>
+                  </div>
+                  <div className="vpn-peer-cell">
+                    <span className="vpn-peer-cell__label">Type</span>
+                    <strong>{peer.peer_type === "router" ? "MikroTik" : "Opérateur"}</strong>
+                  </div>
+                  <div className="vpn-peer-cell">
+                    <span className="vpn-peer-cell__label">Adresse VPN</span>
+                    <code>{peer.assigned_address}</code>
+                  </div>
+                  <div className="vpn-peer-cell">
+                    <span className="vpn-peer-cell__label">État</span>
+                    <Badge status={peer.status === "active" ? "success" : peer.status === "revoked" ? "offline" : "warning"}>
+                      {peer.status === "active" ? "Actif" : peer.status === "revoked" ? "Révoqué" : "Brouillon"}
+                    </Badge>
+                  </div>
+                  <div className="vpn-peer-action">
+                    <span className="vpn-peer-cell__label">Action</span>
+                    {peer.status !== "revoked" ? (
+                      <Button icon={ShieldOff} variant="danger" onClick={() => void revokePeer(peer)}>Révoquer</Button>
+                    ) : (
+                      <span className="vpn-peer-action__empty">Aucune action</span>
+                    )}
+                  </div>
                 </div>
-                <Badge status={peer.status === "active" ? "success" : peer.status === "revoked" ? "offline" : "warning"}>
-                  {peer.status === "active" ? "Actif" : peer.status === "revoked" ? "Révoqué" : "Brouillon"}
-                </Badge>
-                {peer.status !== "revoked" ? (
-                  <Button icon={ShieldOff} variant="danger" onClick={() => void revokePeer(peer)}>Révoquer</Button>
-                ) : null}
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
         )}
       </Card>

@@ -185,6 +185,38 @@ export class RouterService {
     return this.run("removeHotspotUser", () => this.adapter.removeHotspotUser(username), "router.tickets.delete");
   }
 
+  bindHotspotUserToMac(username: string, macAddress: string) {
+    return this.run(
+      "bindHotspotUserToMac",
+      () => this.adapter.bindHotspotUserToMac(username, macAddress),
+      "router.tickets.sync"
+    );
+  }
+
+  clearHotspotUserMac(username: string) {
+    return this.run(
+      "clearHotspotUserMac",
+      () => this.adapter.clearHotspotUserMac(username),
+      "router.tickets.sync"
+    );
+  }
+
+  upsertHotspotBypass(binding: import("../../domain/router").HotspotBypassBinding) {
+    return this.run(
+      "upsertHotspotBypass",
+      () => this.adapter.upsertHotspotBypass(binding),
+      "router.settings.manage"
+    );
+  }
+
+  removeHotspotBypass(id: string, macAddress: string) {
+    return this.run(
+      "removeHotspotBypass",
+      () => this.adapter.removeHotspotBypass(id, macAddress),
+      "router.settings.manage"
+    );
+  }
+
   listActiveUsers() {
     return this.run("listActiveUsers", () => this.adapter.listActiveUsers());
   }

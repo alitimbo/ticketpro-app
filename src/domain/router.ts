@@ -95,6 +95,7 @@ export type HotspotUser = {
   uptime?: string | null;
   limitUptime?: string | null;
   limitBytesTotal?: number | null;
+  macAddress?: string | null;
 };
 
 export type HotspotUserDraft = {
@@ -133,6 +134,13 @@ export type ActiveHotspotUser = {
   sessionTimeLeft: string;
   downloadedBytes: number;
   uploadedBytes: number;
+};
+
+export type HotspotBypassBinding = {
+  address: string;
+  comment: string;
+  id: string;
+  macAddress: string;
 };
 
 export type RouterHealth = {

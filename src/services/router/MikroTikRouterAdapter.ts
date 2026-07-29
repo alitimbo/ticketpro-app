@@ -312,6 +312,64 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     await this.call("/ip/hotspot/user/remove", { numbers: user.id });
   }
 
+  async bindHotspotUserToMac(username: string, macAddress: string): Promise<HotspotUser> {
+    const user = await this.findUserByName(username);
+    await this.call("/ip/hotspot/user/set", {
+      "mac-address": normalizeMacAddress(macAddress),
+      numbers: user.id
+    });
+    return this.findUserByName(username);
+  }
+
+  async clearHotspotUserMac(username: string): Promise<HotspotUser> {
+    const user = await this.findUserByName(username);
+    await this.call("/ip/hotspot/user/set", {
+      "mac-address": "00:00:00:00:00:00",
+      numbers: user.id
+    });
+    return this.findUserByName(username);
+  }
+
+  async upsertHotspotBypass(
+    binding: import("../../domain/router").HotspotBypassBinding
+  ): Promise<void> {
+    const rows = await this.call("/ip/hotspot/ip-binding/print");
+    const macAddress = normalizeMacAddress(binding.macAddress);
+    const comment = `TicketPro infrastructure:${binding.id} ${binding.comment}`.slice(0, 120);
+    const managedCommentPrefix = `TicketPro infrastructure:${binding.id}`;
+    const existing = rows.find((row) =>
+      pick(row, "comment")?.startsWith(managedCommentPrefix)
+    );
+    const params = {
+      address: binding.address,
+      comment,
+      "mac-address": macAddress,
+      server: "all",
+      type: "bypassed"
+    };
+
+    const existingId = existing ? pick(existing, ".id", "id") : null;
+    if (existingId) {
+      await this.call("/ip/hotspot/ip-binding/set", {
+        ...params,
+        numbers: existingId
+      });
+    } else {
+      await this.call("/ip/hotspot/ip-binding/add", params);
+    }
+  }
+
+  async removeHotspotBypass(id: string, _macAddress: string): Promise<void> {
+    const rows = await this.call("/ip/hotspot/ip-binding/print");
+    const existing = rows.find(
+      (row) => pick(row, "comment")?.startsWith(`TicketPro infrastructure:${id}`)
+    );
+    const bindingId = existing ? pick(existing, ".id", "id") : null;
+    if (bindingId) {
+      await this.call("/ip/hotspot/ip-binding/remove", { numbers: bindingId });
+    }
+  }
+
   async listActiveUsers(): Promise<ActiveHotspotUser[]> {
     const rows = await this.call("/ip/hotspot/active/print");
 
@@ -531,8 +589,22 @@ function userRowToHotspotUser(row: RouterOsApiRow): HotspotUser {
     uploadedBytes,
     uptime,
     limitUptime,
-    limitBytesTotal: limitBytesTotal || null
+    limitBytesTotal: limitBytesTotal || null,
+    macAddress: normalizeOptionalMacAddress(pick(row, "mac-address"))
   };
+}
+
+function normalizeMacAddress(value: string): string {
+  const normalized = value.trim().replace(/-/g, ":").toUpperCase();
+  if (!/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(normalized)) {
+    throw new RouterAdapterError("router_rejected", "Invalid MAC address");
+  }
+  return normalized;
+}
+
+function normalizeOptionalMacAddress(value: string | undefined): string | null {
+  if (!value || value === "00:00:00:00:00:00") return null;
+  return value.trim().replace(/-/g, ":").toUpperCase();
 }
 
 function parsePlanComment(comment: string | undefined): Partial<HotspotPlan> {

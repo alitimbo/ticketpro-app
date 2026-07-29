@@ -4,6 +4,7 @@ export {
   completeSaasRegistration,
   createSaasTeamMember,
   getSaasAccount,
+  getSaasRouterAccessPolicy,
   inspectSaasInvitation,
   listSaasTeam,
   loginSaas,
@@ -19,10 +20,13 @@ export {
   resetSaasPassword,
   revokeSaasVpnPeer,
   storeSaasSession,
+  syncSaasRouterAccessPolicy,
   switchSaasOrganization,
   updateSaasTeamMember,
   upsertSaasVpnPeer,
   type SaasAuthResult,
   type SaasOrganizationUser,
+  type SaasRouterAccessPolicy,
+  SaasRequestError,
   type SaasSubscription
 } from "./SaasClient";

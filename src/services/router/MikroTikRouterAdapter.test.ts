@@ -376,4 +376,71 @@ describe("MikroTikRouterAdapter", () => {
       "in-interface": "ticketpro-vpn"
     });
   });
+
+  it("verrouille puis libère un utilisateur Hotspot par adresse MAC", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/user/print": [{
+        ".id": "*U1",
+        "mac-address": "AA:BB:CC:DD:EE:01",
+        name: "123456",
+        profile: "plan-1"
+      }]
+    });
+    const adapter = createAdapter(transport);
+
+    await adapter.bindHotspotUserToMac("123456", "aa-bb-cc-dd-ee-01");
+    await adapter.clearHotspotUserMac("123456");
+
+    const setCalls = transport.calls.filter(
+      (call) => call.command === "/ip/hotspot/user/set"
+    );
+    expect(setCalls[0]?.params).toEqual({
+      "mac-address": "AA:BB:CC:DD:EE:01",
+      numbers: "*U1"
+    });
+    expect(setCalls[1]?.params).toEqual({
+      "mac-address": "00:00:00:00:00:00",
+      numbers: "*U1"
+    });
+  });
+
+  it("gère uniquement ses propres bypass d'infrastructure", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/ip-binding/print": [
+        {
+          ".id": "*MANUAL",
+          comment: "Règle installateur",
+          "mac-address": "AA:BB:CC:DD:EE:10"
+        },
+        {
+          ".id": "*TP1",
+          comment: "TicketPro infrastructure:antenna-1 Ancien nom",
+          "mac-address": "AA:BB:CC:DD:EE:11"
+        }
+      ]
+    });
+    const adapter = createAdapter(transport);
+
+    await adapter.upsertHotspotBypass({
+      address: "192.168.88.10",
+      comment: "Antenne nord",
+      id: "antenna-1",
+      macAddress: "AA:BB:CC:DD:EE:10"
+    });
+    await adapter.removeHotspotBypass("manual-rule", "AA:BB:CC:DD:EE:10");
+    await adapter.removeHotspotBypass("antenna-1", "AA:BB:CC:DD:EE:10");
+
+    expect(
+      transport.calls.find((call) => call.command === "/ip/hotspot/ip-binding/set")?.params
+    ).toMatchObject({
+      address: "192.168.88.10",
+      numbers: "*TP1",
+      type: "bypassed"
+    });
+    const removeCalls = transport.calls.filter(
+      (call) => call.command === "/ip/hotspot/ip-binding/remove"
+    );
+    expect(removeCalls).toHaveLength(1);
+    expect(removeCalls[0]?.params).toEqual({ numbers: "*TP1" });
+  });
 });

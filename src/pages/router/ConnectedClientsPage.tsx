@@ -20,6 +20,11 @@ import {
 } from "lucide-react";
 import { useAuth } from "../../app/auth/AuthProvider";
 import {
+  RouterAccessPolicySyncService,
+  routerAccessPolicyCloudId,
+  VoucherDeviceBindingService
+} from "../../services/access";
+import {
   FakeRouterAdapter,
   RouterService,
   RouterServiceError,
@@ -59,7 +64,7 @@ import {
 
 type PendingAction = {
   client: ConnectedClientViewModel;
-  type: "disconnect" | "disable";
+  type: "disconnect" | "disable" | "release";
 } | null;
 
 type Notice = {
@@ -74,6 +79,8 @@ export function ConnectedClientsPage() {
   const canDisconnect = session?.permissions.includes("router.clients.disconnect") ?? false;
   const canDisable =
     canDisconnect && (session?.permissions.includes("router.tickets.disable") ?? false);
+  const canManageDeviceBinding =
+    session?.permissions.includes("router.tickets.sync") ?? false;
   const [clients, setClients] = useState<ConnectedClientViewModel[]>([]);
   const [filters, setFilters] = useState<ConnectedClientFilters>(emptyConnectedClientFilters);
   const [, setLogs] = useState<RouterActionLog[]>([]);
@@ -90,6 +97,14 @@ export function ConnectedClientsPage() {
   const activeSessionCacheRepository = useMemo(() => new ActiveSessionCacheRepository(database), [database]);
   const planRepository = useMemo(() => new HotspotPlanRepository(database), [database]);
   const ticketRepository = useMemo(() => new TicketRepository(database), [database]);
+  const accessPolicyService = useMemo(
+    () => new RouterAccessPolicySyncService(database),
+    [database]
+  );
+  const bindingService = useMemo(
+    () => new VoucherDeviceBindingService(ticketRepository),
+    [ticketRepository]
+  );
   const applyClients = (nextClients: ConnectedClientViewModel[]) => {
     setClients(nextClients);
     setSelectedClient((current) =>
@@ -145,6 +160,47 @@ export function ConnectedClientsPage() {
 
       if (isPersistent) {
         await activeSessionCacheRepository.replaceForRouter(routerId, activeUsers);
+        if (session) {
+          const connections = persistedRouter
+            ? await connectionRepository.listByRouter(routerId)
+            : [];
+          const [policy, ticketRecords] = await Promise.all([
+            accessPolicyService.load(
+              session.account_id,
+              routerId,
+              persistedRouter
+                ? routerAccessPolicyCloudId(persistedRouter, connections)
+                : routerId
+            ),
+            ticketRepository.listByRouter(routerId)
+          ]);
+          if (policy.policy.lockVoucherToFirstMac && canManageDeviceBinding) {
+            const bindingResult = await bindingService.synchronize({
+              accountId: session.account_id,
+              activeUsers,
+              hotspotUsers,
+              routerId,
+              routerService: service,
+              tickets: ticketRecords
+            });
+            if (bindingResult.errors.length > 0) {
+              setNotice({
+                status: "error",
+                text: `${bindingResult.errors.length} voucher(s) n'ont pas pu être verrouillés. Consultez les logs puis réessayez.`
+              });
+            } else if (bindingResult.conflicts.length > 0) {
+              setNotice({
+                status: "error",
+                text: `${bindingResult.conflicts.length} partage ou changement d’appareil suspect détecté.`
+              });
+            } else if (bindingResult.boundUsernames.length > 0) {
+              setNotice({
+                status: "success",
+                text: `${bindingResult.boundUsernames.length} voucher(s) verrouillé(s) sur leur premier appareil.`
+              });
+            }
+          }
+        }
       }
       applyClients(buildConnectedClientViewModels(activeUsers, hotspotUsers, plans, router));
       setDataSource("live");
@@ -188,7 +244,7 @@ export function ConnectedClientsPage() {
 
   useEffect(() => {
     void loadClients();
-  }, [activeSessionCacheRepository, connectionRepository, database, isInitialized, isPersistent, planRepository, routerId, routerRepository, session, ticketRepository]);
+  }, [accessPolicyService, activeSessionCacheRepository, bindingService, canManageDeviceBinding, connectionRepository, database, isInitialized, isPersistent, planRepository, routerId, routerRepository, session, ticketRepository]);
 
   const filteredClients = useMemo(() => filterConnectedClients(clients, filters), [clients, filters]);
   const planOptions = useMemo(() => getConnectedClientPlanOptions(clients), [clients]);
@@ -228,6 +284,36 @@ export function ConnectedClientsPage() {
 
     try {
       const service = await createService();
+      if (type === "release") {
+        if (!session) throw new Error("Session administrateur introuvable.");
+        const ticket = (await ticketRepository.listByRouter(routerId)).find(
+          (item) => item.username === client.username
+        );
+        if (!ticket) throw new Error("Voucher local introuvable.");
+        await bindingService.clear({
+          accountId: session.account_id,
+          routerId,
+          routerService: service,
+          ticket
+        });
+        try {
+          await service.disconnectActiveUser(client.username);
+        } catch (error) {
+          if (!(error instanceof RouterServiceError && error.code === "hotspot_not_found")) {
+            throw error;
+          }
+        }
+        if (isPersistent) {
+          await activeSessionCacheRepository.removeByUsername(routerId, client.username);
+        }
+        setClients((current) => current.filter((item) => item.username !== client.username));
+        setSelectedClient(null);
+        setNotice({
+          status: "success",
+          text: "Appareil libéré. Le prochain appareil qui utilise ce voucher deviendra l’appareil autorisé."
+        });
+        return;
+      }
       if (type === "disable") {
         await service.disableHotspotUser(client.username);
         ticketDisabled = true;
@@ -400,6 +486,7 @@ export function ConnectedClientsPage() {
               <ConnectedClientRow
                 canDisable={canDisable}
                 canDisconnect={canDisconnect}
+                canReleaseDevice={canManageDeviceBinding}
                 client={client}
                 isBusy={busyUsername === client.username}
                 isCached={dataSource === "cache"}
@@ -409,6 +496,7 @@ export function ConnectedClientsPage() {
                 onDetail={() => setSelectedClient(client)}
                 onDisable={() => setPendingAction({ client, type: "disable" })}
                 onDisconnect={() => setPendingAction({ client, type: "disconnect" })}
+                onReleaseDevice={() => setPendingAction({ client, type: "release" })}
               />
             ))}
           </div>
@@ -427,16 +515,30 @@ export function ConnectedClientsPage() {
       </Card>
 
       <ConfirmDialog
-        confirmLabel={pendingAction?.type === "disable" ? "Désactiver" : "Déconnecter"}
+        confirmLabel={
+          pendingAction?.type === "disable"
+            ? "Désactiver"
+            : pendingAction?.type === "release"
+              ? "Libérer"
+              : "Déconnecter"
+        }
         description={
           pendingAction?.type === "disable"
             ? `Le ticket ${pendingAction.client.username} sera désactivé puis déconnecté.`
+            : pendingAction?.type === "release"
+              ? `Le verrou MAC du voucher ${pendingAction.client.username} sera supprimé et la session actuelle déconnectée.`
             : `Le client ${pendingAction?.client.username ?? ""} sera déconnecté.`
         }
         isOpen={Boolean(pendingAction)}
         onCancel={() => setPendingAction(null)}
         onConfirm={() => void confirmPendingAction()}
-        title={pendingAction?.type === "disable" ? "Désactiver le ticket ?" : "Déconnecter ce client ?"}
+        title={
+          pendingAction?.type === "disable"
+            ? "Désactiver le ticket ?"
+            : pendingAction?.type === "release"
+              ? "Libérer l’appareil associé ?"
+              : "Déconnecter ce client ?"
+        }
       />
 
       <ClientDetailDialog
@@ -451,6 +553,7 @@ export function ConnectedClientsPage() {
 type ConnectedClientRowProps = {
   canDisable: boolean;
   canDisconnect: boolean;
+  canReleaseDevice: boolean;
   client: ConnectedClientViewModel;
   isBusy: boolean;
   isCached: boolean;
@@ -459,11 +562,13 @@ type ConnectedClientRowProps = {
   onDetail: () => void;
   onDisable: () => void;
   onDisconnect: () => void;
+  onReleaseDevice: () => void;
 };
 
 function ConnectedClientRow({
   canDisable,
   canDisconnect,
+  canReleaseDevice,
   client,
   isBusy,
   isCached,
@@ -471,7 +576,8 @@ function ConnectedClientRow({
   onCopyMac,
   onDetail,
   onDisable,
-  onDisconnect
+  onDisconnect,
+  onReleaseDevice
 }: ConnectedClientRowProps) {
   return (
     <article
@@ -523,6 +629,9 @@ function ConnectedClientRow({
             : []),
           ...(canDisable
             ? [{ icon: Ban, label: "Désactiver ticket", onSelect: onDisable }]
+            : []),
+          ...(canReleaseDevice
+            ? [{ icon: ShieldCheck, label: "Libérer l’appareil associé", onSelect: onReleaseDevice }]
             : [])
         ]}
       />

@@ -15,6 +15,7 @@ const masterToken = "ticketpro-integration-master-token";
 const hubMasterToken = "ticketpro-integration-hub-master-token";
 const databasePath = path.join(process.cwd(), `license-integration-${process.pid}.sqlite`);
 let server;
+let serverStderr = "";
 let ipayServer;
 let hubServer;
 const ipayPayments = new Map();
@@ -35,7 +36,10 @@ async function api(pathname, { method = "POST", token, body, headers = {} } = {}
 }
 
 async function waitForServer() {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (server?.exitCode !== null) {
+      throw new Error(`Le serveur de licences s'est arrêté au démarrage.\n${serverStderr}`.trim());
+    }
     try {
       const result = await api("/health", { method: "GET" });
       if (result.status === 200) return;
@@ -137,6 +141,9 @@ before(async () => {
     },
     stdio: ["ignore", "ignore", "pipe"]
   });
+  server.stderr.on("data", (chunk) => {
+    serverStderr += chunk.toString("utf8");
+  });
   await waitForServer();
 });
 
@@ -225,6 +232,99 @@ test("l'essai SaaS dure 7 jours, limite à un routeur et un forfait payant le re
     }
   });
   assert.equal(secondTrial.status, 409);
+});
+
+test("les politiques réseau sont versionnées, isolées par organisation et protégées contre les conflits", async () => {
+  const owner = await api("/v1/saas/register-trial", {
+    body: {
+      organization_name: "Politique Réseau A",
+      name: "Propriétaire A",
+      email: "policy.owner.a@example.com",
+      password: "PolitiqueSimple123",
+      confirm_password: "PolitiqueSimple123"
+    }
+  });
+  assert.equal(owner.status, 200);
+  const policy = {
+    antiSharingMode: "observe",
+    infrastructureDevices: [{
+      id: "antenna-north",
+      internetBypass: true,
+      ipAddress: "192.168.88.10",
+      macAddress: "aa-bb-cc-dd-ee-10",
+      mode: "bridge",
+      name: "Antenne nord",
+      type: "antenna"
+    }],
+    lockVoucherToFirstMac: true,
+    monitorIpv4Ttl: true,
+    monitorIpv6HopLimit: false
+  };
+  const created = await api("/v1/saas/router-access-policy", {
+    token: owner.payload.session.token,
+    body: {
+      base_revision: 0,
+      policy,
+      router_id: "router-shared-name"
+    }
+  });
+  assert.equal(created.status, 200);
+  assert.equal(created.payload.policy.revision, 1);
+  assert.equal(
+    created.payload.policy.policy.infrastructureDevices[0].macAddress,
+    "AA:BB:CC:DD:EE:10"
+  );
+
+  const fetched = await api(
+    "/v1/saas/router-access-policy?router_id=router-shared-name",
+    { method: "GET", token: owner.payload.session.token }
+  );
+  assert.equal(fetched.status, 200);
+  assert.equal(fetched.payload.policy.policy.lockVoucherToFirstMac, true);
+
+  const conflict = await api("/v1/saas/router-access-policy", {
+    token: owner.payload.session.token,
+    body: {
+      base_revision: 0,
+      policy,
+      router_id: "router-shared-name"
+    }
+  });
+  assert.equal(conflict.status, 409);
+  assert.equal(conflict.payload.details.code, "ROUTER_ACCESS_POLICY_CONFLICT");
+  assert.equal(conflict.payload.details.remote_policy.revision, 1);
+
+  const invalidNatBypass = await api("/v1/saas/router-access-policy", {
+    token: owner.payload.session.token,
+    body: {
+      base_revision: 1,
+      policy: {
+        ...policy,
+        infrastructureDevices: [{
+          ...policy.infrastructureDevices[0],
+          mode: "router_nat"
+        }]
+      },
+      router_id: "router-shared-name"
+    }
+  });
+  assert.equal(invalidNatBypass.status, 400);
+
+  const otherOrganization = await api("/v1/saas/register-trial", {
+    body: {
+      organization_name: "Politique Réseau B",
+      name: "Propriétaire B",
+      email: "policy.owner.b@example.com",
+      password: "PolitiqueSimple123",
+      confirm_password: "PolitiqueSimple123"
+    }
+  });
+  const isolatedRead = await api(
+    "/v1/saas/router-access-policy?router_id=router-shared-name",
+    { method: "GET", token: otherOrganization.payload.session.token }
+  );
+  assert.equal(isolatedRead.status, 200);
+  assert.equal(isolatedRead.payload.policy, null);
 });
 
 test("une inscription abandonnée sans essai ni paiement ne peut pas ouvrir de session", async () => {

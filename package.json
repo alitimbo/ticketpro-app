@@ -12,6 +12,7 @@
     "test": "vitest run",
     "test:license-api": "node --test infra/license-api/server.integration.mjs",
     "type-check": "tsc --noEmit",
+    "version:set": "node scripts/set-version.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",

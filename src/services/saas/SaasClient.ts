@@ -8,6 +8,7 @@ import {
 } from "../licensing";
 import type { InitiatedPaymentOrder, IpayPaymentType } from "../payments";
 import type { Permission, UserRole } from "../../domain/auth";
+import type { RouterAccessPolicy } from "../access/RouterAccessPolicyService";
 
 const apiUrl = String(import.meta.env.VITE_LICENSE_API_URL ?? "").replace(/\/$/, "");
 const sessionStorageKey = "ticketpro:saas_session";
@@ -75,6 +76,25 @@ export type SaasAuthResult = {
     can_manage_routers: boolean;
   };
 };
+
+export type SaasRouterAccessPolicy = {
+  organization_id: string;
+  policy: RouterAccessPolicy;
+  revision: number;
+  router_id: string;
+  updated_at: string;
+};
+
+export class SaasRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly details?: Record<string, unknown>
+  ) {
+    super(message);
+    this.name = "SaasRequestError";
+  }
+}
 
 export async function registerSaasAndInitiatePayment(input: {
   organizationName: string;
@@ -342,6 +362,37 @@ export async function revokeSaasVpnPeer(input: {
   );
 }
 
+export async function getSaasRouterAccessPolicy(
+  routerId: string
+): Promise<SaasRouterAccessPolicy | null> {
+  const token = await requireSessionToken();
+  const result = await request<{ policy: SaasRouterAccessPolicy | null }>(
+    `/v1/saas/router-access-policy?router_id=${encodeURIComponent(routerId)}`,
+    undefined,
+    token,
+    "GET"
+  );
+  return result.policy;
+}
+
+export async function syncSaasRouterAccessPolicy(input: {
+  baseRevision: number;
+  policy: RouterAccessPolicy;
+  routerId: string;
+}): Promise<SaasRouterAccessPolicy> {
+  const token = await requireSessionToken();
+  const result = await request<{ policy: SaasRouterAccessPolicy }>(
+    "/v1/saas/router-access-policy",
+    {
+      base_revision: input.baseRevision,
+      policy: input.policy,
+      router_id: input.routerId
+    },
+    token
+  );
+  return result.policy;
+}
+
 export async function logoutSaas(): Promise<void> {
   const token = await readSaasSession();
   try {
@@ -387,7 +438,16 @@ async function request<T>(
     },
     ...(body ? { body: JSON.stringify(body) } : {})
   });
-  const payload = (await response.json().catch(() => ({}))) as T & { error?: string };
-  if (!response.ok) throw new Error(payload.error ?? `Erreur TicketPro (${response.status}).`);
+  const payload = (await response.json().catch(() => ({}))) as T & {
+    details?: Record<string, unknown>;
+    error?: string;
+  };
+  if (!response.ok) {
+    throw new SaasRequestError(
+      payload.error ?? `Erreur TicketPro (${response.status}).`,
+      response.status,
+      payload.details
+    );
+  }
   return payload;
 }

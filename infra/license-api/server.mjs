@@ -304,6 +304,17 @@ db.exec(`
     updated_at TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS router_access_policies (
+    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    router_id TEXT NOT NULL,
+    policy_json TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+    updated_by_user_id TEXT NOT NULL REFERENCES organization_users(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (organization_id, router_id)
+  );
+
   CREATE TABLE IF NOT EXISTS reseller_registrations (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL UNIQUE,
@@ -385,6 +396,8 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_organization_sessions_token ON organization_sessions(token_hash);
   CREATE INDEX IF NOT EXISTS idx_organization_subscriptions_organization
     ON organization_subscriptions(organization_id, current_period_end);
+  CREATE INDEX IF NOT EXISTS idx_router_access_policies_organization
+    ON router_access_policies(organization_id, updated_at);
   CREATE INDEX IF NOT EXISTS idx_payment_orders_transaction ON payment_orders(transaction_id);
   CREATE INDEX IF NOT EXISTS idx_payment_orders_reseller ON payment_orders(reseller_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_payment_orders_registration ON payment_orders(reseller_registration_id);
@@ -868,6 +881,24 @@ const statements = {
   findLatestOrganizationSubscription: db.prepare(`
     SELECT * FROM organization_subscriptions
     WHERE organization_id = ? ORDER BY current_period_end DESC LIMIT 1
+  `),
+  findRouterAccessPolicy: db.prepare(`
+    SELECT organization_id, router_id, policy_json, revision,
+      updated_by_user_id, created_at, updated_at
+    FROM router_access_policies
+    WHERE organization_id = ? AND router_id = ?
+  `),
+  insertRouterAccessPolicy: db.prepare(`
+    INSERT INTO router_access_policies (
+      organization_id, router_id, policy_json, revision,
+      updated_by_user_id, created_at, updated_at
+    ) VALUES (?, ?, ?, 1, ?, ?, ?)
+  `),
+  updateRouterAccessPolicy: db.prepare(`
+    UPDATE router_access_policies
+    SET policy_json = ?, revision = revision + 1,
+      updated_by_user_id = ?, updated_at = ?
+    WHERE organization_id = ? AND router_id = ? AND revision = ?
   `),
   linkPaymentOrderOrganization: db.prepare(`
     UPDATE payment_orders SET organization_id = ?, organization_user_id = ?, updated_at = ?
@@ -1608,6 +1639,101 @@ function requireOrganizationPermission(request, permission, options = {}) {
     throw new HttpError(403, "Votre rôle n'autorise pas cette action.");
   }
   return context;
+}
+
+function requireOrganizationRouterPermission(request, permission, routerId) {
+  const context = requireOrganizationPermission(
+    request,
+    permission,
+    { requireActiveSubscription: true }
+  );
+  const access = organizationUserRouterAccess(context.membership);
+  if (access.mode !== "all" && !access.router_ids.includes(routerId)) {
+    throw new HttpError(403, "Ce profil n'est pas autorisé à gérer ce routeur.");
+  }
+  return context;
+}
+
+function normalizeRouterAccessPolicy(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new HttpError(400, "Politique réseau invalide.");
+  }
+  const antiSharingMode = String(value.antiSharingMode ?? "");
+  if (!["disabled", "observe", "strict"].includes(antiSharingMode)) {
+    throw new HttpError(400, "Mode anti-partage invalide.");
+  }
+  if (!Array.isArray(value.infrastructureDevices) || value.infrastructureDevices.length > 100) {
+    throw new HttpError(400, "La liste des équipements d'infrastructure est invalide.");
+  }
+  const seenIds = new Set();
+  const seenMacs = new Set();
+  const seenIps = new Set();
+  const infrastructureDevices = value.infrastructureDevices.map((rawDevice) => {
+    if (!rawDevice || typeof rawDevice !== "object" || Array.isArray(rawDevice)) {
+      throw new HttpError(400, "Équipement d'infrastructure invalide.");
+    }
+    const id = String(rawDevice.id ?? "").trim();
+    const name = String(rawDevice.name ?? "").trim();
+    const macAddress = String(rawDevice.macAddress ?? "")
+      .trim()
+      .replaceAll("-", ":")
+      .toUpperCase();
+    const ipAddress = String(rawDevice.ipAddress ?? "").trim();
+    const mode = String(rawDevice.mode ?? "");
+    const type = String(rawDevice.type ?? "");
+    const internetBypass = rawDevice.internetBypass === true;
+    if (!id || id.length > 200 || seenIds.has(id)) {
+      throw new HttpError(400, "Identifiant d'équipement invalide ou dupliqué.");
+    }
+    if (!name || name.length > 200) {
+      throw new HttpError(400, "Nom d'équipement invalide.");
+    }
+    if (!/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(macAddress) || seenMacs.has(macAddress)) {
+      throw new HttpError(400, "Adresse MAC invalide ou dupliquée.");
+    }
+    if (!isIpv4Address(ipAddress) || seenIps.has(ipAddress)) {
+      throw new HttpError(400, "Adresse IP invalide ou dupliquée.");
+    }
+    if (!["bridge", "router_nat", "unknown"].includes(mode)) {
+      throw new HttpError(400, "Mode réseau d'équipement invalide.");
+    }
+    if (!["access_point", "antenna", "other", "repeater"].includes(type)) {
+      throw new HttpError(400, "Type d'équipement invalide.");
+    }
+    if (internetBypass && mode !== "bridge") {
+      throw new HttpError(400, "Le bypass Internet exige un équipement en bridge transparent.");
+    }
+    seenIds.add(id);
+    seenMacs.add(macAddress);
+    seenIps.add(ipAddress);
+    return { id, internetBypass, ipAddress, macAddress, mode, name, type };
+  });
+  return {
+    antiSharingMode,
+    infrastructureDevices,
+    lockVoucherToFirstMac: value.lockVoucherToFirstMac === true,
+    monitorIpv4Ttl: value.monitorIpv4Ttl === true,
+    monitorIpv6HopLimit: value.monitorIpv6HopLimit === true
+  };
+}
+
+function isIpv4Address(value) {
+  const parts = String(value).split(".");
+  return parts.length === 4 && parts.every((part) => {
+    const number = Number(part);
+    return /^\d{1,3}$/.test(part) && number >= 0 && number <= 255;
+  });
+}
+
+function routerAccessPolicyResponse(record) {
+  if (!record) return null;
+  return {
+    organization_id: record.organization_id,
+    router_id: record.router_id,
+    policy: JSON.parse(record.policy_json),
+    revision: Number(record.revision),
+    updated_at: record.updated_at
+  };
 }
 
 function requireOrganizationMember(context, body) {
@@ -3054,6 +3180,89 @@ const handlers = [
       router_limit: Number(context.subscription.router_limit),
       expires_at: context.subscription.current_period_end
     };
+  }),
+
+  route("GET", "/v1/saas/router-access-policy", async (request) => {
+    const routerId = String(
+      new URL(request.url, "http://ticketpro.local").searchParams.get("router_id") ?? ""
+    ).trim();
+    if (!routerId || routerId.length > 200) {
+      throw new HttpError(400, "Identifiant de routeur invalide.");
+    }
+    const context = requireOrganizationRouterPermission(
+      request,
+      "router.settings",
+      routerId
+    );
+    return {
+      policy: routerAccessPolicyResponse(
+        statements.findRouterAccessPolicy.get(context.organization.id, routerId)
+      )
+    };
+  }),
+
+  route("POST", "/v1/saas/router-access-policy", async (request, body) => {
+    const routerId = requireText(body, "router_id", 200);
+    const context = requireOrganizationRouterPermission(
+      request,
+      "router.settings.manage",
+      routerId
+    );
+    const policy = normalizeRouterAccessPolicy(body.policy);
+    const baseRevision = Number(body.base_revision ?? 0);
+    if (!Number.isInteger(baseRevision) || baseRevision < 0) {
+      throw new HttpError(400, "Révision de synchronisation invalide.");
+    }
+    const existing = statements.findRouterAccessPolicy.get(
+      context.organization.id,
+      routerId
+    );
+    if (Number(existing?.revision ?? 0) !== baseRevision) {
+      throw new HttpError(409, "La politique réseau a été modifiée depuis un autre appareil.", {
+        code: "ROUTER_ACCESS_POLICY_CONFLICT",
+        remote_policy: routerAccessPolicyResponse(existing)
+      });
+    }
+    const updatedAt = nowIso();
+    if (existing) {
+      const result = statements.updateRouterAccessPolicy.run(
+        JSON.stringify(policy),
+        context.user.id,
+        updatedAt,
+        context.organization.id,
+        routerId,
+        baseRevision
+      );
+      if (Number(result.changes) !== 1) {
+        const latest = statements.findRouterAccessPolicy.get(
+          context.organization.id,
+          routerId
+        );
+        throw new HttpError(409, "La politique réseau a été modifiée depuis un autre appareil.", {
+          code: "ROUTER_ACCESS_POLICY_CONFLICT",
+          remote_policy: routerAccessPolicyResponse(latest)
+        });
+      }
+    } else {
+      statements.insertRouterAccessPolicy.run(
+        context.organization.id,
+        routerId,
+        JSON.stringify(policy),
+        context.user.id,
+        updatedAt,
+        updatedAt
+      );
+    }
+    const saved = statements.findRouterAccessPolicy.get(
+      context.organization.id,
+      routerId
+    );
+    logEvent(request, null, "router_access_policy_synced", context.organization.id, null, {
+      router_id: routerId,
+      revision: Number(saved.revision),
+      infrastructure_device_count: policy.infrastructureDevices.length
+    });
+    return { policy: routerAccessPolicyResponse(saved) };
   }),
 
   route("POST", "/v1/payments/orders/organization", async (request, body) => {

@@ -89,6 +89,22 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
     return this.delegate.removeHotspotUser(username);
   }
 
+  bindHotspotUserToMac(username: string, macAddress: string) {
+    return this.delegate.bindHotspotUserToMac(username, macAddress);
+  }
+
+  clearHotspotUserMac(username: string) {
+    return this.delegate.clearHotspotUserMac(username);
+  }
+
+  upsertHotspotBypass(binding: import("../../domain/router").HotspotBypassBinding) {
+    return this.delegate.upsertHotspotBypass(binding);
+  }
+
+  removeHotspotBypass(id: string, macAddress: string) {
+    return this.delegate.removeHotspotBypass(id, macAddress);
+  }
+
   listActiveUsers() {
     return this.delegate.listActiveUsers();
   }
