@@ -3,5 +3,9 @@
   "identifier": "default",
   "description": "Permissions par défaut de l'application",
   "windows": ["main"],
-  "permissions": ["opener:default"]
+  "permissions": [
+    "opener:default",
+    "process:default",
+    "updater:default"
+  ]
 }

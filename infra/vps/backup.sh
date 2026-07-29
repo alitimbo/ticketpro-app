@@ -35,6 +35,9 @@ docker compose -f "$INFRA_DIR/license-api/docker-compose.yml" \
 
 docker cp ticketpro-license-api:/data/licenses-backup.sqlite \
   "$WORK_DIR/payload/license-api/licenses.sqlite"
+mkdir -p "$WORK_DIR/payload/license-api/app-updates"
+docker cp ticketpro-license-api:/data/app-updates/stable.json \
+  "$WORK_DIR/payload/license-api/app-updates/stable.json" 2>/dev/null || true
 
 docker compose -f "$INFRA_DIR/wireguard-hub/docker-compose.yml" \
   --project-directory "$INFRA_DIR/wireguard-hub" \
@@ -44,6 +47,13 @@ cp "$INFRA_DIR/license-api/.env" "$WORK_DIR/payload/license-api/.env"
 cp "$INFRA_DIR/wireguard-hub/.env" "$WORK_DIR/payload/wireguard-hub/.env"
 cp "$SCRIPT_DIR/.env" "$WORK_DIR/payload/vps/.env"
 cp -R "$INFRA_DIR/wireguard-hub/wireguard" "$WORK_DIR/payload/wireguard-hub/wireguard"
+
+RELEASES_DIR=$(sed -n 's/^TICKETPRO_RELEASES_DIR=//p' "$SCRIPT_DIR/.env" 2>/dev/null | tail -n 1)
+RELEASES_DIR=${RELEASES_DIR:-/opt/ticketpro/releases}
+mkdir -p "$WORK_DIR/payload/vps/releases"
+if [ -d "$RELEASES_DIR" ]; then
+  cp -R "$RELEASES_DIR/." "$WORK_DIR/payload/vps/releases/"
+fi
 
 if [ -d "$INFRA_DIR/wireguard-hub/data" ]; then
   cp -R "$INFRA_DIR/wireguard-hub/data" "$WORK_DIR/payload/wireguard-hub/data"

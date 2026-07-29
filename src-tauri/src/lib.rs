@@ -9,6 +9,8 @@ mod wireguard;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             database::initialize_database(app.handle()).map_err(std::io::Error::other)?;
             Ok(())

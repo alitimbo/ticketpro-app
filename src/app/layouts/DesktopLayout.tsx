@@ -5,6 +5,7 @@ import { useAuth } from "../auth/AuthProvider";
 import { getRouterNavigation, globalNavigation } from "../navigation/routes";
 import { Button, SidebarItem, StatusDot } from "../../shared/ui";
 import ticketProLogo from "../../../src-tauri/icons/icon.png";
+import { AppUpdateNotice } from "./AppUpdateNotice";
 
 type DesktopLayoutProps = {
   scope: "global" | "router";
@@ -97,6 +98,9 @@ export function DesktopLayout({ scope }: DesktopLayoutProps) {
       </aside>
 
       <main className="content">
+        <AppUpdateNotice
+          canManageUpdates={Boolean(session?.permissions.includes("global.settings"))}
+        />
         {isRouterScope && canSelectRouter ? (
           <Button icon={ArrowLeft} onClick={() => navigate("/routeurs")} variant="ghost">
             Changer de routeur

@@ -1,9 +1,18 @@
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import process from "node:process";
 
 if (process.platform !== "win32") {
   throw new Error("Le build Windows natif doit être exécuté depuis Windows.");
 }
+
+const signingPrivateKeyPath = String(
+  process.env.TAURI_SIGNING_PRIVATE_KEY_PATH ?? ""
+).trim();
+const signingPrivateKey = String(process.env.TAURI_SIGNING_PRIVATE_KEY ?? "").trim()
+  || (signingPrivateKeyPath
+    ? readFileSync(signingPrivateKeyPath, "utf8").trim()
+    : "");
 
 const child = spawn(
   process.execPath,
@@ -12,6 +21,7 @@ const child = spawn(
     stdio: "inherit",
     env: {
       ...process.env,
+      ...(signingPrivateKey ? { TAURI_SIGNING_PRIVATE_KEY: signingPrivateKey } : {}),
       CARGO_BUILD_JOBS: "1",
       CARGO_INCREMENTAL: "0"
     }

@@ -8,6 +8,8 @@ import nodemailer from "nodemailer";
 const PORT = Number(process.env.LICENSE_PORT ?? 8787);
 const HOST = process.env.LICENSE_BIND ?? "127.0.0.1";
 const DB_PATH = process.env.LICENSE_DB ?? "/data/licenses.sqlite";
+const APP_UPDATE_MANIFEST_PATH = process.env.APP_UPDATE_MANIFEST_PATH
+  ?? path.join(path.dirname(DB_PATH), "app-updates", "stable.json");
 const MASTER_TOKEN = process.env.LICENSE_MASTER_TOKEN ?? "";
 const HASH_SECRET = process.env.LICENSE_HASH_SECRET ?? "";
 const IPAY_BASE_URL = String(process.env.IPAY_BASE_URL ?? "https://api.i-pay.money").replace(/\/$/, "");
@@ -2165,12 +2167,23 @@ class HttpError extends Error {
   }
 }
 
+const NO_CONTENT = Symbol("NO_CONTENT");
+
 function route(method, pathname, handler) {
   return async (request, response) => {
     if (request.method !== method || request.url.split("?")[0] !== pathname) return false;
     try {
       const body = method === "GET" ? {} : await readJson(request);
-      sendJson(response, 200, await handler(request, body), request);
+      const payload = await handler(request, body);
+      if (payload === NO_CONTENT) {
+        response.writeHead(204, {
+          "cache-control": "no-store",
+          "access-control-allow-origin": allowedCorsOrigin(request)
+        });
+        response.end();
+      } else {
+        sendJson(response, 200, payload, request);
+      }
     } catch (error) {
       const status = error instanceof HttpError ? error.status : 500;
       sendJson(response, status, {
@@ -2181,6 +2194,67 @@ function route(method, pathname, handler) {
     }
     return true;
   };
+}
+
+function parseSemver(value, fieldName) {
+  const match = String(value ?? "").trim().match(
+    /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/
+  );
+  if (!match) throw new HttpError(400, `${fieldName} n'est pas une version SemVer valide.`);
+  return {
+    core: [Number(match[1]), Number(match[2]), Number(match[3])],
+    prerelease: match[4]?.split(".") ?? []
+  };
+}
+
+function compareSemver(leftValue, rightValue) {
+  const left = parseSemver(leftValue, "version");
+  const right = parseSemver(rightValue, "version");
+  for (let index = 0; index < 3; index += 1) {
+    if (left.core[index] !== right.core[index]) {
+      return left.core[index] > right.core[index] ? 1 : -1;
+    }
+  }
+  if (left.prerelease.length === 0 || right.prerelease.length === 0) {
+    return left.prerelease.length === right.prerelease.length
+      ? 0
+      : left.prerelease.length === 0 ? 1 : -1;
+  }
+  const length = Math.max(left.prerelease.length, right.prerelease.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftPart = left.prerelease[index];
+    const rightPart = right.prerelease[index];
+    if (leftPart === undefined || rightPart === undefined) {
+      return leftPart === rightPart ? 0 : leftPart === undefined ? -1 : 1;
+    }
+    if (leftPart === rightPart) continue;
+    const leftNumeric = /^\d+$/.test(leftPart);
+    const rightNumeric = /^\d+$/.test(rightPart);
+    if (leftNumeric && rightNumeric) return Number(leftPart) > Number(rightPart) ? 1 : -1;
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    return leftPart > rightPart ? 1 : -1;
+  }
+  return 0;
+}
+
+function readAppUpdateManifest() {
+  let raw;
+  try {
+    const stats = fs.statSync(APP_UPDATE_MANIFEST_PATH);
+    if (!stats.isFile() || stats.size > 1024 * 1024) {
+      throw new Error("Le manifeste de mise à jour est invalide.");
+    }
+    raw = fs.readFileSync(APP_UPDATE_MANIFEST_PATH, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+  const manifest = JSON.parse(raw);
+  parseSemver(manifest.version, "version publiée");
+  if (!manifest.platforms || typeof manifest.platforms !== "object") {
+    throw new Error("Le manifeste de mise à jour ne contient aucune plateforme.");
+  }
+  return manifest;
 }
 
 function sendJson(response, status, payload, request) {
@@ -2493,6 +2567,50 @@ const handlers = [
       database: "ok",
       email: smtpConfigured() ? "configured" : "not_configured",
       time: nowIso()
+    };
+  }),
+  route("GET", "/v1/app-updates/check", async (request) => {
+    const searchParams = new URL(request.url, "http://ticketpro.local").searchParams;
+    const target = String(searchParams.get("target") ?? "").trim().toLowerCase();
+    const arch = String(searchParams.get("arch") ?? "").trim().toLowerCase();
+    const currentVersion = String(searchParams.get("current_version") ?? "").trim();
+    if (!/^[a-z0-9_.-]{2,80}$/.test(target) || !/^[a-z0-9_.-]{2,40}$/.test(arch)) {
+      throw new HttpError(400, "Plateforme de mise à jour invalide.");
+    }
+    parseSemver(currentVersion, "version installée");
+
+    const manifest = readAppUpdateManifest();
+    if (!manifest || compareSemver(manifest.version, currentVersion) <= 0) {
+      return NO_CONTENT;
+    }
+
+    const normalizedTarget = target.includes("windows")
+      ? "windows"
+      : target.includes("darwin") || target.includes("macos")
+        ? "darwin"
+        : target.includes("linux")
+          ? "linux"
+          : target;
+    const platform = [
+      `${target}-${arch}`,
+      `${normalizedTarget}-${arch}`,
+      target,
+      normalizedTarget
+    ].map((key) => manifest.platforms[key]).find(Boolean);
+    if (!platform) return NO_CONTENT;
+
+    const downloadUrl = String(platform.url ?? "");
+    const signature = String(platform.signature ?? "").trim();
+    if (!downloadUrl.startsWith("https://") || signature.length < 40) {
+      throw new Error("L'artefact de mise à jour publié est incomplet ou non sécurisé.");
+    }
+
+    return {
+      version: manifest.version,
+      url: downloadUrl,
+      signature,
+      notes: String(manifest.notes ?? ""),
+      ...(manifest.pub_date ? { pub_date: manifest.pub_date } : {})
     };
   }),
   route("GET", "/v1/plans", async () => ({ plans: statements.listPlans.all().map(planResponse) })),

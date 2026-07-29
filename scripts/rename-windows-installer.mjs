@@ -13,21 +13,30 @@ const candidateDirectories = [
 for (const directory of candidateDirectories) {
   try {
     const files = await readdir(directory);
-    const generatedInstaller = files.find(
-      (file) => file.toLowerCase().endsWith("-setup.exe") && file !== installerName
-    );
+    const generatedInstaller = files.includes(installerName)
+      ? installerName
+      : files.find((file) => file.toLowerCase().endsWith("-setup.exe"));
 
     if (generatedInstaller) {
       const installerPath = join(directory, installerName);
       const generatedInstallerPath = join(directory, generatedInstaller);
-      await copyFile(generatedInstallerPath, installerPath);
-      await unlink(generatedInstallerPath);
+      const generatedSignaturePath = `${generatedInstallerPath}.sig`;
+      const signaturePath = `${installerPath}.sig`;
+      if (generatedInstaller !== installerName) {
+        await copyFile(generatedInstallerPath, installerPath);
+        await copyFile(generatedSignaturePath, signaturePath);
+        await unlink(generatedInstallerPath);
+        await unlink(generatedSignaturePath);
+      } else {
+        await readFile(signaturePath, "utf8");
+      }
       const checksum = createHash("sha256").update(await readFile(installerPath)).digest("hex");
       const checksumPath = `${installerPath}.sha256`;
       await writeFile(checksumPath, `${checksum}  ${installerName}\n`, "utf8");
       process.stdout.write(`Installateur généré : ${installerPath}\n`);
       process.stdout.write(`SHA-256 : ${checksum}\n`);
       process.stdout.write(`Checksum : ${checksumPath}\n`);
+      process.stdout.write(`Signature Updater : ${signaturePath}\n`);
       process.exit(0);
     }
   } catch (error) {

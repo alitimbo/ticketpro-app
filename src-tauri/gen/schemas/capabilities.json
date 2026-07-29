@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Permissions par défaut de l'application","local":true,"windows":["main"],"permissions":["opener:default"]}}
+{"default":{"identifier":"default","description":"Permissions par défaut de l'application","local":true,"windows":["main"],"permissions":["opener:default","process:default","updater:default"]}}

@@ -1,4 +1,5 @@
 import { access, readFile } from "node:fs/promises";
+import path from "node:path";
 
 const expectedApiUrl = "https://license.autoticket-ne.com";
 const requiredIcons = [
@@ -54,6 +55,53 @@ for (const key of forbiddenFrontendKeys) {
 
 if (tauriConfig.bundle?.publisher !== "Akicorp Solutions") {
   failures.push("Le publisher Windows doit être Akicorp Solutions.");
+}
+
+if (tauriConfig.bundle?.createUpdaterArtifacts !== true) {
+  failures.push("bundle.createUpdaterArtifacts doit être activé pour produire le fichier .sig.");
+}
+
+const updaterPublicKey = String(tauriConfig.plugins?.updater?.pubkey ?? "");
+if (
+  updaterPublicKey.length < 40
+  || updaterPublicKey.includes("REPLACE_WITH_TICKETPRO_UPDATER_PUBLIC_KEY")
+) {
+  failures.push(
+    "La vraie clé publique Ed25519 de l'Updater doit remplacer la valeur temporaire."
+  );
+}
+
+const signingPrivateKey = String(process.env.TAURI_SIGNING_PRIVATE_KEY ?? "").trim();
+const signingPrivateKeyPath = String(
+  process.env.TAURI_SIGNING_PRIVATE_KEY_PATH ?? ""
+).trim();
+
+if (!signingPrivateKey && !signingPrivateKeyPath) {
+  failures.push(
+    "TAURI_SIGNING_PRIVATE_KEY ou TAURI_SIGNING_PRIVATE_KEY_PATH doit être défini hors du dépôt pour signer l'Updater."
+  );
+} else if (signingPrivateKeyPath) {
+  try {
+    await access(path.resolve(signingPrivateKeyPath));
+  } catch {
+    failures.push(
+      `La clé privée Updater est introuvable au chemin TAURI_SIGNING_PRIVATE_KEY_PATH : ${signingPrivateKeyPath}.`
+    );
+  }
+}
+
+if (!String(process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD ?? "").trim()) {
+  failures.push(
+    "TAURI_SIGNING_PRIVATE_KEY_PASSWORD doit protéger la clé privée de l'Updater."
+  );
+}
+
+const updaterEndpoints = tauriConfig.plugins?.updater?.endpoints;
+if (
+  !Array.isArray(updaterEndpoints)
+  || !updaterEndpoints.some((endpoint) => String(endpoint).startsWith(`${expectedApiUrl}/v1/app-updates/`))
+) {
+  failures.push("L'Updater doit utiliser l'endpoint HTTPS officiel TicketPro.");
 }
 
 if (!Array.isArray(tauriConfig.bundle?.icon) || !tauriConfig.bundle.icon.includes("icons/icon.ico")) {

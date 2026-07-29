@@ -2,7 +2,7 @@
   "name": "ticketpro",
   "description": "Gestion locale et distante de hotspots MikroTik",
   "private": true,
-  "version": "0.1.9",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -17,11 +17,14 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "release:check:windows": "node scripts/check-windows-release.mjs",
+    "release:manifest:windows": "node scripts/create-windows-update-manifest.mjs",
     "tauri:build:windows": "npm run release:check:windows && node scripts/build-windows.mjs && node scripts/rename-windows-installer.mjs",
     "release:build:windows": "npm test && npm run type-check && npm run test:license-api && cargo check --manifest-path src-tauri/Cargo.toml && npm run tauri:build:windows"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "lucide-react": "^1.23.0",
     "qrcode": "^1.5.4",
     "react": "^19.1.0",

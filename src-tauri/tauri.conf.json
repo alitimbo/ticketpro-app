@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "TicketPro",
   "mainBinaryName": "TicketPro",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "identifier": "solutions.akicorp.ticketpro",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -26,7 +26,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
+    "targets": [
+      "nsis"
+    ],
     "publisher": "Akicorp Solutions",
     "copyright": "Copyright © 2026 Akicorp Solutions",
     "category": "Business",
@@ -41,8 +44,21 @@
     "windows": {
       "nsis": {
         "installMode": "currentUser",
-        "languages": ["French"],
+        "languages": [
+          "French"
+        ],
         "startMenuFolder": "Akicorp Solutions"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://license.autoticket-ne.com/v1/app-updates/check?target={{target}}&arch={{arch}}&current_version={{current_version}}"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE5Mjc2OTUyMUY3RUY3RQpSV1IrNy9jaGxYYVNDcS9MZURUbVhlMG9kTURjbktWUmFHdmJPcTJOanp1RmNCc1JGZXBOK3doRwo=",
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

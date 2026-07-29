@@ -8,6 +8,7 @@ services:
       - .env
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${TICKETPRO_RELEASES_DIR:-/opt/ticketpro/releases}:/srv/releases:ro
       - caddy-data:/data
       - caddy-config:/config
     read_only: true

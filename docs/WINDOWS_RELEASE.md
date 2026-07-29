@@ -27,8 +27,14 @@ Artefacts générés :
 
 ```text
 src-tauri/target/release/bundle/nsis/TicketPro-Setup-<version>-x64.exe
+src-tauri/target/release/bundle/nsis/TicketPro-Setup-<version>-x64.exe.sig
 src-tauri/target/release/bundle/nsis/TicketPro-Setup-<version>-x64.exe.sha256
 ```
+
+Le build officiel exige aussi la clé privée Ed25519 de l'Updater dans les
+variables `TAURI_SIGNING_PRIVATE_KEY` et
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Voir
+[`APP_UPDATES.md`](./APP_UPDATES.md) pour la création de clé et la publication.
 
 ## Validation avant diffusion
 

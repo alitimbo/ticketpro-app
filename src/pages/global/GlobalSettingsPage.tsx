@@ -3,8 +3,10 @@ import {
   ArchiveRestore,
   Clock3,
   DatabaseBackup,
+  Download,
   FileText,
   Info,
+  RefreshCw,
   Save,
   ShieldCheck,
   Trash2,
@@ -22,7 +24,15 @@ import {
   AuditLogService,
   LogRetentionService
 } from "../../services/logging";
-import { getAppMetadata, type AppMetadata } from "../../services/app";
+import {
+  appUpdatesAreSupported,
+  checkForAppUpdate,
+  describeAppUpdateError,
+  getAppMetadata,
+  installAvailableAppUpdate,
+  type AppMetadata,
+  type AppUpdate
+} from "../../services/app";
 import {
   Badge,
   Button,
@@ -67,6 +77,10 @@ export function GlobalSettingsPage() {
   const [eligibleLogCount, setEligibleLogCount] = useState(0);
   const [logsCleanedAt, setLogsCleanedAt] = useState<string | null>(null);
   const [appMetadata, setAppMetadata] = useState<AppMetadata>(fallbackMetadata);
+  const [availableUpdate, setAvailableUpdate] = useState<AppUpdate | null>(null);
+  const [updateBusy, setUpdateBusy] = useState<"checking" | "installing" | null>(null);
+  const [updateChecked, setUpdateChecked] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<number | null>(null);
   const appSettingsRepository = useMemo(
     () => new AppSettingsRepository(database),
     [database]
@@ -275,6 +289,56 @@ export function GlobalSettingsPage() {
         kind: "error",
         text: error instanceof Error ? error.message : "Nettoyage impossible."
       });
+    }
+  };
+
+  const checkUpdates = async () => {
+    if (!appUpdatesAreSupported()) {
+      setFeedback({
+        kind: "error",
+        text: "Le contrôle des mises à jour est disponible uniquement dans TicketPro Desktop."
+      });
+      return;
+    }
+    setUpdateBusy("checking");
+    setFeedback(null);
+    try {
+      const update = await checkForAppUpdate(true);
+      setAvailableUpdate(update);
+      setUpdateChecked(true);
+      setFeedback({
+        kind: "success",
+        text: update
+          ? `La version ${update.version} est prête à être installée.`
+          : `TicketPro ${appMetadata.version} est à jour.`
+      });
+    } catch (error) {
+      setFeedback({ kind: "error", text: describeAppUpdateError(error) });
+    } finally {
+      setUpdateBusy(null);
+    }
+  };
+
+  const installUpdate = async () => {
+    setUpdateBusy("installing");
+    setUpdateProgress(0);
+    setFeedback({
+      kind: "success",
+      text: "Création de la sauvegarde locale avant téléchargement…"
+    });
+    try {
+      await installAvailableAppUpdate((progress) => {
+        setUpdateProgress(progress.percent);
+        setFeedback({
+          kind: "success",
+          text: progress.percent === null
+            ? "Téléchargement sécurisé de la mise à jour…"
+            : `Téléchargement de la mise à jour : ${progress.percent} %.`
+        });
+      });
+    } catch (error) {
+      setFeedback({ kind: "error", text: describeAppUpdateError(error) });
+      setUpdateBusy(null);
     }
   };
 
@@ -489,6 +553,75 @@ export function GlobalSettingsPage() {
           />
         </div>
       </Card>
+
+      <div id="mise-a-jour">
+        <Card
+          title="Mise à jour de TicketPro"
+          description="Contrôle signé, sauvegarde automatique de la base locale, puis installation silencieuse."
+        >
+          <div className="data-list">
+            <DataListItem
+              description={
+                availableUpdate
+                  ? `Version installée ${availableUpdate.currentVersion} · nouvelle version ${availableUpdate.version}`
+                  : updateChecked
+                    ? `Aucune version plus récente que ${appMetadata.version}.`
+                    : "Le contrôle automatique s'effectue au démarrage. Vous pouvez aussi le lancer maintenant."
+              }
+              icon={RefreshCw}
+              meta={(
+                <Button
+                  disabled={updateBusy !== null || !isAdmin}
+                  icon={RefreshCw}
+                  onClick={() => void checkUpdates()}
+                >
+                  {updateBusy === "checking" ? "Vérification…" : "Rechercher"}
+                </Button>
+              )}
+              title={availableUpdate ? "Mise à jour disponible" : "État des mises à jour"}
+            />
+            {availableUpdate ? (
+              <DataListItem
+                description={
+                  availableUpdate.notes?.trim()
+                    || "Cette version contient des améliorations de stabilité et de sécurité."
+                }
+                icon={Download}
+                meta={(
+                  <Button
+                    disabled={updateBusy !== null || !isAdmin}
+                    icon={Download}
+                    onClick={() => void installUpdate()}
+                    variant="primary"
+                  >
+                    {updateBusy === "installing" ? "Installation…" : "Sauvegarder et installer"}
+                  </Button>
+                )}
+                title={`Installer TicketPro ${availableUpdate.version}`}
+              />
+            ) : null}
+          </div>
+          {updateBusy === "installing" ? (
+            <div className="app-update-progress" aria-live="polite">
+              <div
+                className="app-update-progress__bar"
+                style={{ width: `${updateProgress ?? 12}%` }}
+              />
+              <span>
+                {updateProgress === null
+                  ? "Téléchargement en cours…"
+                  : `${updateProgress} % téléchargés`}
+              </span>
+            </div>
+          ) : null}
+          {!isAdmin ? (
+            <StatusDot
+              label="Seul un administrateur peut installer une mise à jour sur ce poste."
+              status="warning"
+            />
+          ) : null}
+        </Card>
+      </div>
 
       <ConfirmDialog
         confirmLabel="Restaurer"

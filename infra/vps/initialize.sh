@@ -40,6 +40,7 @@ fi
 
 umask 077
 mkdir -p "$INFRA_DIR/wireguard-hub/wireguard" "$INFRA_DIR/wireguard-hub/data"
+mkdir -p "${TICKETPRO_RELEASES_DIR:-/opt/ticketpro/releases}"
 
 WG_PRIVATE_KEY=$(wg genkey)
 WG_PUBLIC_KEY=$(printf '%s' "$WG_PRIVATE_KEY" | wg pubkey)
@@ -73,6 +74,7 @@ printf '%s\n' "$WG_PUBLIC_KEY" > "$INFRA_DIR/wireguard-hub/wireguard/server_publ
   echo "LICENSE_BIND=127.0.0.1"
   echo "LICENSE_PORT=8787"
   echo "LICENSE_DB=/data/licenses.sqlite"
+  echo "APP_UPDATE_MANIFEST_PATH=/data/app-updates/stable.json"
   echo "LICENSE_MASTER_TOKEN=$LICENSE_MASTER_TOKEN"
   echo "LICENSE_HASH_SECRET=$LICENSE_HASH_SECRET"
   echo "LICENSE_DEFAULT_ADMIN_PASSWORD=${LICENSE_DEFAULT_ADMIN_PASSWORD:-admin123}"
@@ -89,6 +91,7 @@ printf '%s\n' "$WG_PUBLIC_KEY" > "$INFRA_DIR/wireguard-hub/wireguard/server_publ
 {
   printf 'LICENSE_DOMAIN=%s\n' "$LICENSE_DOMAIN"
   printf 'REVERSE_PROXY_MODE=%s\n' "${REVERSE_PROXY_MODE:-caddy}"
+  printf 'TICKETPRO_RELEASES_DIR=%s\n' "${TICKETPRO_RELEASES_DIR:-/opt/ticketpro/releases}"
 } > "$SCRIPT_DIR/.env"
 
 chmod 600 \

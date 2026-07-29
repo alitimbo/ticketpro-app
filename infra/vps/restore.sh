@@ -55,16 +55,27 @@ cp "$WORK_DIR/payload/vps/.env" "$SCRIPT_DIR/.env"
 cp -R "$WORK_DIR/payload/wireguard-hub/wireguard/." "$INFRA_DIR/wireguard-hub/wireguard/"
 cp -R "$WORK_DIR/payload/wireguard-hub/data/." "$INFRA_DIR/wireguard-hub/data/"
 
+RELEASES_DIR=$(sed -n 's/^TICKETPRO_RELEASES_DIR=//p' "$SCRIPT_DIR/.env" 2>/dev/null | tail -n 1)
+RELEASES_DIR=${RELEASES_DIR:-/opt/ticketpro/releases}
+mkdir -p "$RELEASES_DIR"
+if [ -d "$WORK_DIR/payload/vps/releases" ]; then
+  cp -R "$WORK_DIR/payload/vps/releases/." "$RELEASES_DIR/"
+fi
+
 docker compose -f "$INFRA_DIR/license-api/docker-compose.yml" \
   --project-directory "$INFRA_DIR/license-api" build license-api
 docker compose -f "$INFRA_DIR/license-api/docker-compose.yml" \
   --project-directory "$INFRA_DIR/license-api" \
   run --rm --no-deps --entrypoint sh license-api \
-  -c 'rm -f /data/licenses.sqlite /data/licenses.sqlite-wal /data/licenses.sqlite-shm'
+  -c 'rm -f /data/licenses.sqlite /data/licenses.sqlite-wal /data/licenses.sqlite-shm; mkdir -p /data/app-updates'
 docker compose -f "$INFRA_DIR/license-api/docker-compose.yml" \
   --project-directory "$INFRA_DIR/license-api" create license-api
 docker cp "$WORK_DIR/payload/license-api/licenses.sqlite" \
   ticketpro-license-api:/data/licenses.sqlite
+if [ -f "$WORK_DIR/payload/license-api/app-updates/stable.json" ]; then
+  docker cp "$WORK_DIR/payload/license-api/app-updates/stable.json" \
+    ticketpro-license-api:/data/app-updates/stable.json
+fi
 
 docker compose -f "$INFRA_DIR/wireguard-hub/docker-compose.yml" \
   --project-directory "$INFRA_DIR/wireguard-hub" up -d --build

@@ -14,6 +14,10 @@ const baseUrl = `http://127.0.0.1:${port}`;
 const masterToken = "ticketpro-integration-master-token";
 const hubMasterToken = "ticketpro-integration-hub-master-token";
 const databasePath = path.join(process.cwd(), `license-integration-${process.pid}.sqlite`);
+const updateManifestPath = path.join(
+  process.cwd(),
+  `app-update-integration-${process.pid}.json`
+);
 let server;
 let serverStderr = "";
 let ipayServer;
@@ -31,7 +35,8 @@ async function api(pathname, { method = "POST", token, body, headers = {} } = {}
     },
     ...(body ? { body: JSON.stringify(body) } : {})
   });
-  const payload = await response.json();
+  const responseText = await response.text();
+  const payload = responseText ? JSON.parse(responseText) : null;
   return { status: response.status, payload };
 }
 
@@ -128,6 +133,7 @@ before(async () => {
       LICENSE_BIND: "127.0.0.1",
       LICENSE_PORT: String(port),
       LICENSE_DB: databasePath,
+      APP_UPDATE_MANIFEST_PATH: updateManifestPath,
       LICENSE_MASTER_TOKEN: masterToken,
       LICENSE_HASH_SECRET: "integration-hash-secret-at-least-32-characters",
       IPAY_BASE_URL: `http://127.0.0.1:${ipayPort}`,
@@ -162,6 +168,47 @@ after(async () => {
       if (error.code !== "ENOENT") throw error;
     }
   }
+  try {
+    fs.unlinkSync(updateManifestPath);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+});
+
+test("l'Updater public retourne 204 sans version puis un manifeste signé par plateforme", async () => {
+  const unavailable = await api(
+    "/v1/app-updates/check?target=windows&arch=x86_64&current_version=0.1.9",
+    { method: "GET" }
+  );
+  assert.equal(unavailable.status, 204);
+  assert.equal(unavailable.payload, null);
+
+  fs.writeFileSync(updateManifestPath, JSON.stringify({
+    version: "0.2.0",
+    notes: "Stabilisation des mises à jour.",
+    pub_date: "2026-07-29T12:00:00.000Z",
+    platforms: {
+      "windows-x86_64": {
+        url: "https://ticketpro.autoticket-ne.com/releases/TicketPro-Setup-0.2.0-x64.exe",
+        signature: "dGVzdC1zaWduYXR1cmUtbG9uZy1lbm91Z2gtZm9yLXVwZGF0ZXItdGVzdHM="
+      }
+    }
+  }));
+
+  const available = await api(
+    "/v1/app-updates/check?target=windows&arch=x86_64&current_version=0.1.9",
+    { method: "GET" }
+  );
+  assert.equal(available.status, 200);
+  assert.equal(available.payload.version, "0.2.0");
+  assert.equal(available.payload.notes, "Stabilisation des mises à jour.");
+  assert.match(available.payload.url, /^https:\/\//);
+
+  const alreadyCurrent = await api(
+    "/v1/app-updates/check?target=windows&arch=x86_64&current_version=0.2.0",
+    { method: "GET" }
+  );
+  assert.equal(alreadyCurrent.status, 204);
 });
 
 test("l'essai SaaS dure 7 jours, limite à un routeur et un forfait payant le remplace immédiatement", async () => {
