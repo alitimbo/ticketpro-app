@@ -1,6 +1,11 @@
 {$LICENSE_DOMAIN} {
 	encode zstd gzip
 
+	handle /download/windows {
+		header Cache-Control "no-store"
+		redir * /releases/{$TICKETPRO_LATEST_WINDOWS_SETUP} 302
+	}
+
 	handle_path /releases/* {
 		root * /srv/releases
 		file_server

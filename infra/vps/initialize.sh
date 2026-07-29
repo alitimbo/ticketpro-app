@@ -92,6 +92,7 @@ printf '%s\n' "$WG_PUBLIC_KEY" > "$INFRA_DIR/wireguard-hub/wireguard/server_publ
   printf 'LICENSE_DOMAIN=%s\n' "$LICENSE_DOMAIN"
   printf 'REVERSE_PROXY_MODE=%s\n' "${REVERSE_PROXY_MODE:-caddy}"
   printf 'TICKETPRO_RELEASES_DIR=%s\n' "${TICKETPRO_RELEASES_DIR:-/opt/ticketpro/releases}"
+  printf 'TICKETPRO_LATEST_WINDOWS_SETUP=%s\n' "${TICKETPRO_LATEST_WINDOWS_SETUP:-TicketPro-Setup-unpublished-x64.exe}"
 } > "$SCRIPT_DIR/.env"
 
 chmod 600 \
