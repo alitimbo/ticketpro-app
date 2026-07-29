@@ -2152,6 +2152,97 @@ a {
   overflow-y: auto;
 }
 
+.team-role-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.team-role-card {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-width: 0;
+  padding: 15px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+}
+
+.team-role-card--admin {
+  border-color: #e8c873;
+  background: #fffaf0;
+}
+
+.team-role-card__header,
+.team-role-card__identity {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.team-role-card__header {
+  justify-content: space-between;
+}
+
+.team-role-card__identity svg {
+  width: 21px;
+  height: 21px;
+  color: var(--color-primary);
+}
+
+.team-role-card > p {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.team-role-card__permissions {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.team-role-card__permissions li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--color-text);
+  font-size: 0.84rem;
+  font-weight: 740;
+  line-height: 1.4;
+}
+
+.team-role-card__permissions svg {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  color: #168353;
+}
+
+.team-role-card__restriction {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border);
+  color: var(--color-muted);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.team-role-card__restriction svg {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  margin-top: 1px;
+  color: #9a5b00;
+}
+
 .summary-grid {
   display: grid;
   gap: 12px;
@@ -4614,6 +4705,10 @@ a {
 
   .page-header__actions .button {
     flex: 1 1 auto;
+  }
+
+  .team-role-grid {
+    grid-template-columns: 1fr;
   }
 
   .wizard-steps {

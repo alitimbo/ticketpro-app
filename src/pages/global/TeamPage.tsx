@@ -1,5 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
-import { Mail, Plus, RefreshCw, ShieldCheck, Trash2, UserCheck, UserX, Users } from "lucide-react";
+import {
+  CheckCircle2,
+  LockKeyhole,
+  Mail,
+  Plus,
+  RefreshCw,
+  ShieldCheck,
+  Trash2,
+  UserCheck,
+  UserX,
+  Users
+} from "lucide-react";
 import type { UserRole } from "../../domain/auth";
 import { useAuth } from "../../app/auth/AuthProvider";
 import { RouterRepository, useAppDatabase } from "../../services/database";
@@ -46,6 +57,54 @@ const roleDescriptions: Record<UserRole, string> = {
   agent: "Création de tickets et consultation de sa propre activité.",
   guest: "Consultation uniquement."
 };
+
+const roleGuide: Array<{
+  accessLabel: string;
+  allowed: string[];
+  restriction: string;
+  role: UserRole;
+}> = [
+  {
+    accessLabel: "Accès élevé",
+    allowed: [
+      "Gérer les routeurs, les plans et les paramètres",
+      "Configurer le VPN, l'anti-partage et les vouchers",
+      "Gérer les employés de niveau inférieur"
+    ],
+    restriction: "Seul le propriétaire gère la facturation et les autres administrateurs.",
+    role: "admin"
+  },
+  {
+    accessLabel: "Exploitation",
+    allowed: [
+      "Créer et réimprimer des vouchers",
+      "Consulter les plans, fichiers et rapports",
+      "Voir les clients des routeurs autorisés"
+    ],
+    restriction: "Aucun accès aux paramètres, au VPN ou aux actions sensibles.",
+    role: "operator"
+  },
+  {
+    accessLabel: "Accès limité",
+    allowed: [
+      "Créer des vouchers",
+      "Consulter uniquement ses propres lots",
+      "Voir ses fichiers et son rapport d'activité"
+    ],
+    restriction: "Ne voit pas les plans, les clients ou le travail des autres employés.",
+    role: "agent"
+  },
+  {
+    accessLabel: "Lecture seule",
+    allowed: [
+      "Consulter les tickets autorisés",
+      "Lire les rapports",
+      "Consulter l'état du réseau"
+    ],
+    restriction: "Ne peut créer, modifier, supprimer ou déconnecter aucun élément.",
+    role: "guest"
+  }
+];
 
 export function TeamPage() {
   const { accountSession, saasAccount } = useAuth();
@@ -194,6 +253,40 @@ export function TeamPage() {
 
       {message ? <p className="form-error form-error--success">{message}</p> : null}
       {error ? <p className="form-error">{error}</p> : null}
+
+      <Card
+        title="Comprendre les rôles"
+        description="Les rôles sont prédéfinis afin de garder une gestion simple, cohérente et sécurisée."
+      >
+        <div className="team-role-grid">
+          {roleGuide.map((item) => (
+            <article className={`team-role-card team-role-card--${item.role}`} key={item.role}>
+              <header className="team-role-card__header">
+                <div className="team-role-card__identity">
+                  <ShieldCheck aria-hidden="true" />
+                  <strong>{roleLabels[item.role]}</strong>
+                </div>
+                <Badge status={item.role === "admin" ? "warning" : "active"}>
+                  {item.accessLabel}
+                </Badge>
+              </header>
+              <p>{roleDescriptions[item.role]}</p>
+              <ul className="team-role-card__permissions">
+                {item.allowed.map((permission) => (
+                  <li key={permission}>
+                    <CheckCircle2 aria-hidden="true" />
+                    <span>{permission}</span>
+                  </li>
+                ))}
+              </ul>
+              <div className="team-role-card__restriction">
+                <LockKeyhole aria-hidden="true" />
+                <span>{item.restriction}</span>
+              </div>
+            </article>
+          ))}
+        </div>
+      </Card>
 
       <Card
         title="Membres de l'organisation"
