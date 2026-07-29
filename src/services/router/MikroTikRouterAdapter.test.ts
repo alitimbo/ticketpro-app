@@ -585,6 +585,46 @@ describe("MikroTikRouterAdapter", () => {
     ]);
   });
 
+  it("reprend automatiquement la syntaxe TTL des anciennes versions RouterOS", async () => {
+    const calls: RouterOsApiRequest[] = [];
+    const responses: Record<string, RouterOsApiRow[]> = {
+      "/ip/hotspot/print": [{
+        ".id": "*HS1",
+        disabled: "false",
+        interface: "ether1",
+        name: "ticketpro-hotspot"
+      }],
+      "/ip/firewall/filter/print": [],
+      "/ipv6/firewall/filter/print": [],
+      "/ip/hotspot/user/profile/print": []
+    };
+    const transport: RouterOsApiTransport = {
+      async call(request) {
+        calls.push(request);
+        if (
+          request.command === "/ip/firewall/filter/add"
+          && /^\d+$/.test(String(request.params?.ttl ?? ""))
+        ) {
+          throw new Error("router rejected: invalid value for argument ttl");
+        }
+        return responses[request.command] ?? [];
+      }
+    };
+    const adapter = createAdapter(transport);
+
+    await adapter.configureHotspotAntiTethering({
+      blockIpv4Ttl: true,
+      blockIpv6: false,
+      enabled: true
+    });
+
+    expect(
+      calls
+        .filter((call) => call.command === "/ip/firewall/filter/add")
+        .map((call) => call.params?.ttl)
+    ).toEqual(["63", "equal:63", "127", "equal:127"]);
+  });
+
   it("retire seulement les règles anti-partage gérées par TicketPro", async () => {
     const transport = new MockRouterOsTransport({
       "/ip/hotspot/print": [],

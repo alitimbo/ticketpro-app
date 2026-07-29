@@ -634,12 +634,12 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       );
       const existingId = pick(matches[0] ?? {}, ".id", "id");
       if (existingId) {
-        await this.call(`${menu}/set`, {
+        await this.writeFirewallRuleWithTtlCompatibility(`${menu}/set`, {
           ...rule,
           numbers: existingId
         });
       } else {
-        await this.call(`${menu}/add`, {
+        await this.writeFirewallRuleWithTtlCompatibility(`${menu}/add`, {
           ...rule,
           "place-before": firstForwardRuleId ?? null
         });
@@ -663,6 +663,29 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     }
   }
 
+  private async writeFirewallRuleWithTtlCompatibility(
+    command: string,
+    params: Record<string, string | null>
+  ): Promise<void> {
+    try {
+      await this.call(command, params);
+    } catch (error) {
+      const ttl = params.ttl;
+      if (
+        typeof ttl !== "string"
+        || !/^\d{1,3}$/.test(ttl)
+        || !isInvalidTtlArgumentError(error)
+      ) {
+        throw error;
+      }
+
+      await this.call(command, {
+        ...params,
+        ttl: `equal:${ttl}`
+      });
+    }
+  }
+
   private async call(command: string, params: RouterOsApiRequest["params"] = {}): Promise<RouterOsApiRow[]> {
     try {
       return await this.transport.call({ ...this.config, command, params });
@@ -678,6 +701,12 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       throw normalizeMikroTikError(error);
     }
   }
+}
+
+function isInvalidTtlArgumentError(error: unknown): boolean {
+  return error instanceof RouterAdapterError
+    && error.code === "router_rejected"
+    && /invalid value for argument ttl/i.test(error.message);
 }
 
 export function normalizeMikroTikError(error: unknown): RouterAdapterError {
