@@ -4,6 +4,7 @@ import {
   changeSubscriptionPlan,
   countRoutersForSubscription,
   formatCfa,
+  formatPlanDuration,
   getSubscriptionOverview,
   markSubscriptionPaymentManual
 } from "./subscriptionPageModel";
@@ -28,6 +29,8 @@ describe("subscriptionPageModel", () => {
     expect(overview.routersUsed).toBe(1);
     expect(overview.canAddRouter).toBe(false);
     expect(formatCfa(1500)).toBe("1 500 CFA");
+    expect(formatPlanDuration(1)).toBe("1 jour");
+    expect(formatPlanDuration(30)).toBe("30 jours");
     expect(billingPeriodLabel("monthly")).toBe("mois");
   });
 

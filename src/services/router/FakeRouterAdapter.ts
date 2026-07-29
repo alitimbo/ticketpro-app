@@ -2,6 +2,7 @@ import type {
   ActiveHotspotUser,
   HotspotPlan,
   HotspotPlanDraft,
+  HotspotDnsConfigurationResult,
   HotspotServer,
   HotspotUser,
   HotspotUserDraft,
@@ -28,6 +29,7 @@ type FakeRouterAdapterOptions = {
 
 export class FakeRouterAdapter implements RouterAdapter {
   private hotspotBypasses = new Map<string, import("../../domain/router").HotspotBypassBinding>();
+  private hotspotDnsName = "";
   async provisionWireGuard(): Promise<void> {
     return undefined;
   }
@@ -60,6 +62,18 @@ export class FakeRouterAdapter implements RouterAdapter {
       profileName: "default-hotspot"
     }
   ];
+
+  async upsertHotspotDns(dnsName: string): Promise<HotspotDnsConfigurationResult> {
+    await this.guard("upsertHotspotDns");
+    const action = this.hotspotDnsName ? "updated" : "created";
+    this.hotspotDnsName = dnsName;
+    return {
+      action,
+      dnsName,
+      profileName: this.servers[0]?.profileName ?? "ticketpro-hotspot-profile",
+      serverName: this.servers[0]?.name ?? null
+    };
+  }
 
   private plans: HotspotPlan[] = [
     {

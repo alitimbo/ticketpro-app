@@ -16,7 +16,9 @@ import {
   registerSaasTrial
 } from "../../services/saas";
 import { markFirstLaunchCompleted } from "../../services/auth";
+import { PaymentMethodPicker } from "../../shared/payment/PaymentMethodPicker";
 import { Badge, Button, Card, PasswordField } from "../../shared/ui";
+import { formatCfa, formatPlanDuration } from "../global/subscriptionPageModel";
 
 type RegistrationForm = {
   organizationName: string;
@@ -269,7 +271,8 @@ export function SaasFirstLaunchPage({ onComplete }: { onComplete: () => void }) 
                       <select onChange={(event) => update("planId", event.target.value)} value={form.planId}>
                         {plans.map((plan) => (
                           <option key={plan.id} value={plan.id}>
-                            {plan.name} — {plan.router_limit} routeur(s) — {plan.price_cfa ?? 0} F CFA
+                            {plan.name} — {formatPlanDuration(plan.duration_days)} — {plan.router_limit} routeur(s) —{" "}
+                            {formatCfa(plan.price_cfa)}
                           </option>
                         ))}
                       </select>
@@ -280,7 +283,7 @@ export function SaasFirstLaunchPage({ onComplete }: { onComplete: () => void }) 
                         onChange={(event) => update("paymentType", event.target.value as IpayPaymentType)}
                         value={form.paymentType}
                       >
-                        <option value="mobile">Mobile Money (Airtel, Moov, Zamani)</option>
+                        <option value="mobile">Mobile Money (Orange, Moov, Zamani)</option>
                         <option value="nita_online">MyNita</option>
                         <option value="amanata">Amanata</option>
                       </select>
@@ -288,6 +291,32 @@ export function SaasFirstLaunchPage({ onComplete }: { onComplete: () => void }) 
                   </>
                 ) : null}
               </div>
+              {!useFreeTrial && selectedPlan ? (
+                <>
+                  <div className="subscription-selection-summary" aria-live="polite">
+                    <div>
+                      <span>Forfait choisi</span>
+                      <strong>{selectedPlan.name}</strong>
+                    </div>
+                    <div>
+                      <span>Durée</span>
+                      <strong>{formatPlanDuration(selectedPlan.duration_days)}</strong>
+                    </div>
+                    <div>
+                      <span>Capacité</span>
+                      <strong>{selectedPlan.router_limit} routeur(s)</strong>
+                    </div>
+                    <div>
+                      <span>Montant</span>
+                      <strong>{formatCfa(selectedPlan.price_cfa)}</strong>
+                    </div>
+                  </div>
+                  <PaymentMethodPicker
+                    onChange={(paymentType) => update("paymentType", paymentType)}
+                    value={form.paymentType}
+                  />
+                </>
+              ) : null}
               {error ? <p className="form-error">{error}</p> : null}
               <div className="confirm-dialog__actions">
                 <Button icon={LogIn} onClick={openLogin} type="button" variant="ghost">
@@ -312,7 +341,8 @@ export function SaasFirstLaunchPage({ onComplete }: { onComplete: () => void }) 
               <div className="auth-note">
                 <CreditCard aria-hidden="true" size={20} />
                 <p>
-                  {payment.order.plan.name} — {payment.order.amount.toLocaleString("fr-FR")} F CFA
+                  {payment.order.plan.name} — {formatPlanDuration(payment.order.plan.duration_days)} —{" "}
+                  {formatCfa(payment.order.amount)}
                   {payment.payment.meta_data?.code ? ` — Code : ${payment.payment.meta_data.code}` : ""}
                 </p>
               </div>

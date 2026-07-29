@@ -59,8 +59,8 @@ export type RouterFilter = "all" | RouterCardStatus;
 export type RouterFormValues = {
   apiPort: string;
   apiSslPort: string;
+  hotspotAddress: string;
   ipAddress: string;
-  model: string;
   name: string;
   notes: string;
   password: string;
@@ -79,8 +79,8 @@ export type RouterOwnershipInput = {
 export const emptyRouterFormValues: RouterFormValues = {
   apiPort: "8728",
   apiSslPort: "8729",
+  hotspotAddress: "",
   ipAddress: "",
-  model: "",
   name: "",
   notes: "",
   password: "",
@@ -326,13 +326,14 @@ export function createRouterFromForm(
     boardName: systemInfo?.boardName ?? "Non détectée",
     createdByProfileId: ownership.createdByProfileId,
     encryptedPassword,
+    hotspotAddress: normalizeHotspotDnsName(values.hotspotAddress),
     id: id ?? `router-${crypto.randomUUID()}`,
     ipAddress: values.ipAddress,
     lastSeenAt: "Jamais",
     lastTestMessage: null,
     lastTestStatus: "not_tested",
     lastTestedAt: null,
-    model: values.model || systemInfo?.model || "Modèle non renseigné",
+    model: systemInfo?.model || "Modèle non détecté",
     notes: values.notes,
     preferredMode: values.preferredMode,
     remoteMode: values.preferredMode === "vpn" ? "vpn" : "distant_ip",
@@ -369,8 +370,8 @@ export function formValuesFromRouter(router: RouterCardData): RouterFormValues {
   return {
     apiPort: String(router.apiPort),
     apiSslPort: String(router.apiSslPort),
+    hotspotAddress: router.hotspotAddress ?? "",
     ipAddress: router.ipAddress,
-    model: router.model === "Modèle non renseigné" ? "" : router.model,
     name: router.zoneName,
     notes: router.notes,
     password: "",
@@ -387,8 +388,8 @@ export function formValuesFromScannedRouter(router: DiscoveredRouterCandidate): 
     ...emptyRouterFormValues,
     apiPort: String(router.apiPort),
     apiSslPort: String(router.apiSslPort),
+    hotspotAddress: "",
     ipAddress: router.host,
-    model: router.systemInfo.model,
     name: router.systemInfo.identity || router.name,
     preferredMode: router.mode
   };
@@ -444,4 +445,23 @@ export function isRemoteConnectionMode(
   mode: RouterConnectionPreference
 ): mode is Exclude<RouterConnectionPreference, "local"> {
   return mode !== "local";
+}
+
+export function normalizeHotspotDnsName(value: string): string {
+  return value.trim().toLowerCase().replace(/\.$/, "");
+}
+
+export function isValidHotspotDnsName(value: string): boolean {
+  const normalized = normalizeHotspotDnsName(value);
+  if (normalized.length < 3 || normalized.length > 253 || !normalized.includes(".")) {
+    return false;
+  }
+
+  return normalized
+    .split(".")
+    .every((label) =>
+      label.length >= 1 &&
+      label.length <= 63 &&
+      /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)
+    );
 }

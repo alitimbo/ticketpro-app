@@ -34,19 +34,19 @@ describe("routerHomeModel", () => {
     expect(formatBytes(256 * 1024 * 1024)).toBe("256 Mo");
   });
 
-  it("signale uniquement un verrouillage voucher explicitement désactivé", () => {
+  it("signale tant que le blocage TTL strict n'est pas activé", () => {
     expect(shouldShowDeviceProtectionNotice(null)).toBe(false);
     expect(shouldShowDeviceProtectionNotice({
       antiSharingMode: "observe",
-      lockVoucherToFirstMac: false
-    })).toBe(true);
-    expect(shouldShowDeviceProtectionNotice({
-      antiSharingMode: "observe",
-      lockVoucherToFirstMac: true
+      monitorIpv4Ttl: false
     })).toBe(true);
     expect(shouldShowDeviceProtectionNotice({
       antiSharingMode: "strict",
-      lockVoucherToFirstMac: true
+      monitorIpv4Ttl: false
+    })).toBe(true);
+    expect(shouldShowDeviceProtectionNotice({
+      antiSharingMode: "strict",
+      monitorIpv4Ttl: true
     })).toBe(false);
   });
 

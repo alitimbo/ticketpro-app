@@ -45,9 +45,11 @@ import {
   filterRouters,
   formValuesFromRouter,
   getRouterLimitMessage,
+  isValidHotspotDnsName,
   isRemoteConnectionMode,
   listRoutersForAccount,
   mapRouterErrorToTestStatus,
+  normalizeHotspotDnsName,
   routerCardFromRecord,
   routerConnectionInputsFromCard,
   routerRecordFromCard,
@@ -285,6 +287,7 @@ export function RoutersPage() {
       try {
         requireProfilePermission(session, "global.routers.add");
         if (!subscriptionOverview.canAddRouter) throw new Error(quotaMessage ?? "Limite de routeurs atteinte.");
+        const hotspotDns = await upsertFormHotspotDns(formState);
         const created = applyTestResult(
           createRouterFromForm(formState.values, encryptedPassword, formState.detectedInfo, undefined, {
             accountId,
@@ -301,7 +304,9 @@ export function RoutersPage() {
           );
         }
         setRouters((current) => [created, ...current]);
-        setMessage(`${created.zoneName} ajouté.`);
+        setMessage(
+          `${created.zoneName} ajouté. DNS Hotspot ${hotspotDns.action === "created" ? "créé" : "mis à jour"} : ${hotspotDns.dnsName}.`
+        );
         setFormState(null);
       } catch (error) {
         setFormState({ ...formState, error: error instanceof Error ? error.message : "Le routeur n'a pas pu être enregistré." });
@@ -313,6 +318,7 @@ export function RoutersPage() {
     if (!currentRouter) return;
     try {
       requireProfilePermission(session, "global.routers.edit");
+      const hotspotDns = await upsertFormHotspotDns(formState);
       const updated = applyTestResult(
         {
           ...currentRouter,
@@ -320,8 +326,9 @@ export function RoutersPage() {
           apiSslPort: Number(formState.values.apiSslPort),
           boardName: formState.detectedInfo?.boardName ?? currentRouter.boardName,
           encryptedPassword,
+          hotspotAddress: normalizeHotspotDnsName(formState.values.hotspotAddress),
           ipAddress: formState.values.ipAddress,
-          model: formState.values.model || formState.detectedInfo?.model || currentRouter.model,
+          model: formState.detectedInfo?.model || currentRouter.model,
           notes: formState.values.notes,
           preferredMode: formState.values.preferredMode,
           remoteHost: formState.values.remoteHost,
@@ -341,7 +348,9 @@ export function RoutersPage() {
         await connectionRepository.replaceForRouter(updated.id, routerConnectionInputsFromCard(updated));
       }
       setRouters((current) => current.map((router) => (router.id === updated.id ? updated : router)));
-      setMessage(`${updated.zoneName} modifié.`);
+      setMessage(
+        `${updated.zoneName} modifié. DNS Hotspot ${hotspotDns.action === "created" ? "créé" : "mis à jour"} : ${hotspotDns.dnsName}.`
+      );
       setFormState(null);
     } catch (error) {
       setFormState({ ...formState, error: error instanceof Error ? error.message : "Le routeur n'a pas pu être mis à jour." });
@@ -374,8 +383,74 @@ export function RoutersPage() {
       error: null,
       testMessage: result.message,
       testStatus: result.status,
-      values: result.systemInfo ? { ...formState.values, model: result.systemInfo.model } : formState.values
+      values: formState.values
     });
+  };
+
+  const upsertFormHotspotDns = async (state: RouterFormState) => {
+    let resolvedPassword = state.values.password;
+    if (!resolvedPassword.trim() && state.router?.encryptedPassword) {
+      resolvedPassword = await decryptLocalSecret(state.router.encryptedPassword);
+    }
+    if (!resolvedPassword.trim()) {
+      throw new Error("Le mot de passe MikroTik est requis pour configurer le DNS Hotspot.");
+    }
+
+    const service = createFormRouterService(
+      state.values,
+      resolvedPassword,
+      state.router?.status
+    );
+    return service.upsertHotspotDns(normalizeHotspotDnsName(state.values.hotspotAddress));
+  };
+
+  const createFormRouterService = (
+    values: RouterFormValues,
+    password: string,
+    statusHint?: RouterCardData["status"]
+  ) => {
+    const targetHost = isRemoteConnectionMode(values.preferredMode)
+      ? values.remoteHost
+      : values.ipAddress;
+    const logger = { write: (log: RouterActionLog) => setLogs((current) => [...current, log]) };
+
+    return isPersistent
+      ? new RouterService({
+          authSession: session,
+          logger,
+          mikrotik: {
+            connectionMode: values.preferredMode,
+            host: targetHost,
+            password,
+            port: isRemoteConnectionMode(values.preferredMode)
+              ? Number(values.remotePort)
+              : Number(values.apiPort),
+            timeoutMs: 5000,
+            useSsl:
+              values.preferredMode === "vpn"
+                ? false
+                : isRemoteConnectionMode(values.preferredMode)
+                  ? values.remoteUseSsl
+                  : false,
+            username: values.username
+          },
+          mode: "mikrotik"
+        })
+      : new RouterService({
+          adapter: new FakeRouterAdapter({
+            connectionMode: values.preferredMode,
+            errorMode: inferConnectionError({
+              host: targetHost,
+              mode: values.preferredMode,
+              password,
+              statusHint
+            }),
+            host: targetHost || values.ipAddress,
+            latencyMs: 0
+          }),
+          authSession: session,
+          logger
+        });
   };
 
   const confirmDeleteRouter = async () => {
@@ -733,7 +808,15 @@ function RouterFormDialog({
         </header>
         <div className="router-form-grid">
           <label className="form-field">Nom du routeur<input value={values.name} onChange={(event) => update({ name: event.target.value })} /></label>
-          <label className="form-field">Modèle optionnel<input value={values.model} onChange={(event) => update({ model: event.target.value })} /></label>
+          <label className="form-field">
+            Hotspot (DNS)
+            <input
+              placeholder="wifi.exemple.com"
+              value={values.hotspotAddress}
+              onChange={(event) => update({ hotspotAddress: event.target.value })}
+            />
+            <small>Adresse saisie par les clients pour ouvrir le portail captif.</small>
+          </label>
           <label className="form-field">Adresse IP locale<input value={values.ipAddress} onChange={(event) => update({ ipAddress: event.target.value })} /></label>
           <label className="form-field">Port API<input value={values.apiPort} onChange={(event) => update({ apiPort: event.target.value })} /></label>
           <label className="form-field">Port API SSL<input value={values.apiSslPort} onChange={(event) => update({ apiSslPort: event.target.value })} /></label>
@@ -893,6 +976,10 @@ function validateRouterForm(formState: RouterFormState): string | null {
 
 function validateRouterFormForTest(values: RouterFormValues): string | null {
   if (!values.name.trim()) return "Entrez le nom du routeur.";
+  if (!values.hotspotAddress.trim()) return "Entrez le DNS du Hotspot.";
+  if (!isValidHotspotDnsName(values.hotspotAddress)) {
+    return "Entrez un DNS Hotspot valide, par exemple wifi.exemple.com.";
+  }
   if (!values.ipAddress.trim()) return "Entrez l’adresse IP locale.";
   if (!values.username.trim()) return "Entrez l’utilisateur MikroTik.";
   if (!isValidPort(values.apiPort) || !isValidPort(values.apiSslPort)) return "Entrez des ports API valides.";

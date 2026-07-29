@@ -28,11 +28,11 @@ export type RouterAccessPolicy = {
 };
 
 export const defaultRouterAccessPolicy: RouterAccessPolicy = {
-  antiSharingMode: "observe",
+  antiSharingMode: "disabled",
   infrastructureDevices: [],
   lockVoucherToFirstMac: false,
-  monitorIpv4Ttl: true,
-  monitorIpv6HopLimit: true
+  monitorIpv4Ttl: false,
+  monitorIpv6HopLimit: false
 };
 
 export class RouterAccessPolicyService {
@@ -72,14 +72,12 @@ export class RouterAccessPolicyService {
 export function validateRouterAccessPolicy(
   policy: RouterAccessPolicy
 ): string | null {
-  if (policy.antiSharingMode === "strict" && !policy.lockVoucherToFirstMac) {
-    return "Le mode strict exige le verrouillage du voucher sur le premier appareil.";
-  }
-  if (policy.antiSharingMode === "strict" && !policy.monitorIpv4Ttl) {
-    return "Le mode strict exige le blocage TTL IPv4.";
-  }
-  if (policy.antiSharingMode === "strict" && !policy.monitorIpv6HopLimit) {
-    return "Le mode strict exige le blocage IPv6 sur le réseau Hotspot.";
+  if (
+    policy.antiSharingMode === "strict" &&
+    !policy.monitorIpv4Ttl &&
+    !policy.monitorIpv6HopLimit
+  ) {
+    return "Sélectionnez au moins une protection réseau IPv4 ou IPv6 pour activer le mode strict.";
   }
 
   const seenMacs = new Set<string>();
@@ -140,8 +138,10 @@ function normalizePolicy(
         }))
       : [],
     lockVoucherToFirstMac: value.lockVoucherToFirstMac === true,
-    monitorIpv4Ttl: value.monitorIpv4Ttl !== false,
-    monitorIpv6HopLimit: value.monitorIpv6HopLimit !== false
+    monitorIpv4Ttl:
+      antiSharingMode === "strict" && value.monitorIpv4Ttl === true,
+    monitorIpv6HopLimit:
+      antiSharingMode === "strict" && value.monitorIpv6HopLimit === true
   };
 }
 

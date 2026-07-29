@@ -2,6 +2,7 @@ import type {
   ActiveHotspotUser,
   HotspotPlan,
   HotspotPlanDraft,
+  HotspotDnsConfigurationResult,
   HotspotServer,
   HotspotUser,
   HotspotUserDraft,
@@ -328,6 +329,54 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       numbers: user.id
     });
     return this.findUserByName(username);
+  }
+
+  async upsertHotspotDns(dnsName: string): Promise<HotspotDnsConfigurationResult> {
+    const normalizedDnsName = dnsName.trim().toLowerCase().replace(/\.$/, "");
+    const [serverRows, profileRows] = await Promise.all([
+      this.call("/ip/hotspot/print"),
+      this.call("/ip/hotspot/profile/print")
+    ]);
+    const server = serverRows.find((row) => !isTruthy(pick(row, "disabled"))) ?? serverRows[0];
+    const serverProfileName = server ? pick(server, "profile") : undefined;
+    const profile =
+      profileRows.find((row) => pick(row, "name") === serverProfileName) ??
+      profileRows.find((row) => Boolean(pick(row, "dns-name"))) ??
+      profileRows.find((row) => pick(row, "name") === "ticketpro-hotspot-profile");
+
+    if (profile) {
+      const profileName = pick(profile, "name") || "ticketpro-hotspot-profile";
+      await this.call("/ip/hotspot/profile/set", {
+        "dns-name": normalizedDnsName,
+        numbers: pick(profile, ".id", "id") || profileName
+      });
+      return {
+        action: "updated",
+        dnsName: normalizedDnsName,
+        profileName,
+        serverName: server ? pick(server, "name") ?? null : null
+      };
+    }
+
+    const profileName = serverProfileName || "ticketpro-hotspot-profile";
+    await this.call("/ip/hotspot/profile/add", {
+      "dns-name": normalizedDnsName,
+      name: profileName
+    });
+
+    if (server && !serverProfileName) {
+      await this.call("/ip/hotspot/set", {
+        numbers: pick(server, ".id", "id") || pick(server, "name"),
+        profile: profileName
+      });
+    }
+
+    return {
+      action: "created",
+      dnsName: normalizedDnsName,
+      profileName,
+      serverName: server ? pick(server, "name") ?? null : null
+    };
   }
 
   async configureHotspotAntiTethering(

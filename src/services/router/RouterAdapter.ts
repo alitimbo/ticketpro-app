@@ -4,6 +4,7 @@ import type {
   HotspotPlanDraft,
   HotspotAntiTetheringConfig,
   HotspotBypassBinding,
+  HotspotDnsConfigurationResult,
   HotspotServer,
   HotspotUser,
   HotspotUserDraft,
@@ -20,6 +21,7 @@ export interface RouterAdapter {
   testConnection(): Promise<RouterConnectionTest>;
   getSystemInfo(): Promise<RouterSystemInfo>;
   getHotspotServers(): Promise<HotspotServer[]>;
+  upsertHotspotDns(dnsName: string): Promise<HotspotDnsConfigurationResult>;
   getHotspotPlans(): Promise<HotspotPlan[]>;
   createHotspotPlan(plan: HotspotPlanDraft): Promise<HotspotPlan>;
   updateHotspotPlan(planId: string, updates: Partial<HotspotPlanDraft>): Promise<HotspotPlan>;

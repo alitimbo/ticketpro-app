@@ -271,6 +271,7 @@ export function RouterSettingsPage() {
         `${Date.now()}-${Math.random().toString(36).slice(2)}`,
       ipAddress: infrastructureDraft.ipAddress.trim(),
       macAddress: normalizeMacAddress(infrastructureDraft.macAddress),
+      mode: "bridge",
       name: infrastructureDraft.name.trim()
     };
     const candidate = {
@@ -573,22 +574,10 @@ export function RouterSettingsPage() {
         id="controle-acces-anti-partage"
         tabIndex={-1}
         title="Contrôle d'accès et anti-partage"
-        description="Le mode strict verrouille les vouchers, bloque les TTL caractéristiques du tethering et coupe IPv6 sur le réseau Hotspot."
+        description="Choisissez séparément le blocage du partage réseau et le verrouillage facultatif des vouchers par appareil."
       >
-        <div className="option-list">
-          <label className="toggle-option">
-            <input
-              checked={accessPolicy.lockVoucherToFirstMac}
-              disabled={!canEditSensitive || isLoading}
-              onChange={(event) => updateAccessPolicy({
-                lockVoucherToFirstMac: event.target.checked
-              })}
-              type="checkbox"
-            />
-            <ShieldCheck aria-hidden="true" />
-            <span>Verrouiller le voucher sur le premier appareil connecté</span>
-          </label>
-          <label className="form-field">
+        <div className="anti-sharing-config">
+          <label className="form-field anti-sharing-mode">
             Contrôle du partage de connexion
             <select
               disabled={!canEditSensitive || isLoading}
@@ -596,49 +585,116 @@ export function RouterSettingsPage() {
                 const antiSharingMode =
                   event.target.value as RouterAccessPolicy["antiSharingMode"];
                 updateAccessPolicy(antiSharingMode === "strict"
-                  ? {
+                  ? { antiSharingMode }
+                  : {
                       antiSharingMode,
-                      lockVoucherToFirstMac: true,
-                      monitorIpv4Ttl: true,
-                      monitorIpv6HopLimit: true
-                    }
-                  : { antiSharingMode });
+                      monitorIpv4Ttl: false,
+                      monitorIpv6HopLimit: false
+                    });
               }}
               value={accessPolicy.antiSharingMode}
             >
-              <option value="disabled">Désactivé</option>
-              <option value="observe">Observation et préparation</option>
-              <option value="strict">Strict — bloquer le partage</option>
+              <option value="disabled">Désactivé — aucune règle réseau</option>
+              <option value="observe">Observation — aucune règle TTL/IPv6</option>
+              <option value="strict">Strict — appliquer les protections choisies</option>
             </select>
             <small>
-              Le mode strict bloque les TTL 63 et 127 des clients Hotspot authentifiés,
-              force une seule session par voucher et empêche le contournement IPv6.
+              Désactivé ne configure rien. Observation n’installe aucune règle réseau.
+              Strict applique uniquement les protections réseau cochées ci-dessous.
             </small>
           </label>
-          <label className="toggle-option">
-            <input
-              checked={accessPolicy.monitorIpv4Ttl}
-              disabled={!canEditSensitive || isLoading || accessPolicy.antiSharingMode === "strict"}
-              onChange={(event) => updateAccessPolicy({
-                monitorIpv4Ttl: event.target.checked
-              })}
-              type="checkbox"
-            />
-            <Network aria-hidden="true" />
-            <span>Détecter et bloquer les TTL de partage IPv4</span>
-          </label>
-          <label className="toggle-option">
-            <input
-              checked={accessPolicy.monitorIpv6HopLimit}
-              disabled={!canEditSensitive || isLoading || accessPolicy.antiSharingMode === "strict"}
-              onChange={(event) => updateAccessPolicy({
-                monitorIpv6HopLimit: event.target.checked
-              })}
-              type="checkbox"
-            />
-            <Network aria-hidden="true" />
-            <span>Bloquer IPv6 sur le réseau Hotspot en mode strict</span>
-          </label>
+
+          <div className="anti-sharing-option-grid">
+            <label className={`anti-sharing-option-card${accessPolicy.lockVoucherToFirstMac ? " is-checked" : ""}`}>
+              <input
+                checked={accessPolicy.lockVoucherToFirstMac}
+                disabled={!canEditSensitive || isLoading}
+                onChange={(event) => updateAccessPolicy({
+                  lockVoucherToFirstMac: event.target.checked
+                })}
+                type="checkbox"
+              />
+              <span className="anti-sharing-option-card__icon">
+                <ShieldCheck aria-hidden="true" />
+              </span>
+              <span className="anti-sharing-option-card__content">
+                <strong>Verrouillage du voucher par MAC</strong>
+                <small>
+                  La première adresse MAC qui utilise le voucher devient la seule autorisée.
+                  Un changement d’appareil exige de libérer cette liaison dans TicketPro.
+                </small>
+                <em>Indépendant du mode réseau</em>
+              </span>
+            </label>
+
+            <label
+              className={[
+                "anti-sharing-option-card",
+                accessPolicy.monitorIpv4Ttl ? "is-checked" : "",
+                accessPolicy.antiSharingMode !== "strict" ? "is-disabled" : ""
+              ].filter(Boolean).join(" ")}
+            >
+              <input
+                checked={accessPolicy.monitorIpv4Ttl}
+                disabled={!canEditSensitive || isLoading || accessPolicy.antiSharingMode !== "strict"}
+                onChange={(event) => updateAccessPolicy({
+                  monitorIpv4Ttl: event.target.checked
+                })}
+                type="checkbox"
+              />
+              <span className="anti-sharing-option-card__icon">
+                <Network aria-hidden="true" />
+              </span>
+              <span className="anti-sharing-option-card__content">
+                <strong>Blocage du partage IPv4 par TTL</strong>
+                <small>
+                  MikroTik bloque les TTL 63 et 127 couramment produits lorsqu’un téléphone
+                  partage sa connexion à d’autres appareils.
+                </small>
+                <em>{accessPolicy.antiSharingMode === "strict" ? "Protection disponible" : "Nécessite le mode strict"}</em>
+              </span>
+            </label>
+
+            <label
+              className={[
+                "anti-sharing-option-card",
+                accessPolicy.monitorIpv6HopLimit ? "is-checked" : "",
+                accessPolicy.antiSharingMode !== "strict" ? "is-disabled" : ""
+              ].filter(Boolean).join(" ")}
+            >
+              <input
+                checked={accessPolicy.monitorIpv6HopLimit}
+                disabled={!canEditSensitive || isLoading || accessPolicy.antiSharingMode !== "strict"}
+                onChange={(event) => updateAccessPolicy({
+                  monitorIpv6HopLimit: event.target.checked
+                })}
+                type="checkbox"
+              />
+              <span className="anti-sharing-option-card__icon">
+                <Network aria-hidden="true" />
+              </span>
+              <span className="anti-sharing-option-card__content">
+                <strong>Blocage IPv6 du réseau Hotspot</strong>
+                <small>
+                  MikroTik coupe le trafic IPv6 transféré depuis le Hotspot pour empêcher
+                  qu’il contourne les protections appliquées en IPv4.
+                </small>
+                <em>{accessPolicy.antiSharingMode === "strict" ? "Protection disponible" : "Nécessite le mode strict"}</em>
+              </span>
+            </label>
+          </div>
+
+          <div className="router-form-result anti-sharing-apply">
+            <span>Les choix ne prennent effet sur le MikroTik qu’après validation.</span>
+            <Button
+              disabled={!canEditSensitive || isLoading || isSavingAccessPolicy || !router}
+              icon={Save}
+              onClick={() => void saveAccessPolicy()}
+              variant="primary"
+            >
+              {isSavingAccessPolicy ? "Application…" : "Enregistrer et appliquer"}
+            </Button>
+          </div>
         </div>
       </Card>
 
@@ -712,21 +768,19 @@ export function RouterSettingsPage() {
               <option value="other">Autre</option>
             </select>
           </label>
-          <label className="form-field">
-            Mode réseau
-            <select
-              disabled={!canEditSensitive || isLoading}
-              value={infrastructureDraft.mode}
-              onChange={(event) => setInfrastructureDraft((current) => ({
-                ...current,
-                mode: event.target.value as InfrastructureDevice["mode"]
-              }))}
-            >
-              <option value="bridge">Bridge transparent</option>
-              <option value="router_nat">Routeur / NAT — bypass interdit</option>
-              <option value="unknown">Inconnu — bypass interdit</option>
-            </select>
-          </label>
+          <div className="infrastructure-bridge-note" role="note">
+            <span className="infrastructure-bridge-note__icon">
+              <ShieldCheck aria-hidden="true" />
+            </span>
+            <span>
+              <strong>Bridge transparent obligatoire</strong>
+              <small>
+                TicketPro enregistrera automatiquement ce mode. Un équipement en
+                routeur/NAT ne peut pas être bypassé, car il masque les appareils
+                placés derrière lui.
+              </small>
+            </span>
+          </div>
           <label className="form-field">
             Adresse MAC
             <input

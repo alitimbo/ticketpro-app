@@ -17,10 +17,12 @@ describe("plansPageModel", () => {
     expect(validatePlanForm(values)).toBeNull();
     expect(draft).toMatchObject({
       dataLimitMb: 2048,
+      downloadLimit: "5M",
       durationMinutes: 180,
       name: "3h-2Go",
       profileName: "3h-2go",
       sharedUsers: 1,
+      uploadLimit: "2M",
       validityMinutes: 300
     });
   });

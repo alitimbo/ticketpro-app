@@ -82,12 +82,12 @@ export function formatBytes(value: number): string {
 export function shouldShowDeviceProtectionNotice(
   policy: Pick<
     RouterAccessPolicy,
-    "antiSharingMode" | "lockVoucherToFirstMac"
+    "antiSharingMode" | "monitorIpv4Ttl"
   > | null
 ): boolean {
   return Boolean(
     policy &&
-      (!policy.lockVoucherToFirstMac || policy.antiSharingMode !== "strict")
+      (policy.antiSharingMode !== "strict" || !policy.monitorIpv4Ttl)
   );
 }
 

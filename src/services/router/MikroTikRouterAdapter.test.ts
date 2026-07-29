@@ -26,6 +26,59 @@ function createAdapter(transport: RouterOsApiTransport) {
 }
 
 describe("MikroTikRouterAdapter", () => {
+  it("met à jour le DNS du profil utilisé par le Hotspot existant", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/print": [{
+        ".id": "*H1",
+        disabled: "false",
+        name: "ticketpro-hotspot",
+        profile: "ticketpro-hotspot-profile"
+      }],
+      "/ip/hotspot/profile/print": [{
+        ".id": "*P1",
+        "dns-name": "ancien.hotspot.test",
+        name: "ticketpro-hotspot-profile"
+      }],
+      "/ip/hotspot/profile/set": []
+    });
+    const adapter = createAdapter(transport);
+
+    await expect(adapter.upsertHotspotDns(" WIFI.NOUVEAU.TEST. ")).resolves.toEqual({
+      action: "updated",
+      dnsName: "wifi.nouveau.test",
+      profileName: "ticketpro-hotspot-profile",
+      serverName: "ticketpro-hotspot"
+    });
+    expect(
+      transport.calls.find((call) => call.command === "/ip/hotspot/profile/set")?.params
+    ).toEqual({
+      "dns-name": "wifi.nouveau.test",
+      numbers: "*P1"
+    });
+  });
+
+  it("crée un profil DNS TicketPro lorsqu'aucun profil Hotspot n'existe", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/print": [],
+      "/ip/hotspot/profile/print": [],
+      "/ip/hotspot/profile/add": []
+    });
+    const adapter = createAdapter(transport);
+
+    await expect(adapter.upsertHotspotDns("wifi.ticketpro.test")).resolves.toEqual({
+      action: "created",
+      dnsName: "wifi.ticketpro.test",
+      profileName: "ticketpro-hotspot-profile",
+      serverName: null
+    });
+    expect(
+      transport.calls.find((call) => call.command === "/ip/hotspot/profile/add")?.params
+    ).toEqual({
+      "dns-name": "wifi.ticketpro.test",
+      name: "ticketpro-hotspot-profile"
+    });
+  });
+
   it("mappe les profils et la santé RouterOS vers le modèle interne", async () => {
     const transport = new MockRouterOsTransport({
       "/ip/hotspot/active/print": [

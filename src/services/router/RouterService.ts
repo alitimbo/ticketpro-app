@@ -123,6 +123,10 @@ export class RouterService {
     return this.run("getHotspotServers", () => this.adapter.getHotspotServers());
   }
 
+  upsertHotspotDns(dnsName: string) {
+    return this.run("upsertHotspotDns", () => this.adapter.upsertHotspotDns(dnsName));
+  }
+
   getHotspotPlans() {
     return this.run("getHotspotPlans", () => this.adapter.getHotspotPlans());
   }

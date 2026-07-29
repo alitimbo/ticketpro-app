@@ -5,7 +5,6 @@ import {
   Edit3,
   Eye,
   FileText,
-  Gauge,
   ListChecks,
   Plus,
   RotateCw,
@@ -47,7 +46,6 @@ import {
 } from "./plansPageModel";
 
 type PlanFormState = {
-  advancedOpen: boolean;
   error: string | null;
   mode: "create" | "edit";
   plan: PlanViewModel | null;
@@ -191,7 +189,6 @@ export function PlansPage() {
 
   const openCreateForm = () => {
     setFormState({
-      advancedOpen: false,
       error: null,
       mode: "create",
       plan: null,
@@ -201,7 +198,6 @@ export function PlansPage() {
 
   const openEditForm = (plan: PlanViewModel) => {
     setFormState({
-      advancedOpen: false,
       error: null,
       mode: "edit",
       plan,
@@ -275,13 +271,7 @@ export function PlansPage() {
       const created = isPersistent
         ? planFromRecord({ ...storedRecord!, sync_status: syncStatus })
         : planFromHotspotPlan(await service.createHotspotPlan(draft), 0);
-      const viewModel = {
-        ...created,
-        idleTimeout: formState.values.idleTimeout,
-        keepaliveTimeout: formState.values.keepaliveTimeout,
-        rateLimit: formState.values.rateLimit,
-        sessionTimeout: formState.values.sessionTimeout
-      };
+      const viewModel = created;
 
       setPlans((current) => [viewModel, ...current]);
       setMessage(`${viewModel.name} créé.`);
@@ -307,13 +297,7 @@ export function PlansPage() {
       const updated = isPersistent
         ? planFromRecord({ ...storedRecord!, sync_status: syncStatus }, formState.plan.linkedTickets)
         : planFromHotspotPlan(await service.updateHotspotPlan(formState.plan.id, draft), formState.plan.linkedTickets);
-      const viewModel = {
-        ...updated,
-        idleTimeout: formState.values.idleTimeout,
-        keepaliveTimeout: formState.values.keepaliveTimeout,
-        rateLimit: formState.values.rateLimit,
-        sessionTimeout: formState.values.sessionTimeout
-      };
+      const viewModel = updated;
 
       setPlans((current) => current.map((plan) => (plan.id === viewModel.id ? viewModel : plan)));
       setMessage(`${viewModel.name} modifié.`);
@@ -347,13 +331,7 @@ export function PlansPage() {
     const created = isPersistent
       ? planFromRecord({ ...storedRecord!, sync_status: syncStatus })
       : planFromHotspotPlan(await service.createHotspotPlan(draft), 0);
-    const copy = {
-      ...created,
-      idleTimeout: plan.idleTimeout,
-      keepaliveTimeout: plan.keepaliveTimeout,
-      rateLimit: plan.rateLimit,
-      sessionTimeout: plan.sessionTimeout
-    };
+    const copy = created;
 
     setPlans((current) => [copy, ...current]);
     setMessage(`${plan.name} dupliqué.`);
@@ -445,7 +423,6 @@ export function PlansPage() {
               key={template.name}
               onClick={() =>
                 setFormState({
-                  advancedOpen: false,
                   error: null,
                   mode: "create",
                   plan: null,
@@ -505,7 +482,6 @@ export function PlansPage() {
         onCancel={() => setFormState(null)}
         onChange={(values) => formState && setFormState({ ...formState, error: null, values })}
         onSubmit={() => void submitForm()}
-        onToggleAdvanced={() => formState && setFormState({ ...formState, advancedOpen: !formState.advancedOpen })}
       />
       <PlanDetailDialog onClose={() => setSelectedPlan(null)} plan={selectedPlan} />
     </div>
@@ -604,7 +580,7 @@ function PlanDetailDialog({
           </div>
           <div>
             <h2>{plan.name}</h2>
-            <p>Profil MikroTik : {plan.profileName}</p>
+            <p>Paramètres appliqués aux vouchers</p>
           </div>
           <Badge status={plan.syncStatus === "synced" ? "success" : "warning"}>
             {plan.syncStatus === "synced" ? "Synchronisé" : "À synchroniser"}
@@ -630,9 +606,6 @@ function PlanDetailDialog({
             value={plan.priceHint === null ? "Non défini" : `${plan.priceHint} CFA`}
           />
           <PlanDetailLine label="Tickets liés" value={String(plan.linkedTickets)} />
-          <PlanDetailLine label="Session RouterOS" value={plan.sessionTimeout} />
-          <PlanDetailLine label="Inactivité" value={plan.idleTimeout} />
-          <PlanDetailLine label="Keepalive" value={plan.keepaliveTimeout} />
         </dl>
 
         <div className="confirm-dialog__actions">
@@ -658,10 +631,9 @@ type PlanFormDialogProps = {
   onCancel: () => void;
   onChange: (values: PlanFormValues) => void;
   onSubmit: () => void;
-  onToggleAdvanced: () => void;
 };
 
-function PlanFormDialog({ canSubmit, formState, onCancel, onChange, onSubmit, onToggleAdvanced }: PlanFormDialogProps) {
+function PlanFormDialog({ canSubmit, formState, onCancel, onChange, onSubmit }: PlanFormDialogProps) {
   if (!formState) {
     return null;
   }
@@ -678,7 +650,7 @@ function PlanFormDialog({ canSubmit, formState, onCancel, onChange, onSubmit, on
           </div>
           <div>
             <h2>{formState.mode === "create" ? "Nouveau plan" : "Modifier plan"}</h2>
-            <p>Les champs avancés sont optionnels.</p>
+            <p>Configurez les limites réellement appliquées aux vouchers.</p>
           </div>
         </header>
 
@@ -744,40 +716,6 @@ function PlanFormDialog({ canSubmit, formState, onCancel, onChange, onSubmit, on
             </select>
           </label>
         </div>
-
-        <button className="advanced-toggle" onClick={onToggleAdvanced} type="button">
-          <Gauge aria-hidden="true" />
-          {formState.advancedOpen ? "Masquer les champs avancés" : "Afficher les champs avancés"}
-        </button>
-
-        {formState.advancedOpen ? (
-          <div className="router-form-grid">
-            <label className="form-field">
-              Nom profil MikroTik
-              <input value={values.profileName} onChange={(event) => update({ profileName: event.target.value })} />
-            </label>
-            <label className="form-field">
-              Rate-limit
-              <input value={values.rateLimit} onChange={(event) => update({ rateLimit: event.target.value })} />
-            </label>
-            <label className="form-field">
-              Shared-users
-              <input value={values.sharedUsers} onChange={(event) => update({ sharedUsers: event.target.value })} />
-            </label>
-            <label className="form-field">
-              Session-timeout
-              <input value={values.sessionTimeout} onChange={(event) => update({ sessionTimeout: event.target.value })} />
-            </label>
-            <label className="form-field">
-              Idle-timeout
-              <input value={values.idleTimeout} onChange={(event) => update({ idleTimeout: event.target.value })} />
-            </label>
-            <label className="form-field">
-              Keepalive-timeout
-              <input value={values.keepaliveTimeout} onChange={(event) => update({ keepaliveTimeout: event.target.value })} />
-            </label>
-          </div>
-        ) : null}
 
         {formState.error ? <p className="form-error">{formState.error}</p> : null}
 

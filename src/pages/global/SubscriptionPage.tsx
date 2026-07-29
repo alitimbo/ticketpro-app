@@ -10,8 +10,9 @@ import {
   type IpayPaymentType
 } from "../../services/payments";
 import { purchaseSaasSubscription } from "../../services/saas";
+import { PaymentMethodPicker } from "../../shared/payment/PaymentMethodPicker";
 import { Badge, Button, Card, DataListItem, PageHeader, StatCard } from "../../shared/ui";
-import { formatCfa, formatDate } from "./subscriptionPageModel";
+import { formatCfa, formatDate, formatPlanDuration } from "./subscriptionPageModel";
 
 export function SubscriptionPage() {
   const { refreshSaasAccount, saasAccount, session } = useAuth();
@@ -191,7 +192,8 @@ export function SubscriptionPage() {
                 <select onChange={(event) => setSelectedPlanId(event.target.value)} value={selectedPlanId}>
                   {plans.map((plan) => (
                     <option key={plan.id} value={plan.id}>
-                      {plan.name} — {plan.router_limit} routeur(s) — {formatCfa(plan.price_cfa)}
+                      {plan.name} — {formatPlanDuration(plan.duration_days)} — {plan.router_limit} routeur(s) —{" "}
+                      {formatCfa(plan.price_cfa)}
                     </option>
                   ))}
                 </select>
@@ -208,12 +210,33 @@ export function SubscriptionPage() {
               <label className="form-field">
                 Moyen de paiement
                 <select onChange={(event) => setPaymentType(event.target.value as IpayPaymentType)} value={paymentType}>
-                  <option value="mobile">Mobile Money (Airtel, Moov, Zamani)</option>
+                  <option value="mobile">Mobile Money (Orange, Moov, Zamani)</option>
                   <option value="nita_online">MyNita</option>
                   <option value="amanata">Amanata</option>
                 </select>
               </label>
             </div>
+            {selectedPlan ? (
+              <div className="subscription-selection-summary" aria-live="polite">
+                <div>
+                  <span>Forfait choisi</span>
+                  <strong>{selectedPlan.name}</strong>
+                </div>
+                <div>
+                  <span>Durée</span>
+                  <strong>{formatPlanDuration(selectedPlan.duration_days)}</strong>
+                </div>
+                <div>
+                  <span>Capacité</span>
+                  <strong>{selectedPlan.router_limit} routeur(s)</strong>
+                </div>
+                <div>
+                  <span>Montant</span>
+                  <strong>{formatCfa(selectedPlan.price_cfa)}</strong>
+                </div>
+              </div>
+            ) : null}
+            <PaymentMethodPicker onChange={setPaymentType} value={paymentType} />
             <Button
               disabled={!canPay || isLoading || plans.length === 0}
               icon={CreditCard}
@@ -228,7 +251,8 @@ export function SubscriptionPage() {
             <div className="auth-note">
               <CreditCard aria-hidden="true" size={20} />
               <p>
-                {payment.order.plan.name} — {formatCfa(payment.order.amount)}
+                {payment.order.plan.name} — {formatPlanDuration(payment.order.plan.duration_days)} —{" "}
+                {formatCfa(payment.order.amount)}
                 {payment.payment.meta_data?.code ? ` — Code : ${payment.payment.meta_data.code}` : ""}
               </p>
             </div>

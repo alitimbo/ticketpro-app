@@ -7,13 +7,9 @@ export type PlanFormValues = {
   downloadLimit: string;
   durationAmount: string;
   durationUnit: "days" | "hours" | "minutes";
-  idleTimeout: string;
-  keepaliveTimeout: string;
   name: string;
   priceHint: string;
   profileName: string;
-  rateLimit: string;
-  sessionTimeout: string;
   sharedUsers: string;
   status: HotspotPlan["status"];
   uploadLimit: string;
@@ -32,11 +28,7 @@ export type PlanTemplate = {
 };
 
 export type PlanViewModel = HotspotPlan & {
-  idleTimeout: string;
-  keepaliveTimeout: string;
   linkedTickets: number;
-  rateLimit: string;
-  sessionTimeout: string;
   syncStatus: HotspotPlanRecord["sync_status"];
 };
 
@@ -55,13 +47,9 @@ export const emptyPlanFormValues: PlanFormValues = {
   downloadLimit: "5M",
   durationAmount: "3",
   durationUnit: "hours",
-  idleTimeout: "5m",
-  keepaliveTimeout: "2m",
   name: "",
   priceHint: "",
   profileName: "",
-  rateLimit: "5M/2M",
-  sessionTimeout: "3h",
   sharedUsers: "1",
   status: "active",
   uploadLimit: "2M",
@@ -78,7 +66,6 @@ export function applyTemplate(values: PlanFormValues, template: PlanTemplate): P
     durationUnit: template.durationUnit,
     name: template.name,
     profileName: toProfileName(template.name),
-    sessionTimeout: durationToTimeout(template.durationAmount, template.durationUnit),
     validityAmount: template.validityAmount ?? template.durationAmount,
     validityUnit: template.validityUnit ?? template.durationUnit
   };
@@ -95,13 +82,9 @@ export function planToFormValues(plan: PlanViewModel): PlanFormValues {
     downloadLimit: plan.downloadLimit ?? "",
     durationAmount: duration.durationAmount,
     durationUnit: duration.durationUnit,
-    idleTimeout: plan.idleTimeout,
-    keepaliveTimeout: plan.keepaliveTimeout,
     name: plan.name,
     priceHint: plan.priceHint ? String(plan.priceHint) : "",
     profileName: plan.profileName,
-    rateLimit: plan.rateLimit,
-    sessionTimeout: plan.sessionTimeout,
     sharedUsers: String(plan.sharedUsers),
     status: plan.status,
     uploadLimit: plan.uploadLimit ?? "",
@@ -128,11 +111,7 @@ export function formValuesToPlanDraft(values: PlanFormValues): HotspotPlanDraft 
 export function planFromHotspotPlan(plan: HotspotPlan, linkedTickets = 0): PlanViewModel {
   return {
     ...plan,
-    idleTimeout: "5m",
-    keepaliveTimeout: "2m",
     linkedTickets,
-    rateLimit: [plan.downloadLimit, plan.uploadLimit].filter(Boolean).join("/") || "Non défini",
-    sessionTimeout: `${plan.durationMinutes}m`,
     syncStatus: "synced"
   };
 }
@@ -267,18 +246,6 @@ function durationToMinutes(amount: string, unit: PlanFormValues["durationUnit"])
   }
 
   return value;
-}
-
-function durationToTimeout(amount: string, unit: PlanFormValues["durationUnit"]): string {
-  if (unit === "days") {
-    return `${amount}d`;
-  }
-
-  if (unit === "hours") {
-    return `${amount}h`;
-  }
-
-  return `${amount}m`;
 }
 
 function minutesToDuration(minutes: number): Pick<PlanFormValues, "durationAmount" | "durationUnit"> {

@@ -23,7 +23,7 @@ describe("RouterAccessPolicyService", () => {
         type: "antenna"
       }],
       lockVoucherToFirstMac: true,
-      monitorIpv4Ttl: true,
+      monitorIpv4Ttl: false,
       monitorIpv6HopLimit: false
     };
 
@@ -85,15 +85,25 @@ describe("RouterAccessPolicyService", () => {
     expect(error).toContain("déclarée plusieurs fois");
   });
 
-  it("exige toutes les protections lorsque le mode strict est sélectionné", () => {
-    const error = validateRouterAccessPolicy({
+  it("autorise le blocage TTL sans verrouiller le voucher sur une MAC", () => {
+    expect(validateRouterAccessPolicy({
       antiSharingMode: "strict",
       infrastructureDevices: [],
       lockVoucherToFirstMac: false,
       monitorIpv4Ttl: true,
-      monitorIpv6HopLimit: true
+      monitorIpv6HopLimit: false
+    })).toBeNull();
+  });
+
+  it("exige au moins une protection réseau en mode strict", () => {
+    const error = validateRouterAccessPolicy({
+      antiSharingMode: "strict",
+      infrastructureDevices: [],
+      lockVoucherToFirstMac: true,
+      monitorIpv4Ttl: false,
+      monitorIpv6HopLimit: false
     });
 
-    expect(error).toContain("verrouillage du voucher");
+    expect(error).toContain("au moins une protection réseau");
   });
 });

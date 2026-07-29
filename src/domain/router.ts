@@ -63,6 +63,13 @@ export type HotspotServer = {
   isEnabled: boolean;
 };
 
+export type HotspotDnsConfigurationResult = {
+  action: "created" | "updated";
+  dnsName: string;
+  profileName: string;
+  serverName: string | null;
+};
+
 export type HotspotPlan = {
   id: string;
   name: string;

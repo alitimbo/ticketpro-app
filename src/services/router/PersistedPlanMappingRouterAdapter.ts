@@ -31,6 +31,10 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
     return this.delegate.getHotspotServers();
   }
 
+  upsertHotspotDns(dnsName: string) {
+    return this.delegate.upsertHotspotDns(dnsName);
+  }
+
   getHotspotPlans() {
     return this.delegate.getHotspotPlans();
   }

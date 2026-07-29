@@ -400,6 +400,10 @@ export function formatCfa(value: number | null): string {
   return `${new Intl.NumberFormat("fr-FR").format(value)} CFA`;
 }
 
+export function formatPlanDuration(durationDays: number): string {
+  return `${durationDays} jour${durationDays > 1 ? "s" : ""}`;
+}
+
 export function formatSubscriptionPeriod(start: string, end: string): string {
   return `${formatDate(start)} au ${formatDate(end)}`;
 }

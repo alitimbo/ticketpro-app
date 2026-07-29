@@ -6,7 +6,9 @@ import {
   emptyRouterFormValues,
   filterRouters,
   getRouterLimitMessage,
+  isValidHotspotDnsName,
   listRoutersForAccount,
+  normalizeHotspotDnsName,
   routerCardFromRecord,
   routerConnectionInputsFromCard,
   routerRecordFromCard
@@ -51,6 +53,7 @@ describe("routerPageModel", () => {
     const router = createRouterFromForm(
       {
         ...emptyRouterFormValues,
+        hotspotAddress: " WIFI.ZONE-TEST.NE. ",
         ipAddress: "192.168.99.1",
         name: "Zone test",
         password: "secret"
@@ -67,9 +70,17 @@ describe("routerPageModel", () => {
     expect(router).toMatchObject({
       accountId: "account-douma-demo",
       createdByProfileId: "account-douma-demo:internal-profile-operator",
+      hotspotAddress: "wifi.zone-test.ne",
       id: "router-test",
       subscriptionCounted: true
     });
+  });
+
+  it("normalise et valide le DNS Hotspot", () => {
+    expect(normalizeHotspotDnsName(" WIFI.EXEMPLE.NE. ")).toBe("wifi.exemple.ne");
+    expect(isValidHotspotDnsName("wifi.exemple.ne")).toBe(true);
+    expect(isValidHotspotDnsName("https://wifi.exemple.ne/login")).toBe(false);
+    expect(isValidHotspotDnsName("wifi invalide")).toBe(false);
   });
 
   it("reconstruit une carte depuis SQLite et ses connexions", () => {

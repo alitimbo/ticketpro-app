@@ -395,9 +395,9 @@ export function RouterHomePage () {
           <div className='router-security-notice__content'>
             <strong>Blocage du partage de connexion incomplet</strong>
             <p>
-              Activez la protection stricte pour verrouiller les vouchers et
-              bloquer le trafic provenant d'appareils connectés derrière un
-              téléphone.
+              Activez le mode strict et le blocage TTL pour empêcher le partage
+              derrière un téléphone. Le verrouillage du voucher sur la première
+              adresse MAC reste facultatif.
             </p>
           </div>
           <Button
