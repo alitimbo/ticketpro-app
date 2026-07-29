@@ -85,6 +85,27 @@ describe("RouterAccessPolicyService", () => {
     expect(error).toContain("déclarée plusieurs fois");
   });
 
+  it("refuse une adresse MAC incomplète ou contenant un caractère non hexadécimal", () => {
+    const error = validateRouterAccessPolicy({
+      antiSharingMode: "observe",
+      infrastructureDevices: [{
+        id: "antenna-invalid",
+        internetBypass: true,
+        ipAddress: "192.168.4.6",
+        macAddress: "CC:DD:EE:FF:GG",
+        mode: "bridge",
+        name: "Antenne GrandStream 2",
+        type: "antenna"
+      }],
+      lockVoucherToFirstMac: false,
+      monitorIpv4Ttl: false,
+      monitorIpv6HopLimit: false
+    });
+
+    expect(error).toContain("adresse MAC");
+    expect(error).toContain("invalide");
+  });
+
   it("autorise le blocage TTL sans verrouiller le voucher sur une MAC", () => {
     expect(validateRouterAccessPolicy({
       antiSharingMode: "strict",

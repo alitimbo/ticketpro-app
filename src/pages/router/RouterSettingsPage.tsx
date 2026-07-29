@@ -80,6 +80,7 @@ export function RouterSettingsPage() {
   const [conflictingRemotePolicy, setConflictingRemotePolicy] =
     useState<{ policy: RouterAccessPolicy; revision: number } | null>(null);
   const [infrastructureDraft, setInfrastructureDraft] = useState(emptyInfrastructureDevice);
+  const [infrastructureDraftError, setInfrastructureDraftError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [testMessage, setTestMessage] = useState("Non testé");
   const [isLoading, setIsLoading] = useState(true);
@@ -264,6 +265,14 @@ export function RouterSettingsPage() {
     setFeedback(null);
   };
 
+  const updateInfrastructureDraft = (
+    partial: Partial<Omit<InfrastructureDevice, "id">>
+  ) => {
+    setInfrastructureDraft((current) => ({ ...current, ...partial }));
+    setInfrastructureDraftError(null);
+    setFeedback(null);
+  };
+
   const addInfrastructureDevice = () => {
     const device: InfrastructureDevice = {
       ...infrastructureDraft,
@@ -280,20 +289,80 @@ export function RouterSettingsPage() {
     };
     const validationError = validateRouterAccessPolicy(candidate);
     if (validationError) {
-      setFeedback({ kind: "error", text: validationError });
+      setInfrastructureDraftError(validationError);
       return;
     }
     setAccessPolicy(candidate);
     setInfrastructureDraft(emptyInfrastructureDevice);
+    setInfrastructureDraftError(null);
     setFeedback(null);
   };
 
-  const removeInfrastructureDevice = (id: string) => {
-    updateAccessPolicy({
+  const removeInfrastructureDevice = async (device: InfrastructureDevice) => {
+    if (!canEditSensitive || !router || !session) {
+      setFeedback({ kind: "error", text: "Seul l'Admin peut retirer cet équipement." });
+      return;
+    }
+
+    const candidate: RouterAccessPolicy = {
+      ...accessPolicy,
       infrastructureDevices: accessPolicy.infrastructureDevices.filter(
-        (device) => device.id !== id
+        (item) => item.id !== device.id
       )
-    });
+    };
+    setIsSavingAccessPolicy(true);
+    setFeedback(null);
+
+    try {
+      const connections = await connectionRepository.listByRouter(router.id);
+      const service = await createPersistedRouterService({
+        authSession: session,
+        connections,
+        database,
+        router
+      });
+      if (device.internetBypass) {
+        await service.removeHotspotBypass(device.id, device.macAddress);
+      }
+
+      const syncResult = await accessPolicySyncService.saveAndSync(
+        session.account_id,
+        router.id,
+        candidate,
+        cloudRouterId
+      );
+      setAccessPolicy(syncResult.policy);
+      setSavedAccessPolicy(structuredClone(syncResult.policy));
+      setAccessPolicySyncStatus(syncResult.status);
+      setConflictingRemotePolicy(
+        syncResult.status === "conflict" && syncResult.remotePolicy
+          ? { policy: syncResult.remotePolicy, revision: syncResult.revision }
+          : null
+      );
+      setFeedback(syncResult.status === "synced"
+        ? {
+            kind: "success",
+            text: `${device.name} a été retiré de RouterOS, de la base locale et du VPS.`
+          }
+        : syncResult.status === "conflict"
+          ? {
+              kind: "error",
+              text: `${device.name} a été retiré de RouterOS et localement, mais un conflit VPS doit être résolu.`
+            }
+          : {
+              kind: "success",
+              text: `${device.name} a été retiré de RouterOS et localement. Le VPS sera synchronisé au retour du réseau.`
+            });
+    } catch (error) {
+      setFeedback({
+        kind: "error",
+        text: error instanceof RouterServiceError || error instanceof Error
+          ? error.message
+          : `Impossible de retirer ${device.name} du MikroTik.`
+      });
+    } finally {
+      setIsSavingAccessPolicy(false);
+    }
   };
 
   const applyInfrastructurePolicy = async (
@@ -359,6 +428,14 @@ export function RouterSettingsPage() {
   const saveAccessPolicy = async () => {
     if (!canEditSensitive || !router || !session) {
       setFeedback({ kind: "error", text: "Seul l'Admin peut modifier cette politique réseau." });
+      return;
+    }
+
+    if (hasInfrastructureDraftContent(infrastructureDraft)) {
+      const message =
+        "L’équipement renseigné n’est pas encore dans la liste. Corrigez les champs puis cliquez sur « Ajouter à la liste » avant d’enregistrer.";
+      setInfrastructureDraftError(message);
+      setFeedback({ kind: "error", text: message });
       return;
     }
 
@@ -746,10 +823,7 @@ export function RouterSettingsPage() {
               disabled={!canEditSensitive || isLoading}
               placeholder="Ex. Antenne toit nord"
               value={infrastructureDraft.name}
-              onChange={(event) => setInfrastructureDraft((current) => ({
-                ...current,
-                name: event.target.value
-              }))}
+              onChange={(event) => updateInfrastructureDraft({ name: event.target.value })}
             />
           </label>
           <label className="form-field">
@@ -757,10 +831,9 @@ export function RouterSettingsPage() {
             <select
               disabled={!canEditSensitive || isLoading}
               value={infrastructureDraft.type}
-              onChange={(event) => setInfrastructureDraft((current) => ({
-                ...current,
+              onChange={(event) => updateInfrastructureDraft({
                 type: event.target.value as InfrastructureDevice["type"]
-              }))}
+              })}
             >
               <option value="antenna">Antenne</option>
               <option value="access_point">Point d'accès</option>
@@ -787,10 +860,7 @@ export function RouterSettingsPage() {
               disabled={!canEditSensitive || isLoading}
               placeholder="AA:BB:CC:DD:EE:FF"
               value={infrastructureDraft.macAddress}
-              onChange={(event) => setInfrastructureDraft((current) => ({
-                ...current,
-                macAddress: event.target.value
-              }))}
+              onChange={(event) => updateInfrastructureDraft({ macAddress: event.target.value })}
             />
           </label>
           <label className="form-field">
@@ -799,10 +869,7 @@ export function RouterSettingsPage() {
               disabled={!canEditSensitive || isLoading}
               placeholder="192.168.88.10"
               value={infrastructureDraft.ipAddress}
-              onChange={(event) => setInfrastructureDraft((current) => ({
-                ...current,
-                ipAddress: event.target.value
-              }))}
+              onChange={(event) => updateInfrastructureDraft({ ipAddress: event.target.value })}
             />
             <small>L'adresse doit rester stable sur le MikroTik.</small>
           </label>
@@ -810,16 +877,18 @@ export function RouterSettingsPage() {
             <input
               checked={infrastructureDraft.internetBypass}
               disabled={!canEditSensitive || isLoading}
-              onChange={(event) => setInfrastructureDraft((current) => ({
-                ...current,
+              onChange={(event) => updateInfrastructureDraft({
                 internetBypass: event.target.checked
-              }))}
+              })}
               type="checkbox"
             />
             <RadioTower aria-hidden="true" />
             <span>Autoriser Internet pour l'équipement</span>
           </label>
         </div>
+        {infrastructureDraftError ? (
+          <p className="form-error">{infrastructureDraftError}</p>
+        ) : null}
         <div className="router-form-result">
           <span>
             Le bypass concerne uniquement l'adresse de gestion de l'antenne, jamais les clients situés derrière.
@@ -829,11 +898,13 @@ export function RouterSettingsPage() {
             icon={Plus}
             onClick={addInfrastructureDevice}
           >
-            Ajouter
+            Ajouter à la liste
           </Button>
         </div>
 
-        {accessPolicy.infrastructureDevices.length > 0 ? (
+        {isLoading ? (
+          <StatusDot label="Chargement des équipements enregistrés…" status="warning" />
+        ) : accessPolicy.infrastructureDevices.length > 0 ? (
           <div className="data-list">
             {accessPolicy.infrastructureDevices.map((device) => (
               <DataListItem
@@ -846,10 +917,10 @@ export function RouterSettingsPage() {
                   <Button
                     disabled={!canEditSensitive || isSavingAccessPolicy}
                     icon={Trash2}
-                    onClick={() => removeInfrastructureDevice(device.id)}
+                    onClick={() => void removeInfrastructureDevice(device)}
                     variant="ghost"
                   >
-                    Retirer
+                    Retirer du MikroTik
                   </Button>
                 )}
                 title={`${device.name}${device.internetBypass ? " · bypass Internet" : ""}`}
@@ -861,7 +932,7 @@ export function RouterSettingsPage() {
         )}
 
         <div className="router-form-result">
-          <span>Les modifications ne prennent effet qu'après synchronisation.</span>
+          <span>Seuls les équipements affichés dans la liste seront synchronisés.</span>
           <Button
             disabled={!canEditSensitive || isLoading || isSavingAccessPolicy || !router}
             icon={Save}
@@ -879,6 +950,16 @@ export function RouterSettingsPage() {
         </Card>
       ) : null}
     </div>
+  );
+}
+
+function hasInfrastructureDraftContent(
+  draft: Omit<InfrastructureDevice, "id">
+): boolean {
+  return Boolean(
+    draft.name.trim()
+    || draft.macAddress.trim()
+    || draft.ipAddress.trim()
   );
 }
 

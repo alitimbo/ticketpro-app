@@ -10,6 +10,13 @@ class MockRouterOsTransport implements RouterOsApiTransport {
 
   async call(request: RouterOsApiRequest): Promise<RouterOsApiRow[]> {
     this.calls.push(request);
+    if (request.command === "/ip/hotspot/ip-binding/remove") {
+      const rows = this.responses["/ip/hotspot/ip-binding/print"] ?? [];
+      const bindingId = String(request.params?.numbers ?? "");
+      const index = rows.findIndex((row) => row[".id"] === bindingId || row.id === bindingId);
+      if (index >= 0) rows.splice(index, 1);
+      return [];
+    }
     return this.responses[request.command] ?? [];
   }
 }

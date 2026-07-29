@@ -471,14 +471,30 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     }
   }
 
-  async removeHotspotBypass(id: string, _macAddress: string): Promise<void> {
+  async removeHotspotBypass(id: string, macAddress: string): Promise<void> {
     const rows = await this.call("/ip/hotspot/ip-binding/print");
+    const managedPrefix = "TicketPro infrastructure:";
+    const expectedPrefix = `${managedPrefix}${id}`;
+    const normalizedMacAddress = normalizeMacAddress(macAddress);
     const existing = rows.find(
       (row) => pick(row, "comment")?.startsWith(`TicketPro infrastructure:${id}`)
+    ) ?? rows.find((row) =>
+      pick(row, "comment")?.startsWith(managedPrefix)
+      && normalizeOptionalMacAddress(pick(row, "mac-address")) === normalizedMacAddress
     );
     const bindingId = existing ? pick(existing, ".id", "id") : null;
     if (bindingId) {
       await this.call("/ip/hotspot/ip-binding/remove", { numbers: bindingId });
+      const remaining = await this.call("/ip/hotspot/ip-binding/print");
+      if (remaining.some((row) =>
+        pick(row, ".id", "id") === bindingId
+        || pick(row, "comment")?.startsWith(expectedPrefix)
+      )) {
+        throw new RouterAdapterError(
+          "router_rejected",
+          "RouterOS kept the TicketPro infrastructure bypass after removal"
+        );
+      }
     }
   }
 
