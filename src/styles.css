@@ -1306,64 +1306,35 @@ a {
   align-items: center;
 }
 
-.payment-brand-group .payment-brand + .payment-brand {
+.payment-brand-group--mobile .payment-brand-logo + .payment-brand-logo {
   margin-left: -5px;
 }
 
-.payment-brand {
-  position: relative;
+.payment-brand-logo {
   display: grid;
   place-items: center;
-  width: 38px;
-  height: 38px;
+  height: 42px;
   overflow: hidden;
   border: 2px solid var(--color-surface);
-  border-radius: 10px;
+  border-radius: 9px;
+  background: #fff;
   box-shadow: 0 2px 7px rgb(15 23 42 / 12%);
-  font-size: 0.65rem;
-  font-weight: 900;
-  letter-spacing: -0.04em;
 }
 
-.payment-brand--orange {
-  border-radius: 3px;
-  background: #f16e00;
-  color: #fff;
+.payment-brand-logo--compact {
+  width: 44px;
 }
 
-.payment-brand--orange span {
-  align-self: end;
-  padding-bottom: 3px;
-  font-size: 0.55rem;
-  letter-spacing: 0;
+.payment-brand-logo--wide {
+  width: 76px;
 }
 
-.payment-brand--moov {
-  background: linear-gradient(140deg, #77bd43 0 50%, #066a4f 50% 100%);
-  color: #fff;
-  font-size: 0.7rem;
-  letter-spacing: -0.08em;
-}
-
-.payment-brand--zamani {
-  background: linear-gradient(145deg, #fad627, #f39a1e);
-  color: #135c45;
-  font-size: 1.25rem;
-  font-style: italic;
-}
-
-.payment-brand--mynita {
-  width: 54px;
-  background: linear-gradient(145deg, #0a8f7c, #065b75);
-  color: #fff;
-  font-size: 0.65rem;
-  letter-spacing: 0;
-}
-
-.payment-brand--amanata {
-  background: linear-gradient(145deg, #20a464, #0873ad);
-  color: #fff;
-  font-size: 1.25rem;
+.payment-brand-logo img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 3px;
+  object-fit: contain;
 }
 
 .subscription-plan-grid {

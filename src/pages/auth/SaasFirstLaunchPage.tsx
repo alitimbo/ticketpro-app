@@ -283,9 +283,9 @@ export function SaasFirstLaunchPage({ onComplete }: { onComplete: () => void }) 
                         onChange={(event) => update("paymentType", event.target.value as IpayPaymentType)}
                         value={form.paymentType}
                       >
-                        <option value="mobile">Mobile Money (Orange, Moov, Zamani)</option>
-                        <option value="nita_online">MyNita</option>
-                        <option value="amanata">Amanata</option>
+                        <option value="mobile">Mobile Money (Airtel, Moov, Zamani)</option>
+                        <option value="nita_online">Nita</option>
+                        <option value="amanata">Amana</option>
                       </select>
                     </label>
                   </>

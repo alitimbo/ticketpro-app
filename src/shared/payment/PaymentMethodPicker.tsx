@@ -1,5 +1,10 @@
 import { CheckCircle2 } from "lucide-react";
 import type { IpayPaymentType } from "../../services/payments";
+import airtelMoneyLogo from "../../assets/payements/airtel.png";
+import amanaLogo from "../../assets/payements/amana.png";
+import moovMoneyLogo from "../../assets/payements/moov.png";
+import nitaLogo from "../../assets/payements/nita.png";
+import zamaniLogo from "../../assets/payements/zamani.png";
 
 const paymentMethods: Array<{
   description: string;
@@ -7,18 +12,18 @@ const paymentMethods: Array<{
   type: IpayPaymentType;
 }> = [
   {
-    description: "Orange Money, Moov Money et Zamani Cash",
+    description: "Airtel Money, Moov Money et Zamani",
     label: "Mobile Money",
     type: "mobile"
   },
   {
-    description: "Paiement depuis votre compte MyNita",
-    label: "MyNita",
+    description: "Paiement depuis votre compte Nita",
+    label: "Nita",
     type: "nita_online"
   },
   {
-    description: "Paiement depuis votre compte Amanata",
-    label: "Amanata",
+    description: "Paiement depuis votre compte Amana",
+    label: "Amana",
     type: "amanata"
   }
 ];
@@ -63,15 +68,15 @@ export function PaymentMethodPicker({
 function PaymentMethodLogos({ type }: { type: IpayPaymentType }) {
   if (type === "mobile") {
     return (
-      <span className="payment-brand-group" aria-label="Orange Money, Moov Money et Zamani Cash">
-        <span className="payment-brand payment-brand--orange" title="Orange Money">
-          <span>orange</span>
+      <span className="payment-brand-group payment-brand-group--mobile">
+        <span className="payment-brand-logo payment-brand-logo--compact">
+          <img alt="Airtel Money" src={airtelMoneyLogo} />
         </span>
-        <span className="payment-brand payment-brand--moov" title="Moov Money">
-          <span>moov</span>
+        <span className="payment-brand-logo payment-brand-logo--compact">
+          <img alt="Moov Money" src={moovMoneyLogo} />
         </span>
-        <span className="payment-brand payment-brand--zamani" title="Zamani Cash">
-          <span>Z</span>
+        <span className="payment-brand-logo payment-brand-logo--compact">
+          <img alt="Zamani" src={zamaniLogo} />
         </span>
       </span>
     );
@@ -79,18 +84,18 @@ function PaymentMethodLogos({ type }: { type: IpayPaymentType }) {
 
   if (type === "nita_online") {
     return (
-      <span className="payment-brand-group" aria-label="MyNita">
-        <span className="payment-brand payment-brand--mynita" title="MyNita">
-          <span>MyNita</span>
+      <span className="payment-brand-group">
+        <span className="payment-brand-logo payment-brand-logo--wide">
+          <img alt="Nita" src={nitaLogo} />
         </span>
       </span>
     );
   }
 
   return (
-    <span className="payment-brand-group" aria-label="Amanata">
-      <span className="payment-brand payment-brand--amanata" title="Amanata">
-        <span>A</span>
+    <span className="payment-brand-group">
+      <span className="payment-brand-logo payment-brand-logo--wide">
+        <img alt="Amana" src={amanaLogo} />
       </span>
     </span>
   );
