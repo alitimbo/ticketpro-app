@@ -92,6 +92,26 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "disable_legacy_demo_account",
         include_str!("../migrations/017_disable_legacy_demo_account.sql"),
     ),
+    (
+        18,
+        "restore_vpn_connection_modes",
+        include_str!("../migrations/018_restore_vpn_connection_modes.sql"),
+    ),
+    (
+        19,
+        "ticket_router_username_uniqueness",
+        include_str!("../migrations/019_ticket_router_username_uniqueness.sql"),
+    ),
+    (
+        20,
+        "router_hotspot_address",
+        include_str!("../migrations/020_router_hotspot_address.sql"),
+    ),
+    (
+        21,
+        "generated_file_metadata",
+        include_str!("../migrations/021_generated_file_metadata.sql"),
+    ),
 ];
 
 const DATABASE_FILE_NAME: &str = "hotspot-manager.sqlite";

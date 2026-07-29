@@ -7,6 +7,7 @@ export type TicketListStatus =
   | "activé"
   | "complété"
   | "disponible"
+  | "désactivé"
   | "erreur_sync"
   | "expiré"
   | "imprimé"
@@ -123,6 +124,10 @@ export function filterTickets(tickets: TicketListItem[], filters: TicketFilters)
   const to = filters.dateTo ? endOfDay(filters.dateTo) : null;
 
   return tickets.filter((ticket) => {
+    if (ticket.status === "supprimé" && filters.status !== "supprimé") {
+      return false;
+    }
+
     const createdAt = new Date(ticket.createdAt).getTime();
 
     if (from !== null && createdAt < from) {
@@ -243,6 +248,15 @@ export function buildTicketLifecycleLogs(ticket: TicketListItem): TicketLifecycl
     });
   }
 
+  if (ticket.status === "supprimé") {
+    logs.push({
+      createdAt: ticket.createdAt,
+      id: `${ticket.id}-deleted`,
+      level: "warning",
+      message: "Ticket supprimé de RouterOS et masqué de la liste active."
+    });
+  }
+
   if (ticket.status === "erreur_sync") {
     logs.push({
       createdAt: ticket.createdAt,
@@ -269,6 +283,7 @@ export function ticketStatusLabel(status: TicketListStatus): string {
     activé: "Activé",
     complété: "Complété",
     disponible: "Disponible",
+    désactivé: "Désactivé",
     erreur_sync: "Erreur sync",
     expiré: "Expiré",
     imprimé: "Imprimé",

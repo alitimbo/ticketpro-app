@@ -15,28 +15,13 @@ export interface LocalRouterDiscoveryProvider {
   scan(): Promise<DiscoveredRouterCandidate[]>;
 }
 
+/**
+ * Placeholder kept for dependency compatibility. It deliberately never
+ * returns fabricated routers: discovery must be implemented by a real Tauri
+ * network provider before the UI can expose it again.
+ */
 export class FakeLocalRouterDiscoveryProvider implements LocalRouterDiscoveryProvider {
   async scan(): Promise<DiscoveredRouterCandidate[]> {
-    return [
-      {
-        apiPort: 8728,
-        apiSslPort: 8729,
-        host: "192.168.88.1",
-        id: "scan-192-168-88-1",
-        isReachable: true,
-        mode: "local",
-        name: "Routeur detecte",
-        systemInfo: {
-          architecture: "arm64",
-          boardName: "C52iG-5HaxD2HaxD",
-          identity: "hotspot-boutique-centre",
-          model: "hAP ax²",
-          routerOsVersion: "7.15.3",
-          serialNumber: "HAX2-SCAN-2026",
-          uptime: "2d 04:18:09"
-        }
-      }
-    ];
+    throw new Error("La découverte réseau automatique n'est pas encore disponible.");
   }
 }
-

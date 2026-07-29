@@ -18,13 +18,14 @@ import type {
 } from "../../domain/router";
 import type { AuthSession, Permission } from "../../domain/auth";
 import { AuthorizationError, requireProfilePermission } from "../auth";
+import { CompatibleMikroTikRouterAdapter } from "./CompatibleMikroTikRouterAdapter";
 import { FakeRouterAdapter } from "./FakeRouterAdapter";
 import {
   FakeLocalRouterDiscoveryProvider,
   type DiscoveredRouterCandidate,
   type LocalRouterDiscoveryProvider
 } from "./LocalRouterDiscoveryProvider";
-import { MikroTikRouterAdapter, type MikroTikRouterAdapterOptions } from "./MikroTikRouterAdapter";
+import type { MikroTikRouterAdapterOptions } from "./MikroTikRouterAdapter";
 import {
   PreparedRemoteConnectionProvider,
   type RemoteConnectionProvider,
@@ -43,6 +44,7 @@ export type RouterActionLog = {
   level: "error" | "info";
   routerId?: string;
   technicalCode?: RouterErrorCode;
+  technicalMessage?: string;
   userMessage: string;
 };
 
@@ -175,8 +177,44 @@ export class RouterService {
     return this.run("disableHotspotUser", () => this.adapter.disableHotspotUser(username), "router.tickets.disable");
   }
 
+  enableHotspotUser(username: string) {
+    return this.run("enableHotspotUser", () => this.adapter.enableHotspotUser(username), "router.tickets.disable");
+  }
+
   removeHotspotUser(username: string) {
     return this.run("removeHotspotUser", () => this.adapter.removeHotspotUser(username), "router.tickets.delete");
+  }
+
+  bindHotspotUserToMac(username: string, macAddress: string) {
+    return this.run(
+      "bindHotspotUserToMac",
+      () => this.adapter.bindHotspotUserToMac(username, macAddress),
+      "router.tickets.sync"
+    );
+  }
+
+  clearHotspotUserMac(username: string) {
+    return this.run(
+      "clearHotspotUserMac",
+      () => this.adapter.clearHotspotUserMac(username),
+      "router.tickets.sync"
+    );
+  }
+
+  upsertHotspotBypass(binding: import("../../domain/router").HotspotBypassBinding) {
+    return this.run(
+      "upsertHotspotBypass",
+      () => this.adapter.upsertHotspotBypass(binding),
+      "router.settings.manage"
+    );
+  }
+
+  removeHotspotBypass(id: string, macAddress: string) {
+    return this.run(
+      "removeHotspotBypass",
+      () => this.adapter.removeHotspotBypass(id, macAddress),
+      "router.settings.manage"
+    );
   }
 
   listActiveUsers() {
@@ -216,7 +254,7 @@ export class RouterService {
       throw new Error("Configuration routeur manquante.");
     }
 
-    return new MikroTikRouterAdapter(mikrotikOptions);
+    return new CompatibleMikroTikRouterAdapter(mikrotikOptions);
   }
 
   private async run<T>(action: string, callback: () => Promise<T>, permission?: Permission): Promise<T> {
@@ -240,7 +278,12 @@ export class RouterService {
       }
 
       const technicalCode = isRouterAdapterError(error) ? error.code : "timeout";
-      const userMessage = translateRouterError(technicalCode);
+      const technicalMessage = error instanceof Error ? sanitizeTechnicalMessage(error.message) : undefined;
+      const translatedMessage = translateRouterError(technicalCode);
+      const userMessage =
+        technicalCode === "router_rejected" && technicalMessage
+          ? `${translatedMessage} Détail RouterOS : ${extractRouterOsDetail(technicalMessage)}`
+          : translatedMessage;
 
       await this.logger.write({
         action,
@@ -249,10 +292,11 @@ export class RouterService {
         internalProfileRole: this.authSession?.internal_profile_role,
         level: "error",
         technicalCode,
+        technicalMessage,
         userMessage
       });
 
-      throw new RouterServiceError(technicalCode, userMessage);
+      throw new RouterServiceError(technicalCode, userMessage, technicalMessage);
     }
   }
 
@@ -266,7 +310,8 @@ export class RouterService {
 export class RouterServiceError extends Error {
   constructor(
     public readonly code: RouterErrorCode,
-    message: string
+    message: string,
+    public readonly technicalMessage?: string
   ) {
     super(message);
     this.name = "RouterServiceError";
@@ -282,11 +327,23 @@ export function translateRouterError(code: RouterErrorCode): string {
     permission_denied: "Vous n'avez pas l'autorisation d'effectuer cette action.",
     remote_not_configured: "La connexion a distance n'est pas configuree.",
     remote_unavailable: "La connexion distante securisee n'est pas encore disponible.",
+    router_rejected: "Le routeur a refusé la commande.",
     router_offline: "Le routeur est hors ligne.",
     timeout: "Le routeur ne répond pas. Réessayez dans un instant."
   };
 
   return messages[code] ?? "La connexion distante n'est pas encore disponible.";
+}
+
+function sanitizeTechnicalMessage(message: string): string {
+  return message.replace(/[\r\n]+/g, " ").slice(0, 300);
+}
+
+function extractRouterOsDetail(message: string): string {
+  return message
+    .replace(/^RouterOS API error:\s*router_rejected:\s*/i, "")
+    .replace(/^router rejected:\s*/i, "")
+    .slice(0, 180);
 }
 
 class NoopRouterActionLogger implements RouterActionLogger {

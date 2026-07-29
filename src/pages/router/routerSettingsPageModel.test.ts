@@ -7,12 +7,21 @@ import {
 } from "./routerSettingsPageModel";
 
 describe("routerSettingsPageModel", () => {
-  it("valide les paramètres routeur par défaut", () => {
-    expect(validateRouterSettings(defaultRouterSettings)).toBeNull();
+  it("valide des paramètres routeur complets", () => {
+    expect(validateRouterSettings({
+      ...defaultRouterSettings,
+      hotspotAddress: "wifi.ticketpro.local",
+      name: "TicketPro Lab"
+    })).toBeNull();
   });
 
   it("refuse des ports invalides", () => {
-    expect(validateRouterSettings({ ...defaultRouterSettings, apiPort: "abc" })).toBe("Renseignez des ports API valides.");
+    expect(validateRouterSettings({
+      ...defaultRouterSettings,
+      apiPort: "abc",
+      hotspotAddress: "wifi.ticketpro.local",
+      name: "TicketPro Lab"
+    })).toBe("Renseignez des ports API valides.");
   });
 
   it("sépare lecture et édition sensible", () => {

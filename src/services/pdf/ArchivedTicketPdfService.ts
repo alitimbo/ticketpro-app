@@ -1,0 +1,130 @@
+import type {
+  AccountRecord,
+  GeneratedFileRecord,
+  HotspotPlanRecord,
+  RouterRecord,
+  TicketBatchRecord,
+  TicketRecord
+} from "../../domain/database";
+import { resolveTicketPasswordValue } from "../tickets";
+import {
+  generateTicketPdf,
+  parseTicketPdfArchiveMetadata,
+  type TicketPdfFormat,
+  type TicketPdfInput
+} from "./TicketPdfService";
+
+export type RegeneratedTicketPdf = {
+  bytes: Uint8Array;
+  format: TicketPdfFormat;
+  ticketCount: number;
+};
+
+export async function regenerateArchivedTicketPdf(input: {
+  account: AccountRecord;
+  batch: TicketBatchRecord;
+  file: GeneratedFileRecord;
+  plan: HotspotPlanRecord;
+  router: RouterRecord;
+  tickets: TicketRecord[];
+}): Promise<RegeneratedTicketPdf> {
+  assertArchiveOwnership(input);
+  if (input.tickets.length === 0) {
+    throw new Error("Ce lot ne contient aucun ticket à remettre dans le PDF.");
+  }
+
+  const metadata = parseTicketPdfArchiveMetadata(input.file.metadata_json);
+  const ownerPhone = metadata?.ownerPhone.trim() || input.account.phone?.trim();
+  const hotspotAddress = metadata?.hotspotAddress.trim() || input.router.hotspot_address?.trim();
+
+  if (!ownerPhone) {
+    throw new Error("Renseignez le téléphone du propriétaire dans Mon compte avant de régénérer le PDF.");
+  }
+  if (!hotspotAddress) {
+    throw new Error("Renseignez l'adresse Hotspot du routeur avant de régénérer le PDF.");
+  }
+
+  const tickets = await Promise.all(
+    input.tickets.map(async (ticket) => ({
+      password: await resolveTicketPasswordValue({
+        passwordSecretRef: ticket.password_encrypted,
+        username: ticket.username
+      }),
+      passwordSecretRef: ticket.password_encrypted,
+      username: ticket.username
+    }))
+  );
+  const pdfInput: TicketPdfInput = {
+    accountId: input.account.id,
+    batchId: input.batch.id,
+    createdByProfile: input.file.created_by_profile,
+    createdByProfileId: input.file.created_by_profile_id,
+    dataLimitLabel: metadata?.dataLimitLabel ?? formatDataLimit(input.plan.data_limit_mb),
+    durationLabel: metadata?.durationLabel ?? formatDuration(input.plan.duration_minutes),
+    fileName: input.file.file_name,
+    format: metadata?.format ?? normalizeArchivedFormat(input.file.format),
+    generatedAt: new Date().toISOString(),
+    hotspotAddress,
+    ownerPhone,
+    planName: metadata?.planName ?? input.plan.name,
+    priceLabel:
+      metadata?.priceLabel ??
+      (input.plan.price_hint === null ? null : `${input.plan.price_hint.toLocaleString("fr-FR")} CFA`),
+    qrCodeEnabled: metadata?.qrCodeEnabled ?? false,
+    routerId: input.router.id,
+    template: metadata?.template === "qr" ? "economy" : metadata?.template ?? "economy",
+    tickets,
+    zoneName: metadata?.zoneName ?? input.router.name
+  };
+
+  return {
+    bytes: generateTicketPdf(pdfInput),
+    format: pdfInput.format,
+    ticketCount: tickets.length
+  };
+}
+
+function assertArchiveOwnership(input: {
+  account: AccountRecord;
+  batch: TicketBatchRecord;
+  file: GeneratedFileRecord;
+  plan: HotspotPlanRecord;
+  router: RouterRecord;
+  tickets: TicketRecord[];
+}) {
+  if (
+    input.file.account_id !== input.account.id ||
+    input.batch.account_id !== input.account.id ||
+    input.router.account_id !== input.account.id ||
+    input.file.batch_id !== input.batch.id ||
+    input.file.router_id !== input.router.id ||
+    input.batch.router_id !== input.router.id ||
+    input.batch.plan_id !== input.plan.id ||
+    input.tickets.some(
+      (ticket) =>
+        ticket.account_id !== input.account.id ||
+        ticket.batch_id !== input.batch.id ||
+        ticket.router_id !== input.router.id
+    )
+  ) {
+    throw new Error("Les données de ce fichier ne correspondent pas au compte actif.");
+  }
+}
+
+function normalizeArchivedFormat(value: string): TicketPdfFormat {
+  return ["a4", "a5", "thermal58", "thermal80"].includes(value)
+    ? (value as TicketPdfFormat)
+    : "a4";
+}
+
+function formatDuration(minutes: number): string {
+  if (minutes % 1440 === 0) return `${minutes / 1440} j`;
+  if (minutes % 60 === 0) return `${minutes / 60} h`;
+  return `${minutes} min`;
+}
+
+function formatDataLimit(megabytes: number | null): string | null {
+  if (megabytes === null) return null;
+  if (megabytes >= 1024 && megabytes % 1024 === 0) return `${megabytes / 1024} Go`;
+  return `${megabytes} Mo`;
+}

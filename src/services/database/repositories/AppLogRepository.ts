@@ -57,4 +57,16 @@ export class AppLogRepository {
 
     return removable.length;
   }
+
+  async countBefore(accountId: string, before: string, routerId?: string | null): Promise<number> {
+    const logs = await this.listByAccount(accountId);
+    const cutoff = new Date(before).getTime();
+    return logs.filter((log) => {
+      const createdAt = new Date(log.created_at).getTime();
+      if (!Number.isFinite(createdAt) || createdAt >= cutoff) {
+        return false;
+      }
+      return routerId === undefined || log.router_id === routerId;
+    }).length;
+  }
 }

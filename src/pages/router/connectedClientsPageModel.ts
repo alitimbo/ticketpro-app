@@ -1,4 +1,9 @@
 import type { ActiveHotspotUser, HotspotPlan, HotspotUser } from "../../domain/router";
+import type {
+  ActiveSessionCacheRecord,
+  HotspotPlanRecord,
+  TicketRecord
+} from "../../domain/database";
 
 export type ClientDurationFilter = "" | "short" | "medium" | "long";
 
@@ -61,12 +66,53 @@ export function buildConnectedClientViewModels(
       routerName: router.name,
       sessionTimeLeft: activeUser.sessionTimeLeft,
       status: "active",
-      ticketStatus: ticket?.status ?? "unknown",
+      ticketStatus: ticket
+        ? ticket.status === "disabled" || ticket.status === "expired"
+          ? ticket.status
+          : "active"
+        : "unknown",
       totalBytes: activeUser.downloadedBytes + activeUser.uploadedBytes,
       uploadedBytes: activeUser.uploadedBytes,
       uptime: activeUser.uptime,
       uptimeMinutes: parseDurationToMinutes(activeUser.uptime),
       username: activeUser.username
+    };
+  });
+}
+
+export function buildCachedConnectedClientViewModels(
+  cachedUsers: ActiveSessionCacheRecord[],
+  tickets: TicketRecord[],
+  plans: HotspotPlanRecord[],
+  router: { id: string; name: string }
+): ConnectedClientViewModel[] {
+  const ticketsByUsername = new Map(tickets.map((ticket) => [ticket.username, ticket]));
+  const plansById = new Map(plans.map((plan) => [plan.id, plan]));
+
+  return cachedUsers.map((cachedUser) => {
+    const ticket = ticketsByUsername.get(cachedUser.username);
+    const plan = ticket ? plansById.get(ticket.plan_id) : null;
+    const downloadedBytes = cachedUser.downloaded_bytes;
+    const uploadedBytes = cachedUser.uploaded_bytes;
+    const uptime = cachedUser.uptime ?? "0s";
+
+    return {
+      downloadedBytes,
+      id: cachedUser.id,
+      ipAddress: cachedUser.ip_address ?? "",
+      macAddress: cachedUser.mac_address ?? "",
+      planId: ticket?.plan_id ?? null,
+      planName: plan?.name ?? "Plan non identifié",
+      routerId: router.id,
+      routerName: router.name,
+      sessionTimeLeft: cachedUser.session_time_left ?? "Non disponible",
+      status: "active",
+      ticketStatus: ticketStatusFromRecord(ticket),
+      totalBytes: downloadedBytes + uploadedBytes,
+      uploadedBytes,
+      uptime,
+      uptimeMinutes: parseDurationToMinutes(uptime),
+      username: cachedUser.username
     };
   });
 }
@@ -126,8 +172,11 @@ export function getConnectedClientPlanOptions(clients: ConnectedClientViewModel[
 
 export function formatClientBytes(bytes: number): string {
   if (bytes <= 0) {
-    return "0 MB";
+    return "0 o";
   }
+
+  if (bytes < 1024) return `${Math.round(bytes)} o`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} Ko`;
 
   const megabytes = bytes / 1024 / 1024;
 
@@ -142,9 +191,14 @@ function parseDurationToMinutes(value: string): number {
   const normalized = value.toLowerCase();
   let minutes = 0;
 
+  const weeks = normalized.match(/(\d+)\s*w/);
   const days = normalized.match(/(\d+)\s*d/);
   const hours = normalized.match(/(\d+)\s*h/);
   const mins = normalized.match(/(\d+)\s*m/);
+
+  if (weeks) {
+    minutes += Number(weeks[1]) * 10080;
+  }
 
   if (days) {
     minutes += Number(days[1]) * 1440;
@@ -159,6 +213,15 @@ function parseDurationToMinutes(value: string): number {
   }
 
   return minutes;
+}
+
+function ticketStatusFromRecord(
+  ticket: TicketRecord | undefined
+): ConnectedClientViewModel["ticketStatus"] {
+  if (!ticket) return "unknown";
+  if (ticket.status === "désactivé" || ticket.status === "disabled") return "disabled";
+  if (ticket.status === "expiré" || ticket.status === "expired") return "expired";
+  return "active";
 }
 
 function normalize(value: string): string {

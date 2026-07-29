@@ -1,14 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Edit3,
   AlertTriangle,
+  Edit3,
   Eye,
   Filter,
   Laptop,
   Plus,
-  Radar,
-  RefreshCw,
   Router,
   Save,
   Search,
@@ -20,14 +18,12 @@ import type { RouterErrorCode, RouterSystemInfo } from "../../domain/router";
 import { useAuth } from "../../app/auth/AuthProvider";
 import { AuthorizationError, requireProfilePermission } from "../../services/auth";
 import { decryptLocalSecret, encryptLocalSecret } from "../../services/security/localSecrets";
-import { routerLicenseFingerprint, validateStoredLicense } from "../../services/licensing";
 import { RouterConnectionRepository, RouterRepository, useAppDatabase } from "../../services/database";
 import {
   FakeRouterAdapter,
   remoteSecurityWarnings,
   RouterService,
   RouterServiceError,
-  type DiscoveredRouterCandidate,
   type RouterActionLog
 } from "../../services/router";
 import {
@@ -42,12 +38,11 @@ import {
   StatusDot
 } from "../../shared/ui";
 import {
-  createRouterFromForm,
   connectionModeLabel,
+  createRouterFromForm,
   demoRouters,
   emptyRouterFormValues,
   filterRouters,
-  formValuesFromScannedRouter,
   formValuesFromRouter,
   getRouterLimitMessage,
   isRemoteConnectionMode,
@@ -70,23 +65,14 @@ const statusLabels: Record<RouterCardData["status"], string> = {
   warning: "À vérifier"
 };
 
-type RouterFormMode = "add" | "edit";
-
 type RouterFormState = {
   detectedInfo: RouterSystemInfo | null;
-  mode: RouterFormMode;
+  error: string | null;
+  mode: "add" | "edit";
   router: RouterCardData | null;
-  values: RouterFormValues;
-  error: string | null;
-  testStatus: RouterConnectionTestStatus;
   testMessage: string | null;
-};
-
-type ScanState = {
-  isOpen: boolean;
-  isScanning: boolean;
-  results: DiscoveredRouterCandidate[];
-  error: string | null;
+  testStatus: RouterConnectionTestStatus;
+  values: RouterFormValues;
 };
 
 export function RoutersPage() {
@@ -102,25 +88,18 @@ export function RoutersPage() {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<RouterFilter>("all");
   const [selectedRouter, setSelectedRouter] = useState<RouterCardData | null>(null);
+  const [routerToDelete, setRouterToDelete] = useState<RouterCardData | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [logs, setLogs] = useState<RouterActionLog[]>([]);
   const [formState, setFormState] = useState<RouterFormState | null>(null);
-  const [scanState, setScanState] = useState<ScanState>({
-    error: null,
-    isOpen: false,
-    isScanning: false,
-    results: []
-  });
+  const [isDeleting, setIsDeleting] = useState(false);
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
   const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
 
   useEffect(() => {
-    if (!isInitialized || !accountId) {
-      return undefined;
-    }
-
-    const scopedAccountId = accountId;
+    if (!isInitialized || !accountId) return undefined;
     let mounted = true;
+    const scopedAccountId = accountId;
 
     async function loadRouters() {
       try {
@@ -130,27 +109,15 @@ export function RoutersPage() {
             routerCardFromRecord(record, await connectionRepository.listByRouter(record.id))
           )
         );
-
-        if (!mounted) {
-          return;
-        }
-
-        setRouters(cards.length > 0 || isPersistent ? cards : demoRouters);
+        if (mounted) setRouters(cards.length > 0 || isPersistent ? cards : demoRouters);
       } catch (error) {
-        if (!mounted) {
-          return;
-        }
-
+        if (!mounted) return;
         setMessage(error instanceof Error ? error.message : "Impossible de charger les routeurs.");
-
-        if (!isPersistent) {
-          setRouters(demoRouters);
-        }
+        if (!isPersistent) setRouters(demoRouters);
       }
     }
 
     void loadRouters();
-
     return () => {
       mounted = false;
     };
@@ -170,34 +137,17 @@ export function RoutersPage() {
   const quotaMessage = getRouterLimitMessage(subscriptionOverview.canAddRouter);
   const canStartRouterCreation = canAddRouter && subscriptionOverview.canAddRouter;
 
-  const openRouter = (router: RouterCardData) => {
-    setMessage(null);
-    setSelectedRouter(router);
-  };
-
-  const openAddForm = async () => {
+  const openAddForm = () => {
     try {
       requireProfilePermission(session, "global.routers.add");
     } catch (permissionError) {
       setMessage(permissionError instanceof AuthorizationError ? permissionError.message : "Vous n'avez pas la permission d'ajouter un routeur.");
       return;
     }
-
     if (!subscriptionOverview.canAddRouter) {
       setMessage(quotaMessage);
       return;
     }
-
-
-    /*
-    try {
-      await validateStoredLicense(database, accountId ?? "", accountRouters.map(routerLicenseFingerprint));
-    } catch (licenseError) {
-      setMessage(licenseError instanceof Error ? licenseError.message : "Licence TicketPro non valide.");
-      return;
-    }
-    */
-
     setFormState({
       detectedInfo: null,
       error: null,
@@ -209,63 +159,6 @@ export function RoutersPage() {
     });
   };
 
-  const openScan = async () => {
-    try {
-      requireProfilePermission(session, "global.routers.add");
-    } catch (permissionError) {
-      setMessage(permissionError instanceof AuthorizationError ? permissionError.message : "Vous n'avez pas la permission d'ajouter un routeur.");
-      return;
-    }
-
-    if (!subscriptionOverview.canAddRouter) {
-      setMessage(quotaMessage);
-      return;
-    }
-
-    /*
-    try {
-      await validateStoredLicense(database, accountId ?? "", accountRouters.map(routerLicenseFingerprint));
-    } catch (licenseError) {
-      setMessage(licenseError instanceof Error ? licenseError.message : "Licence TicketPro non valide.");
-      return;
-    }
-    */
-
-    setScanState({ error: null, isOpen: true, isScanning: false, results: [] });
-  };
-
-  const scanLocalNetwork = async () => {
-    setScanState((current) => ({ ...current, error: null, isScanning: true }));
-    const service = new RouterService({
-      authSession: session,
-      logger: {
-        write: (log) => {
-          setLogs((current) => [...current, log]);
-        }
-      }
-    });
-
-    try {
-      const results = await service.scanLocalRouters();
-      setScanState({ error: null, isOpen: true, isScanning: false, results });
-    } catch {
-      setScanState({ error: "Recherche impossible. Vérifiez que le PC est connecté au Wi-Fi du routeur.", isOpen: true, isScanning: false, results: [] });
-    }
-  };
-
-  const useScannedRouter = (router: DiscoveredRouterCandidate) => {
-    setScanState({ error: null, isOpen: false, isScanning: false, results: [] });
-    setFormState({
-      detectedInfo: router.systemInfo,
-      error: null,
-      mode: "add",
-      router: null,
-      testMessage: "Routeur detecte. Entrez le mot de passe puis testez la connexion.",
-      testStatus: "not_tested",
-      values: formValuesFromScannedRouter(router)
-    });
-  };
-
   const openEditForm = (router: RouterCardData) => {
     try {
       requireProfilePermission(session, "global.routers.edit");
@@ -273,7 +166,6 @@ export function RoutersPage() {
       setMessage(permissionError instanceof AuthorizationError ? permissionError.message : "Vous n'avez pas la permission de modifier ce routeur.");
       return;
     }
-
     setFormState({
       detectedInfo: {
         architecture: "",
@@ -293,24 +185,53 @@ export function RoutersPage() {
     });
   };
 
-  const enterRouter = (mode: RouterFormValues["preferredMode"]) => {
-    if (!selectedRouter) {
+  const updateFormValues = (values: RouterFormValues) => {
+    if (!formState) return;
+    const connectionChanged = connectionFingerprint(formState.values) !== connectionFingerprint(values);
+    setFormState({
+      ...formState,
+      detectedInfo: connectionChanged ? null : formState.detectedInfo,
+      error: null,
+      testMessage: connectionChanged ? "Connexion modifiée : effectuez un nouveau test." : formState.testMessage,
+      testStatus: connectionChanged ? "not_tested" : formState.testStatus,
+      values
+    });
+  };
+
+  const activateRouterMode = async (
+    router: RouterCardData,
+    mode: RouterFormValues["preferredMode"]
+  ) => {
+    if (isRemoteConnectionMode(mode) && !router.remoteHost.trim()) {
+      setSelectedRouter(null);
+      setMessage("Aucune adresse distante n'est configurée. Modifiez le routeur avant d'utiliser cette action.");
+      if (canEditRouter) openEditForm(router);
       return;
     }
 
-    setMessage(
-      mode === "local"
-        ? "Connexion locale selectionnee."
-        : `Connexion a distance selectionnee : ${connectionModeLabel(mode)}.`
-    );
-    setSelectedRouter(null);
-    navigate(`/routeurs/${selectedRouter.id}/maison`);
+    const updatedRouter = { ...router, preferredMode: mode };
+    try {
+      if (isPersistent) {
+        if (!accountId || !session) throw new Error("Session du compte introuvable.");
+        await routerRepository.update(routerRecordFromCard(updatedRouter));
+        await connectionRepository.replaceForRouter(updatedRouter.id, routerConnectionInputsFromCard(updatedRouter));
+      }
+      setRouters((current) => current.map((item) => (item.id === updatedRouter.id ? updatedRouter : item)));
+      setSelectedRouter(null);
+      navigate(`/routeurs/${updatedRouter.id}/maison`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Le mode de connexion n'a pas pu être sélectionné.");
+    }
+  };
+
+  const enterSelectedRouter = async (mode: RouterFormValues["preferredMode"]) => {
+    if (selectedRouter) await activateRouterMode(selectedRouter, mode);
   };
 
   const testConnection = async (router: RouterCardData) => {
+    setMessage("Test de connexion en cours…");
     const result = await runRouterConnectionTest({
       apiPort: router.apiPort,
-      apiSslPort: router.apiSslPort,
       encryptedPassword: router.encryptedPassword,
       ipAddress: router.ipAddress,
       mode: router.preferredMode,
@@ -328,8 +249,8 @@ export function RoutersPage() {
           accountId,
           checkedAt: new Date().toISOString(),
           errorMessage: result.status === "connected" ? null : result.message,
-          mode: router.preferredMode,
           internalProfileId: session.internal_profile_id,
+          mode: router.preferredMode,
           routerId: router.id,
           status: result.status === "connected" ? "connected" : result.status === "offline" ? "offline" : "warning"
         });
@@ -345,100 +266,69 @@ export function RoutersPage() {
   };
 
   const submitForm = async () => {
-    if (!formState) {
-      return;
-    }
-
+    if (!formState) return;
     const validationError = validateRouterForm(formState);
-
     if (validationError) {
       setFormState({ ...formState, error: validationError });
       return;
     }
 
-    const encryptedPassword =
-      formState.values.password.trim().length > 0
-        ? await encryptLocalSecret(formState.values.password)
-        : formState.router?.encryptedPassword ?? "";
+    const encryptedPassword = formState.values.password.trim()
+      ? await encryptLocalSecret(formState.values.password)
+      : formState.router?.encryptedPassword ?? "";
+    if (!session || !accountId) {
+      setFormState({ ...formState, error: "Session du compte ou du profil interne introuvable." });
+      return;
+    }
 
     if (formState.mode === "add") {
       try {
         requireProfilePermission(session, "global.routers.add");
-      } catch (permissionError) {
-        setFormState({
-          ...formState,
-          error: permissionError instanceof AuthorizationError ? permissionError.message : "Vous n'avez pas la permission d'ajouter un routeur."
-        });
-        return;
-      }
-
-      if (!subscriptionOverview.canAddRouter) {
-        setFormState({ ...formState, error: quotaMessage });
-        return;
-      }
-
-      if (!session || !accountId) {
-        setFormState({ ...formState, error: "Session du compte ou du profil interne introuvable." });
-        return;
-      }
-
-      const created = applyTestResult(
-        createRouterFromForm(formState.values, encryptedPassword, formState.detectedInfo, undefined, {
-          accountId,
-          createdByProfileId: session.internal_profile_id
-        }),
-        formState.testStatus,
-        formState.testMessage,
-        formState.detectedInfo
-      );
-      try {
-        /*
-        await validateStoredLicense(database, accountId, [
-          ...accountRouters.map(routerLicenseFingerprint),
-          routerLicenseFingerprint(created)
-        ]);
-        */
-        await routerRepository.createWithConnections(
-          routerRecordFromCard(created),
-          routerConnectionInputsFromCard(created)
+        if (!subscriptionOverview.canAddRouter) throw new Error(quotaMessage ?? "Limite de routeurs atteinte.");
+        const created = applyTestResult(
+          createRouterFromForm(formState.values, encryptedPassword, formState.detectedInfo, undefined, {
+            accountId,
+            createdByProfileId: session.internal_profile_id
+          }),
+          formState.testStatus,
+          formState.testMessage,
+          formState.detectedInfo
         );
-
+        if (isPersistent) {
+          await routerRepository.createWithConnections(
+            routerRecordFromCard(created),
+            routerConnectionInputsFromCard(created)
+          );
+        }
         setRouters((current) => [created, ...current]);
-      setMessage(`${created.zoneName} ajouté.`);
+        setMessage(`${created.zoneName} ajouté.`);
+        setFormState(null);
       } catch (error) {
-        setFormState({
-          ...formState,
-          error: error instanceof Error ? error.message : "Le routeur n'a pas pu être enregistré."
-        });
-        return;
+        setFormState({ ...formState, error: error instanceof Error ? error.message : "Le routeur n'a pas pu être enregistré." });
       }
-    } else if (formState.router) {
-      try {
-        requireProfilePermission(session, "global.routers.edit");
-      } catch (permissionError) {
-        setFormState({
-          ...formState,
-          error: permissionError instanceof AuthorizationError ? permissionError.message : "Vous n'avez pas la permission de modifier ce routeur."
-        });
-        return;
-      }
+      return;
+    }
 
-      const persistedRouter = applyTestResult(
+    const currentRouter = formState.router;
+    if (!currentRouter) return;
+    try {
+      requireProfilePermission(session, "global.routers.edit");
+      const updated = applyTestResult(
         {
-          ...formState.router,
+          ...currentRouter,
           apiPort: Number(formState.values.apiPort),
           apiSslPort: Number(formState.values.apiSslPort),
-          boardName: formState.detectedInfo?.boardName ?? formState.router.boardName,
+          boardName: formState.detectedInfo?.boardName ?? currentRouter.boardName,
           encryptedPassword,
           ipAddress: formState.values.ipAddress,
-          model: formState.values.model || formState.router.model,
+          model: formState.values.model || formState.detectedInfo?.model || currentRouter.model,
           notes: formState.values.notes,
           preferredMode: formState.values.preferredMode,
           remoteHost: formState.values.remoteHost,
           remotePort: Number(formState.values.remotePort),
           remoteUseSsl: formState.values.remoteUseSsl,
-          routerOsVersion: formState.detectedInfo?.routerOsVersion ?? formState.router.routerOsVersion,
-          serialNumber: formState.detectedInfo?.serialNumber ?? formState.router.serialNumber,
+          routerOsVersion: formState.detectedInfo?.routerOsVersion ?? currentRouter.routerOsVersion,
+          serialNumber: formState.detectedInfo?.serialNumber ?? currentRouter.serialNumber,
           username: formState.values.username,
           zoneName: formState.values.name
         },
@@ -446,71 +336,28 @@ export function RoutersPage() {
         formState.testMessage,
         formState.detectedInfo
       );
-
-      try {
-        await routerRepository.update(routerRecordFromCard(persistedRouter));
-        await connectionRepository.replaceForRouter(
-          persistedRouter.id,
-          routerConnectionInputsFromCard(persistedRouter)
-        );
-      } catch (error) {
-        setFormState({
-          ...formState,
-          error: error instanceof Error ? error.message : "Le routeur n'a pas pu être mis à jour."
-        });
-        return;
+      if (isPersistent) {
+        await routerRepository.update(routerRecordFromCard(updated));
+        await connectionRepository.replaceForRouter(updated.id, routerConnectionInputsFromCard(updated));
       }
-
-      setRouters((current) =>
-        current.map((router) =>
-          router.id === formState.router?.id
-            ? applyTestResult(
-                {
-                  ...router,
-                  apiPort: Number(formState.values.apiPort),
-                  apiSslPort: Number(formState.values.apiSslPort),
-                  boardName: formState.detectedInfo?.boardName ?? router.boardName,
-                  encryptedPassword,
-                  ipAddress: formState.values.ipAddress,
-                  model: formState.values.model || formState.detectedInfo?.model || "Modèle non renseigné",
-                  notes: formState.values.notes,
-                  preferredMode: formState.values.preferredMode,
-                  remoteHost: formState.values.remoteHost,
-                  remotePort: Number(formState.values.remotePort),
-                  remoteUseSsl: formState.values.remoteUseSsl,
-                  routerOsVersion: formState.detectedInfo?.routerOsVersion ?? router.routerOsVersion,
-                  serialNumber: formState.detectedInfo?.serialNumber ?? router.serialNumber,
-                  username: formState.values.username,
-                  zoneName: formState.values.name
-                },
-                formState.testStatus,
-                formState.testMessage,
-                formState.detectedInfo
-              )
-            : router
-        )
-      );
-      setMessage(`${formState.values.name} modifié.`);
+      setRouters((current) => current.map((router) => (router.id === updated.id ? updated : router)));
+      setMessage(`${updated.zoneName} modifié.`);
+      setFormState(null);
+    } catch (error) {
+      setFormState({ ...formState, error: error instanceof Error ? error.message : "Le routeur n'a pas pu être mis à jour." });
     }
-
-    setFormState(null);
   };
 
   const testFormConnection = async () => {
-    if (!formState) {
-      return;
-    }
-
+    if (!formState) return;
     const validationError = validateRouterFormForTest(formState.values);
-
     if (validationError) {
       setFormState({ ...formState, error: validationError });
       return;
     }
-
+    setFormState({ ...formState, error: null, testMessage: "Test de connexion en cours…" });
     const result = await runRouterConnectionTest({
       apiPort: Number(formState.values.apiPort),
-      apiSslPort: Number(formState.values.apiSslPort),
       encryptedPassword: formState.router?.encryptedPassword,
       ipAddress: formState.values.ipAddress,
       mode: formState.values.preferredMode,
@@ -521,25 +368,40 @@ export function RoutersPage() {
       statusHint: formState.router?.status,
       username: formState.values.username
     });
-
     setFormState({
       ...formState,
-      detectedInfo: result.systemInfo ?? formState.detectedInfo,
+      detectedInfo: result.systemInfo ?? null,
       error: null,
       testMessage: result.message,
       testStatus: result.status,
-      values: result.systemInfo
-        ? {
-            ...formState.values,
-            model: result.systemInfo.model
-          }
-        : formState.values
+      values: result.systemInfo ? { ...formState.values, model: result.systemInfo.model } : formState.values
     });
+  };
+
+  const confirmDeleteRouter = async () => {
+    const router = routerToDelete;
+    if (!router) return;
+    setIsDeleting(true);
+    try {
+      requireProfilePermission(session, "global.routers.delete");
+      if (isPersistent) {
+        if (!accountId) throw new Error("Compte actif introuvable.");
+        await routerRepository.remove(accountId, router.id);
+      }
+      setRouters((current) => current.filter((item) => item.id !== router.id));
+      setSelectedRouter((current) => (current?.id === router.id ? null : current));
+      setFormState((current) => (current?.router?.id === router.id ? null : current));
+      setRouterToDelete(null);
+      setMessage(`${router.zoneName} supprimé de TicketPro.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Le routeur n'a pas pu être supprimé.");
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
   const runRouterConnectionTest = async ({
     apiPort,
-    apiSslPort,
     encryptedPassword,
     ipAddress,
     mode,
@@ -551,7 +413,6 @@ export function RoutersPage() {
     username
   }: {
     apiPort: number;
-    apiSslPort: number;
     encryptedPassword?: string;
     ipAddress: string;
     mode: RouterFormValues["preferredMode"];
@@ -564,7 +425,6 @@ export function RoutersPage() {
   }): Promise<{ message: string; status: RouterConnectionTestStatus; systemInfo: RouterSystemInfo | null }> => {
     const targetHost = isRemoteConnectionMode(mode) ? remoteHost : ipAddress;
     let resolvedPassword = password;
-
     if (!resolvedPassword.trim() && encryptedPassword) {
       try {
         resolvedPassword = await decryptLocalSecret(encryptedPassword);
@@ -577,11 +437,7 @@ export function RoutersPage() {
       }
     }
 
-    const logger = {
-      write: (log: RouterActionLog) => {
-        setLogs((current) => [...current, log]);
-      }
-    };
+    const logger = { write: (log: RouterActionLog) => setLogs((current) => [...current, log]) };
     const service = isPersistent
       ? new RouterService({
           authSession: session,
@@ -592,7 +448,7 @@ export function RoutersPage() {
             password: resolvedPassword,
             port: isRemoteConnectionMode(mode) ? Number(remotePort) : apiPort,
             timeoutMs: 5000,
-            useSsl: isRemoteConnectionMode(mode) ? remoteUseSsl : false,
+            useSsl: mode === "vpn" ? false : isRemoteConnectionMode(mode) ? remoteUseSsl : false,
             username
           },
           mode: "mikrotik"
@@ -609,23 +465,11 @@ export function RoutersPage() {
         });
 
     try {
-      if (isRemoteConnectionMode(mode)) {
-        await service.resolveRemoteConnection({
-          localHost: ipAddress,
-          mode,
-          port: Number(remotePort),
-          remoteHost,
-          routerId: formState?.router?.id ?? "nouveau-routeur",
-          useSsl: remoteUseSsl
-        });
-      }
-
       await service.testConnection();
       const systemInfo = await service.getSystemInfo();
       return { message: routerTestMessage("connected"), status: "connected", systemInfo };
     } catch (error) {
-      const status =
-        error instanceof RouterServiceError ? mapRouterErrorToTestStatus(error.code) : "timeout";
+      const status = error instanceof RouterServiceError ? mapRouterErrorToTestStatus(error.code) : "timeout";
       return { message: routerTestMessage(status), status, systemInfo: null };
     }
   };
@@ -637,10 +481,7 @@ export function RoutersPage() {
           canAddRouter ? (
             <div className="button-row">
               <Button disabled={!canStartRouterCreation} icon={Plus} onClick={openAddForm} variant="primary">
-                Formulaire
-              </Button>
-              <Button disabled={!canStartRouterCreation} icon={Radar} onClick={openScan}>
-                Rechercher Wi-Fi
+                Ajouter un routeur
               </Button>
               {!subscriptionOverview.canAddRouter && canViewSubscription ? (
                 <Button onClick={() => navigate("/abonnement")}>Changer de pack</Button>
@@ -648,7 +489,7 @@ export function RoutersPage() {
             </div>
           ) : null
         }
-        description="Sélectionnez un routeur, puis choisissez une connexion locale ou distante."
+        description="Ajoutez un MikroTik, testez sa connexion et choisissez un accès local ou distant réellement enregistré."
         eyebrow="Global"
         title="Routeurs"
       />
@@ -683,29 +524,17 @@ export function RoutersPage() {
               value={query}
             />
           </label>
-
           <div className="filter-row">
-            <FilterButton active={filter === "all"} icon={Filter} onClick={() => setFilter("all")}>
-              Filtrer
-            </FilterButton>
-            <FilterButton active={filter === "active"} onClick={() => setFilter("active")}>
-              Connectés
-            </FilterButton>
-            <FilterButton active={filter === "offline"} onClick={() => setFilter("offline")}>
-              Hors ligne
-            </FilterButton>
-            <FilterButton active={filter === "warning"} onClick={() => setFilter("warning")}>
-              À vérifier
-            </FilterButton>
+            <FilterButton active={filter === "all"} icon={Filter} onClick={() => setFilter("all")}>Tous</FilterButton>
+            <FilterButton active={filter === "active"} onClick={() => setFilter("active")}>Connectés</FilterButton>
+            <FilterButton active={filter === "offline"} onClick={() => setFilter("offline")}>Hors ligne</FilterButton>
+            <FilterButton active={filter === "warning"} onClick={() => setFilter("warning")}>À vérifier</FilterButton>
           </div>
         </div>
       </Card>
 
       {message ? <p className="form-error">{message}</p> : null}
-
-      <div className="router-section-heading">
-        <h2>Articles ({visibleRouters.length})</h2>
-      </div>
+      <div className="router-section-heading"><h2>Articles ({visibleRouters.length})</h2></div>
 
       {visibleRouters.length > 0 ? (
         <div className="router-grid">
@@ -714,8 +543,11 @@ export function RoutersPage() {
               canDelete={canDeleteRouter}
               canEdit={canEditRouter}
               key={router.id}
+              onDelete={() => setRouterToDelete(router)}
               onEdit={() => openEditForm(router)}
-              onOpen={() => openRouter(router)}
+              onLocal={() => void activateRouterMode(router, "local")}
+              onOpen={() => setSelectedRouter(router)}
+              onRemote={() => void activateRouterMode(router, router.remoteMode)}
               onTest={() => void testConnection(router)}
               router={router}
             />
@@ -724,13 +556,7 @@ export function RoutersPage() {
       ) : (
         <Card>
           <EmptyState
-            action={
-              canAddRouter ? (
-                <Button disabled={!canStartRouterCreation} icon={Plus} onClick={openAddForm} variant="primary">
-                  Ajouter routeur
-                </Button>
-              ) : null
-            }
+            action={canAddRouter ? <Button disabled={!canStartRouterCreation} icon={Plus} onClick={openAddForm} variant="primary">Ajouter routeur</Button> : null}
             description="Aucun routeur ne correspond à votre recherche."
             icon={Router}
             title="Aucun routeur"
@@ -740,25 +566,23 @@ export function RoutersPage() {
 
       <ConnectionChoiceDialog
         onCancel={() => setSelectedRouter(null)}
-        onLocal={() => enterRouter("local")}
-        onRemote={() => enterRouter(selectedRouter?.preferredMode === "local" ? "distant_ip" : selectedRouter?.preferredMode ?? "distant_ip")}
+        onLocal={() => void enterSelectedRouter("local")}
+        onRemote={() => void enterSelectedRouter(selectedRouter?.remoteMode ?? "distant_ip")}
         router={selectedRouter}
       />
-
-      <RouterScanDialog
-        onCancel={() => setScanState({ error: null, isOpen: false, isScanning: false, results: [] })}
-        onScan={() => void scanLocalNetwork()}
-        onSelect={useScannedRouter}
-        scanState={scanState}
-      />
-
       <RouterFormDialog
         formState={formState}
         logsCount={logs.length}
         onCancel={() => setFormState(null)}
-        onChange={(values) => formState && setFormState({ ...formState, error: null, values })}
+        onChange={updateFormValues}
         onSubmit={() => void submitForm()}
         onTest={() => void testFormConnection()}
+      />
+      <DeleteRouterDialog
+        isDeleting={isDeleting}
+        onCancel={() => setRouterToDelete(null)}
+        onConfirm={() => void confirmDeleteRouter()}
+        router={routerToDelete}
       />
     </div>
   );
@@ -767,255 +591,153 @@ export function RoutersPage() {
 type RouterCardProps = {
   canDelete: boolean;
   canEdit: boolean;
+  onDelete: () => void;
   onEdit: () => void;
+  onLocal: () => void;
   onOpen: () => void;
+  onRemote: () => void;
   onTest: () => void;
   router: RouterCardData;
 };
 
-function RouterCard({ canDelete, canEdit, onEdit, onOpen, onTest, router }: RouterCardProps) {
+function RouterCard({ canDelete, canEdit, onDelete, onEdit, onLocal, onOpen, onRemote, onTest, router }: RouterCardProps) {
   const menuItems = [
-    { icon: Laptop, label: "Connexion locale", onSelect: onOpen },
-    { icon: Wifi, label: "Connexion à distance", onSelect: onOpen },
+    { icon: Laptop, label: "Connexion locale", onSelect: onLocal },
+    ...(router.remoteHost.trim()
+      ? [{
+          icon: Wifi,
+          label: router.remoteMode === "vpn" ? "Connexion à distance (VPN)" : "Connexion à distance",
+          onSelect: onRemote
+        }]
+      : canEdit
+        ? [{ icon: Wifi, label: "Configurer l'accès distant", onSelect: onEdit }]
+        : []),
     { icon: Search, label: "Tester la connexion", onSelect: onTest },
     ...(canEdit ? [{ icon: Edit3, label: "Modifier", onSelect: onEdit }] : []),
-    ...(canDelete ? [{ icon: Trash2, label: "Supprimer", onSelect: () => undefined }] : []),
+    ...(canDelete ? [{ icon: Trash2, label: "Supprimer", onSelect: onDelete }] : []),
     { icon: Eye, label: "Voir détails", onSelect: onOpen }
   ];
 
   return (
-    <article className="router-card" onClick={onOpen} role="button" tabIndex={0}>
+    <article
+      className="router-card"
+      onClick={onOpen}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpen();
+        }
+      }}
+      role="button"
+      tabIndex={0}
+    >
       <header className="router-card__header">
-        <div className="router-card__icon">
-          <Router aria-hidden="true" />
-        </div>
-        <div>
-          <h3>{router.zoneName}</h3>
-          <p>{router.model}</p>
-        </div>
+        <div className="router-card__icon"><Router aria-hidden="true" /></div>
+        <div><h3>{router.zoneName}</h3><p>{router.model}</p></div>
         <ActionMenu items={menuItems} />
       </header>
-
       <div className="router-card__status">
         {router.status === "active" ? (
           <StatusDot label={statusLabels[router.status]} status="active" />
         ) : (
-          <Badge status={router.status === "offline" ? "offline" : "warning"}>
-            {statusLabels[router.status]}
-          </Badge>
+          <Badge status={router.status === "offline" ? "offline" : "warning"}>{statusLabels[router.status]}</Badge>
         )}
       </div>
-
       <dl className="router-card__details">
-        <div>
-          <dt>Carte</dt>
-          <dd>{router.boardName}</dd>
-        </div>
-        <div>
-          <dt>Série</dt>
-          <dd>{router.serialNumber}</dd>
-        </div>
-        <div>
-          <dt>Adresse IP</dt>
-          <dd>{router.ipAddress}</dd>
-        </div>
-        <div>
-          <dt>Mode</dt>
-          <dd>{connectionModeLabel(router.preferredMode)}</dd>
-        </div>
-        <div>
-          <dt>Version</dt>
-          <dd>{router.routerOsVersion}</dd>
-        </div>
-        <div>
-          <dt>Dernière connexion</dt>
-          <dd>{router.lastSeenAt}</dd>
-        </div>
-        <div>
-          <dt>Dernier test</dt>
-          <dd>{router.lastTestMessage ?? "Non testé"}</dd>
-        </div>
+        <div><dt>Carte</dt><dd>{router.boardName}</dd></div>
+        <div><dt>Série</dt><dd>{router.serialNumber}</dd></div>
+        <div><dt>Adresse IP</dt><dd>{router.ipAddress}</dd></div>
+        <div><dt>Mode</dt><dd>{connectionModeLabel(router.preferredMode)}</dd></div>
+        <div><dt>Version</dt><dd>{router.routerOsVersion}</dd></div>
+        <div><dt>Dernière connexion</dt><dd>{router.lastSeenAt}</dd></div>
+        <div><dt>Dernier test</dt><dd>{router.lastTestMessage ?? "Non testé"}</dd></div>
       </dl>
     </article>
   );
 }
 
-type ConnectionChoiceDialogProps = {
+function ConnectionChoiceDialog({
+  onCancel,
+  onLocal,
+  onRemote,
+  router
+}: {
   onCancel: () => void;
   onLocal: () => void;
   onRemote: () => void;
   router: RouterCardData | null;
-};
-
-function ConnectionChoiceDialog({ onCancel, onLocal, onRemote, router }: ConnectionChoiceDialogProps) {
-  if (!router) {
-    return null;
-  }
-
+}) {
+  if (!router) return null;
+  const remoteAvailable = Boolean(router.remoteHost.trim());
   return (
     <div className="dialog-backdrop" role="presentation">
       <section aria-modal="true" className="connection-dialog" role="dialog">
         <header className="connection-dialog__header">
-          <div className="router-card__icon">
-            <Router aria-hidden="true" />
-          </div>
-          <div>
-            <h2>{router.zoneName}</h2>
-            <p>
-              {router.ipAddress} · {router.model}
-            </p>
-          </div>
+          <div className="router-card__icon"><Router aria-hidden="true" /></div>
+          <div><h2>{router.zoneName}</h2><p>{router.ipAddress} · {router.model}</p></div>
         </header>
-
+        <dl className="router-card__details">
+          <div><dt>Carte</dt><dd>{router.boardName}</dd></div>
+          <div><dt>Série</dt><dd>{router.serialNumber}</dd></div>
+          <div><dt>RouterOS</dt><dd>{router.routerOsVersion}</dd></div>
+          <div><dt>Dernier test</dt><dd>{router.lastTestMessage ?? "Non testé"}</dd></div>
+        </dl>
         <div className="connection-options">
           <button className="connection-option" onClick={onLocal} type="button">
-            <Laptop aria-hidden="true" />
-            <span>
-              <strong>Connexion locale</strong>
-              <small>Utilisée quand ce PC est sur le même réseau que le routeur.</small>
-            </span>
+            <Laptop aria-hidden="true" /><span><strong>Connexion locale</strong><small>{router.ipAddress}:{router.apiPort}</small></span>
           </button>
-          <button className="connection-option" onClick={onRemote} type="button">
+          <button className="connection-option" disabled={!remoteAvailable} onClick={onRemote} type="button">
             <Wifi aria-hidden="true" />
             <span>
-              <strong>Connexion à distance</strong>
+              <strong>{router.remoteMode === "vpn" ? "Connexion à distance (VPN WireGuard)" : "Connexion à distance"}</strong>
               <small>
-                {connectionModeLabel(router.preferredMode === "local" ? "distant_ip" : router.preferredMode)}
-                {router.remoteHost ? ` · ${router.remoteHost}:${router.remotePort}` : " · adresse distante à renseigner"}
+                {remoteAvailable
+                  ? `${router.remoteMode === "vpn" ? "Tunnel VPN · " : ""}${router.remoteHost}:${router.remotePort}`
+                  : "Adresse distante non configurée"}
               </small>
             </span>
           </button>
         </div>
-
-        <div className="form-error">
-          <AlertTriangle aria-hidden="true" />
-          <span>{remoteSecurityWarnings.join(" ")}</span>
-        </div>
-
-        <div className="confirm-dialog__actions">
-          <Button icon={WifiOff} onClick={onCancel} variant="ghost">
-            Annuler
-          </Button>
-        </div>
+        <div className="form-error"><AlertTriangle aria-hidden="true" /><span>{remoteSecurityWarnings.join(" ")}</span></div>
+        <div className="confirm-dialog__actions"><Button icon={WifiOff} onClick={onCancel} variant="ghost">Fermer</Button></div>
       </section>
     </div>
   );
 }
 
-type RouterScanDialogProps = {
-  onCancel: () => void;
-  onScan: () => void;
-  onSelect: (router: DiscoveredRouterCandidate) => void;
-  scanState: ScanState;
-};
-
-function RouterScanDialog({ onCancel, onScan, onSelect, scanState }: RouterScanDialogProps) {
-  if (!scanState.isOpen) {
-    return null;
-  }
-
-  return (
-    <div className="dialog-backdrop" role="presentation">
-      <section aria-modal="true" className="connection-dialog" role="dialog">
-        <header className="connection-dialog__header">
-          <div className="router-card__icon">
-            <Radar aria-hidden="true" />
-          </div>
-          <div>
-            <h2>Recherche Wi-Fi</h2>
-            <p>Connectez ce PC au Wi-Fi du routeur, puis lancez la recherche.</p>
-          </div>
-        </header>
-
-        <div className="data-list">
-          {scanState.results.map((router) => (
-            <button className="connection-option" key={router.id} onClick={() => onSelect(router)} type="button">
-              <Router aria-hidden="true" />
-              <span>
-                <strong>{router.systemInfo.model}</strong>
-                <small>
-                  {router.host} · {router.systemInfo.boardName} · RouterOS {router.systemInfo.routerOsVersion}
-                </small>
-              </span>
-            </button>
-          ))}
-        </div>
-
-        {scanState.results.length === 0 && !scanState.isScanning ? (
-          <p className="form-error">Aucun routeur detecte pour le moment.</p>
-        ) : null}
-        {scanState.error ? <p className="form-error">{scanState.error}</p> : null}
-
-        <div className="confirm-dialog__actions">
-          <Button onClick={onCancel} variant="ghost">
-            Annuler
-          </Button>
-          <Button icon={RefreshCw} onClick={onScan} variant="primary">
-            {scanState.isScanning ? "Recherche en cours" : "Lancer la recherche"}
-          </Button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-type RouterFormDialogProps = {
+function RouterFormDialog({
+  formState,
+  logsCount,
+  onCancel,
+  onChange,
+  onSubmit,
+  onTest
+}: {
   formState: RouterFormState | null;
   logsCount: number;
   onCancel: () => void;
   onChange: (values: RouterFormValues) => void;
   onSubmit: () => void;
   onTest: () => void;
-};
-
-function RouterFormDialog({ formState, logsCount, onCancel, onChange, onSubmit, onTest }: RouterFormDialogProps) {
-  if (!formState) {
-    return null;
-  }
-
+}) {
+  if (!formState) return null;
   const values = formState.values;
   const remoteMode = isRemoteConnectionMode(values.preferredMode);
-
   const update = (partial: Partial<RouterFormValues>) => onChange({ ...values, ...partial });
-
   return (
     <div className="dialog-backdrop" role="presentation">
       <section aria-modal="true" className="router-form-dialog" role="dialog">
         <header className="connection-dialog__header">
-          <div className="router-card__icon">
-            <Router aria-hidden="true" />
-          </div>
-          <div>
-            <h2>{formState.mode === "add" ? "Ajouter routeur" : "Modifier routeur"}</h2>
-            <p>Choisissez local, IP distante, VPN ou agent futur.</p>
-          </div>
+          <div className="router-card__icon"><Router aria-hidden="true" /></div>
+          <div><h2>{formState.mode === "add" ? "Ajouter routeur" : "Modifier routeur"}</h2><p>Testez obligatoirement la configuration avant de l'enregistrer.</p></div>
         </header>
-
         <div className="router-form-grid">
-          <label className="form-field">
-            Nom du routeur
-            <input value={values.name} onChange={(event) => update({ name: event.target.value })} />
-          </label>
-          <label className="form-field">
-            Modèle optionnel
-            <input value={values.model} onChange={(event) => update({ model: event.target.value })} />
-          </label>
-          <label className="form-field">
-            Adresse IP locale
-            <input value={values.ipAddress} onChange={(event) => update({ ipAddress: event.target.value })} />
-          </label>
-          <label className="form-field">
-            Port API
-            <input value={values.apiPort} onChange={(event) => update({ apiPort: event.target.value })} />
-          </label>
-          <label className="form-field">
-            Port API SSL
-            <input value={values.apiSslPort} onChange={(event) => update({ apiSslPort: event.target.value })} />
-          </label>
-          <label className="form-field">
-            Utilisateur MikroTik
-            <input value={values.username} onChange={(event) => update({ username: event.target.value })} />
-          </label>
+          <label className="form-field">Nom du routeur<input value={values.name} onChange={(event) => update({ name: event.target.value })} /></label>
+          <label className="form-field">Modèle optionnel<input value={values.model} onChange={(event) => update({ model: event.target.value })} /></label>
+          <label className="form-field">Adresse IP locale<input value={values.ipAddress} onChange={(event) => update({ ipAddress: event.target.value })} /></label>
+          <label className="form-field">Port API<input value={values.apiPort} onChange={(event) => update({ apiPort: event.target.value })} /></label>
+          <label className="form-field">Port API SSL<input value={values.apiSslPort} onChange={(event) => update({ apiSslPort: event.target.value })} /></label>
+          <label className="form-field">Utilisateur MikroTik<input value={values.username} onChange={(event) => update({ username: event.target.value })} /></label>
           <PasswordField
             autoComplete="new-password"
             label="Mot de passe MikroTik"
@@ -1027,83 +749,96 @@ function RouterFormDialog({ formState, logsCount, onCancel, onChange, onSubmit, 
             Mode préféré
             <select
               value={values.preferredMode}
-              onChange={(event) => update({ preferredMode: event.target.value as RouterFormValues["preferredMode"] })}
+              onChange={(event) => {
+                const preferredMode = event.target.value as RouterFormValues["preferredMode"];
+                update(preferredMode === "vpn"
+                  ? { preferredMode, remotePort: "8728", remoteUseSsl: false }
+                  : { preferredMode });
+              }}
             >
               <option value="local">Connexion locale</option>
               <option value="distant_ip">Adresse distante</option>
-              <option value="vpn">VPN</option>
-              <option value="agent_future">Agent distant futur</option>
+              <option value="vpn">VPN WireGuard</option>
             </select>
           </label>
           {remoteMode ? (
             <>
-              <label className="form-field">
-                Adresse distante
-                <input value={values.remoteHost} onChange={(event) => update({ remoteHost: event.target.value })} />
-              </label>
-              <label className="form-field">
-                Port distant
-                <input value={values.remotePort} onChange={(event) => update({ remotePort: event.target.value })} />
-              </label>
-              <label className="toggle-option">
-                <input
-                  checked={values.remoteUseSsl}
-                  onChange={(event) =>
-                    update({ remotePort: event.target.checked ? "8729" : "8728", remoteUseSsl: event.target.checked })
-                  }
-                  type="checkbox"
-                />
-                <Wifi aria-hidden="true" />
-                <span>Utiliser API SSL</span>
-              </label>
+              <label className="form-field">Adresse distante<input value={values.remoteHost} onChange={(event) => update({ remoteHost: event.target.value })} /></label>
+              <label className="form-field">Port distant<input value={values.remotePort} onChange={(event) => update({ remotePort: event.target.value })} /></label>
+              {values.preferredMode !== "vpn" ? (
+                <label className="toggle-option">
+                  <input
+                    checked={values.remoteUseSsl}
+                    onChange={(event) => update({ remotePort: event.target.checked ? "8729" : "8728", remoteUseSsl: event.target.checked })}
+                    type="checkbox"
+                  />
+                  <Wifi aria-hidden="true" /><span>Utiliser API SSL</span>
+                </label>
+              ) : null}
             </>
           ) : null}
-          <label className="form-field router-form-notes">
-            Notes internes
-            <textarea value={values.notes} onChange={(event) => update({ notes: event.target.value })} />
-          </label>
+          <label className="form-field router-form-notes">Notes internes<textarea value={values.notes} onChange={(event) => update({ notes: event.target.value })} /></label>
         </div>
-
-        {remoteMode ? (
-          <div className="form-error">
-            <AlertTriangle aria-hidden="true" />
-            <span>{remoteSecurityWarnings.join(" ")}</span>
-          </div>
-        ) : null}
-
+        {remoteMode ? <div className="form-error"><AlertTriangle aria-hidden="true" /><span>{remoteSecurityWarnings.join(" ")}</span></div> : null}
         {formState.detectedInfo ? (
-          <div className="router-form-result">
-            <Badge status="success">Infos recuperees</Badge>
-            <span>
-              {formState.detectedInfo.model} · {formState.detectedInfo.boardName} · RouterOS{" "}
-              {formState.detectedInfo.routerOsVersion}
-            </span>
-          </div>
+          <div className="router-form-result"><Badge status="success">Infos récupérées</Badge><span>{formState.detectedInfo.model} · {formState.detectedInfo.boardName} · RouterOS {formState.detectedInfo.routerOsVersion}</span></div>
         ) : null}
-
         <div className="router-form-result">
-          <Badge status={formState.testStatus === "connected" ? "success" : "warning"}>
-            {formState.testMessage ?? routerTestMessage(formState.testStatus)}
-          </Badge>
+          <Badge status={formState.testStatus === "connected" ? "success" : "warning"}>{formState.testMessage ?? routerTestMessage(formState.testStatus)}</Badge>
           <span>Tests enregistrés : {logsCount}</span>
         </div>
-
         {formState.error ? <p className="form-error">{formState.error}</p> : null}
-
         <div className="confirm-dialog__actions">
-          <Button onClick={onCancel} variant="ghost">
-            Annuler
-          </Button>
-          <Button icon={Search} onClick={onTest}>
-            Tester la connexion
-          </Button>
-          <Button icon={Save} onClick={onSubmit} variant="primary">
-            Enregistrer
-          </Button>
+          <Button onClick={onCancel} variant="ghost">Annuler</Button>
+          <Button icon={Search} onClick={onTest}>Tester la connexion</Button>
+          <Button disabled={formState.testStatus !== "connected"} icon={Save} onClick={onSubmit} variant="primary">Enregistrer</Button>
         </div>
       </section>
     </div>
   );
+}
+
+function DeleteRouterDialog({
+  isDeleting,
+  onCancel,
+  onConfirm,
+  router
+}: {
+  isDeleting: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+  router: RouterCardData | null;
+}) {
+  if (!router) return null;
+  return (
+    <div className="dialog-backdrop" role="presentation">
+      <section aria-modal="true" className="connection-dialog" role="dialog">
+        <header className="connection-dialog__header">
+          <div className="router-card__icon"><Trash2 aria-hidden="true" /></div>
+          <div><h2>Supprimer {router.zoneName} ?</h2><p>Les tickets historiques sont conservés. Les connexions du routeur seront désactivées.</p></div>
+        </header>
+        <div className="form-error"><AlertTriangle aria-hidden="true" /><span>Un pair VPN actif doit être révoqué avant la suppression.</span></div>
+        <div className="confirm-dialog__actions">
+          <Button disabled={isDeleting} onClick={onCancel} variant="ghost">Annuler</Button>
+          <Button disabled={isDeleting} icon={Trash2} onClick={onConfirm} variant="danger">{isDeleting ? "Suppression…" : "Supprimer"}</Button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function connectionFingerprint(values: RouterFormValues): string {
+  return JSON.stringify({
+    apiPort: values.apiPort,
+    apiSslPort: values.apiSslPort,
+    ipAddress: values.ipAddress.trim(),
+    password: values.password,
+    preferredMode: values.preferredMode,
+    remoteHost: values.remoteHost.trim(),
+    remotePort: values.remotePort,
+    remoteUseSsl: values.remoteUseSsl,
+    username: values.username.trim()
+  });
 }
 
 function inferConnectionError({
@@ -1118,35 +853,12 @@ function inferConnectionError({
   statusHint?: RouterCardData["status"];
 }): RouterErrorCode | null {
   const normalizedHost = host.trim();
-
-  if (mode === "agent_future") {
-    return "remote_unavailable";
-  }
-
-  if (isRemoteConnectionMode(mode) && !normalizedHost) {
-    return "remote_not_configured";
-  }
-
-  if (mode === "vpn" && normalizedHost.includes("public")) {
-    return "vpn_required";
-  }
-
-  if (password.trim().toLowerCase() === "incorrect") {
-    return "authentication_failed";
-  }
-
-  if (normalizedHost.endsWith(".254")) {
-    return "timeout";
-  }
-
-  if (normalizedHost.startsWith("10.10.") || statusHint === "warning") {
-    return "api_disabled";
-  }
-
-  if (statusHint === "offline") {
-    return "router_offline";
-  }
-
+  if (mode === "agent_future") return "remote_unavailable";
+  if (isRemoteConnectionMode(mode) && !normalizedHost) return "remote_not_configured";
+  if (password.trim().toLowerCase() === "incorrect") return "authentication_failed";
+  if (normalizedHost.endsWith(".254")) return "timeout";
+  if (normalizedHost.startsWith("10.10.") || statusHint === "warning") return "api_disabled";
+  if (statusHint === "offline") return "router_offline";
   return null;
 }
 
@@ -1173,44 +885,25 @@ function applyTestResult(
 
 function validateRouterForm(formState: RouterFormState): string | null {
   const testError = validateRouterFormForTest(formState.values);
-
-  if (testError) {
-    return testError;
-  }
-
-  if (formState.mode === "add" && !formState.values.password.trim()) {
-    return "Entrez le mot de passe du routeur.";
-  }
-
+  if (testError) return testError;
+  if (formState.mode === "add" && !formState.values.password.trim()) return "Entrez le mot de passe du routeur.";
+  if (formState.testStatus !== "connected") return "Testez et validez cette configuration RouterOS avant de l'enregistrer.";
   return null;
 }
 
 function validateRouterFormForTest(values: RouterFormValues): string | null {
-  if (!values.name.trim()) {
-    return "Entrez le nom du routeur.";
-  }
-
-  if (!values.ipAddress.trim()) {
-    return "Entrez l’adresse IP locale.";
-  }
-
-  if (!values.username.trim()) {
-    return "Entrez l’utilisateur MikroTik.";
-  }
-
-  if (!Number(values.apiPort) || !Number(values.apiSslPort)) {
-    return "Entrez des ports valides.";
-  }
-
+  if (!values.name.trim()) return "Entrez le nom du routeur.";
+  if (!values.ipAddress.trim()) return "Entrez l’adresse IP locale.";
+  if (!values.username.trim()) return "Entrez l’utilisateur MikroTik.";
+  if (!isValidPort(values.apiPort) || !isValidPort(values.apiSslPort)) return "Entrez des ports API valides.";
   if (isRemoteConnectionMode(values.preferredMode)) {
-    if (values.preferredMode !== "agent_future" && !values.remoteHost.trim()) {
-      return "Entrez l'adresse distante.";
-    }
-
-    if (!Number(values.remotePort)) {
-      return "Entrez un port distant valide.";
-    }
+    if (!values.remoteHost.trim()) return "Entrez l'adresse distante.";
+    if (!isValidPort(values.remotePort)) return "Entrez un port distant valide.";
   }
-
   return null;
+}
+
+function isValidPort(value: string): boolean {
+  const port = Number(value);
+  return Number.isInteger(port) && port >= 1 && port <= 65535;
 }

@@ -1,0 +1,133 @@
+import type { TicketRecord } from "../../domain/database";
+import type { ActiveHotspotUser, HotspotUser } from "../../domain/router";
+import type { RouterService } from "../router";
+import type { TicketRepository } from "../database/repositories";
+import { isMacAddress, normalizeMacAddress } from "./RouterAccessPolicyService";
+
+export type VoucherBindingConflict = {
+  expectedMacAddress: string;
+  observedMacAddress: string;
+  username: string;
+};
+
+export type VoucherBindingResult = {
+  boundUsernames: string[];
+  conflicts: VoucherBindingConflict[];
+  errors: Array<{ message: string; username: string }>;
+};
+
+export class VoucherDeviceBindingService {
+  constructor(private readonly tickets: TicketRepository) {}
+
+  async synchronize(input: {
+    accountId: string;
+    activeUsers: ActiveHotspotUser[];
+    hotspotUsers: HotspotUser[];
+    routerId: string;
+    routerService: RouterService;
+    tickets: TicketRecord[];
+  }): Promise<VoucherBindingResult> {
+    const result: VoucherBindingResult = {
+      boundUsernames: [],
+      conflicts: [],
+      errors: []
+    };
+    const ticketsByUsername = new Map(
+      input.tickets.map((ticket) => [ticket.username, ticket])
+    );
+    const usersByUsername = new Map(
+      input.hotspotUsers.map((user) => [user.username, user])
+    );
+    const boundMacsByUsername = new Map<string, string>();
+    for (const ticket of input.tickets) {
+      const hotspotUser = usersByUsername.get(ticket.username);
+      const localMac = isMacAddress(ticket.mac_address ?? "")
+        ? normalizeMacAddress(ticket.mac_address ?? "")
+        : null;
+      const routerMac = isMacAddress(hotspotUser?.macAddress ?? "")
+        ? normalizeMacAddress(hotspotUser?.macAddress ?? "")
+        : null;
+      const expectedMac = localMac ?? routerMac;
+      if (expectedMac) boundMacsByUsername.set(ticket.username, expectedMac);
+    }
+
+    for (const activeUser of input.activeUsers) {
+      const ticket = ticketsByUsername.get(activeUser.username);
+      const hotspotUser = usersByUsername.get(activeUser.username);
+      if (
+        !ticket ||
+        ticket.account_id !== input.accountId ||
+        ticket.router_id !== input.routerId ||
+        !hotspotUser ||
+        !isMacAddress(activeUser.macAddress)
+      ) continue;
+
+      const observedMac = normalizeMacAddress(activeUser.macAddress);
+      const localMac = isMacAddress(ticket.mac_address ?? "")
+        ? normalizeMacAddress(ticket.mac_address ?? "")
+        : null;
+      const routerMac = isMacAddress(hotspotUser.macAddress ?? "")
+        ? normalizeMacAddress(hotspotUser.macAddress ?? "")
+        : null;
+      const expectedMac = boundMacsByUsername.get(activeUser.username) ??
+        localMac ??
+        routerMac;
+
+      if (expectedMac && expectedMac !== observedMac) {
+        result.conflicts.push({
+          expectedMacAddress: expectedMac,
+          observedMacAddress: observedMac,
+          username: activeUser.username
+        });
+        continue;
+      }
+
+      try {
+        if (routerMac !== observedMac) {
+          await input.routerService.bindHotspotUserToMac(
+            activeUser.username,
+            observedMac
+          );
+        }
+        await this.tickets.update({
+          ...ticket,
+          activated_at: ticket.activated_at ?? new Date().toISOString(),
+          ip_address: activeUser.ipAddress,
+          mac_address: observedMac,
+          status: ticket.status === "désactivé" ? ticket.status : "activé",
+          sync_status: "synced"
+        });
+        boundMacsByUsername.set(activeUser.username, observedMac);
+        if (!localMac || !routerMac) result.boundUsernames.push(activeUser.username);
+      } catch (error) {
+        result.errors.push({
+          message: error instanceof Error ? error.message : "Verrouillage impossible.",
+          username: activeUser.username
+        });
+      }
+    }
+
+    return result;
+  }
+
+  async clear(input: {
+    accountId: string;
+    routerId: string;
+    routerService: RouterService;
+    ticket: TicketRecord;
+  }): Promise<void> {
+    if (
+      input.ticket.account_id !== input.accountId ||
+      input.ticket.router_id !== input.routerId
+    ) {
+      throw new Error("Ce voucher n’appartient pas au routeur actif.");
+    }
+    await input.routerService.clearHotspotUserMac(input.ticket.username);
+    await this.tickets.update({
+      ...input.ticket,
+      ip_address: null,
+      mac_address: null,
+      sync_status: "synced"
+    });
+  }
+}

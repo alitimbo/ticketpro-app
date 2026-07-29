@@ -40,11 +40,7 @@ export class TicketRepository {
     );
 
     const created = await this.findById(input.id);
-
-    if (!created) {
-      throw new Error("Le ticket n'a pas pu être créé.");
-    }
-
+    if (!created) throw new Error("Le ticket n'a pas pu être créé.");
     return created;
   }
 
@@ -81,23 +77,24 @@ export class TicketRepository {
     );
 
     const updated = await this.findById(input.id);
-
-    if (!updated) {
-      throw new Error("Le ticket n'a pas pu être mis à jour.");
-    }
-
+    if (!updated) throw new Error("Le ticket n'a pas pu être mis à jour.");
     return updated;
   }
 
   async listByBatch(batchId: string): Promise<TicketRecord[]> {
-    return this.database.query<TicketRecord>("SELECT * FROM tickets WHERE batch_id = ?1 ORDER BY created_at ASC", [
-      batchId
-    ]);
+    return this.database.query<TicketRecord>("SELECT * FROM tickets WHERE batch_id = ?1 ORDER BY created_at ASC", [batchId]);
   }
 
   async listByRouter(routerId: string): Promise<TicketRecord[]> {
     return this.database.query<TicketRecord>(
       "SELECT * FROM tickets WHERE router_id = ?1 AND deleted_at IS NULL ORDER BY created_at DESC",
+      [routerId]
+    );
+  }
+
+  async listExistingUsernamesByRouter(routerId: string): Promise<Array<{ username: string }>> {
+    return this.database.query<{ username: string }>(
+      "SELECT username FROM tickets WHERE router_id = ?1 AND deleted_at IS NULL ORDER BY username",
       [routerId]
     );
   }
@@ -109,10 +106,37 @@ export class TicketRepository {
         [accountId, profileId]
       );
     }
-
     return this.database.query<TicketRecord>(
       "SELECT * FROM tickets WHERE account_id = ?1 AND deleted_at IS NULL ORDER BY created_at DESC",
       [accountId]
+    );
+  }
+
+  async listForReportByAccount(accountId: string, profileId?: string): Promise<TicketRecord[]> {
+    if (profileId) {
+      return this.database.query<TicketRecord>(
+        "SELECT * FROM tickets WHERE account_id = ?1 AND created_by_profile_id = ?2 ORDER BY created_at DESC",
+        [accountId, profileId]
+      );
+    }
+
+    return this.database.query<TicketRecord>(
+      "SELECT * FROM tickets WHERE account_id = ?1 ORDER BY created_at DESC",
+      [accountId]
+    );
+  }
+
+  async recordRouterStatusByUsername(input: {
+    accountId: string;
+    routerId: string;
+    status: string;
+    username: string;
+  }): Promise<void> {
+    await this.database.execute(
+      `UPDATE tickets
+       SET status = ?1, sync_status = 'synced', updated_at = ?2
+       WHERE account_id = ?3 AND router_id = ?4 AND username = ?5 AND deleted_at IS NULL`,
+      [input.status, new Date().toISOString(), input.accountId, input.routerId, input.username]
     );
   }
 }

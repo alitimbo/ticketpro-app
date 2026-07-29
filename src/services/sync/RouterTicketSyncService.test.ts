@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ActiveHotspotUser, HotspotUser } from "../../domain/router";
+import { RouterServiceError } from "../router";
 import { compareLocalAndRouterTickets, RouterTicketSyncService, type SyncableLocalTicket } from "./RouterTicketSyncService";
 
 const localTickets: SyncableLocalTicket[] = [
@@ -118,14 +119,14 @@ describe("RouterTicketSyncService", () => {
     expect(report.updates[0]).toMatchObject({ mikrotikId: "*created", syncStatus: "router_synced" });
   });
 
-  it("reflète la désactivation distante dans l'état local", () => {
+  it("distingue la désactivation manuelle d'une limite consommée", () => {
     const report = compareLocalAndRouterTickets(
       [localTickets[0]],
       [{ ...routerUsers[0], status: "disabled" }],
       []
     );
 
-    expect(report.updates[0]).toMatchObject({ id: "ticket-1", status: "expiré", syncStatus: "router_synced" });
+    expect(report.updates[0]).toMatchObject({ id: "ticket-1", status: "désactivé", syncStatus: "router_synced" });
   });
 
   it("supprime un ticket sur le routeur avant sa suppression locale", async () => {
@@ -145,6 +146,26 @@ describe("RouterTicketSyncService", () => {
     expect(report.updates[0]).toMatchObject({ id: "ticket-1", status: "supprimé", syncStatus: "router_synced" });
   });
 
+  it("considère comme supprimé un voucher déjà absent de RouterOS", async () => {
+    const service = new RouterTicketSyncService({
+      createHotspotUser: async () => routerUsers[0],
+      listActiveUsers: async () => [],
+      listHotspotUsers: async () => [],
+      removeHotspotUser: async () => {
+        throw new RouterServiceError("hotspot_not_found", "Absent");
+      }
+    });
+
+    const report = await service.removeTicket(localTickets[0]);
+
+    expect(report.updates[0]).toMatchObject({
+      id: "ticket-1",
+      status: "supprimé",
+      syncStatus: "router_synced"
+    });
+    expect(report.logs[0]).toMatchObject({ level: "warning" });
+  });
+
   it("récupère un ticket créé malgré une erreur réseau de confirmation", async () => {
     let listCalls = 0;
     const service = new RouterTicketSyncService({
@@ -162,5 +183,26 @@ describe("RouterTicketSyncService", () => {
 
     expect(report.updates[0]).toMatchObject({ id: "ticket-2", syncStatus: "router_synced" });
     expect(report.logs[0]).toMatchObject({ level: "warning" });
+  });
+
+  it("importe les compteurs cumulés et détecte une limite atteinte", () => {
+    const report = compareLocalAndRouterTickets(
+      [{ ...localTickets[0], downloadedBytes: 10, uploadedBytes: 5 }],
+      [{
+        ...routerUsers[0],
+        downloadedBytes: 4_000,
+        uploadedBytes: 1_000,
+        uptime: "1h",
+        status: "expired"
+      }],
+      []
+    );
+
+    expect(report.updates[0]).toMatchObject({
+      completedAt: expect.any(String),
+      downloadedBytes: 4_000,
+      status: "complété",
+      uploadedBytes: 1_000
+    });
   });
 });

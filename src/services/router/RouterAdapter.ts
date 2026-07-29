@@ -2,9 +2,11 @@ import type {
   ActiveHotspotUser,
   HotspotPlan,
   HotspotPlanDraft,
+  HotspotBypassBinding,
   HotspotServer,
   HotspotUser,
   HotspotUserDraft,
+  HotspotUserLimits,
   HotspotUsersBatchDraft,
   InterfaceTraffic,
   RouterConnectionTest,
@@ -22,11 +24,16 @@ export interface RouterAdapter {
   updateHotspotPlan(planId: string, updates: Partial<HotspotPlanDraft>): Promise<HotspotPlan>;
   deleteHotspotPlan(planId: string): Promise<void>;
   listHotspotUsers(): Promise<HotspotUser[]>;
-  updateHotspotUser(username: string, planId: string): Promise<HotspotUser>;
+  updateHotspotUser(username: string, planId: string, limits?: HotspotUserLimits): Promise<HotspotUser>;
   createHotspotUser(user: HotspotUserDraft): Promise<HotspotUser>;
   createHotspotUsersBatch(batch: HotspotUsersBatchDraft): Promise<HotspotUser[]>;
   disableHotspotUser(username: string): Promise<HotspotUser>;
+  enableHotspotUser(username: string): Promise<HotspotUser>;
   removeHotspotUser(username: string): Promise<void>;
+  bindHotspotUserToMac(username: string, macAddress: string): Promise<HotspotUser>;
+  clearHotspotUserMac(username: string): Promise<HotspotUser>;
+  upsertHotspotBypass(binding: HotspotBypassBinding): Promise<void>;
+  removeHotspotBypass(id: string, macAddress: string): Promise<void>;
   listActiveUsers(): Promise<ActiveHotspotUser[]>;
   disconnectActiveUser(username: string): Promise<void>;
   getRouterHealth(): Promise<RouterHealth>;

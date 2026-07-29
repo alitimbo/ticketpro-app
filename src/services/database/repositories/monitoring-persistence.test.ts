@@ -24,7 +24,12 @@ describe("monitoring persistence", () => {
       }
     ], "2026-07-13T10:00:00.000Z");
 
-    expect(await sessions.listByRouter("router-1")).toHaveLength(1);
+    expect(await sessions.listByRouter("router-1")).toEqual([
+      expect.objectContaining({
+        id: "router-1:active-1",
+        username: "ticket-1"
+      })
+    ]);
 
     await sessions.replaceForRouter("router-1", [], "2026-07-13T10:05:00.000Z");
     expect(await sessions.listByRouter("router-1")).toHaveLength(0);

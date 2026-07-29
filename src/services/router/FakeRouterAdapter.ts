@@ -27,6 +27,7 @@ type FakeRouterAdapterOptions = {
 };
 
 export class FakeRouterAdapter implements RouterAdapter {
+  private hotspotBypasses = new Map<string, import("../../domain/router").HotspotBypassBinding>();
   async provisionWireGuard(): Promise<void> {
     return undefined;
   }
@@ -301,11 +302,48 @@ export class FakeRouterAdapter implements RouterAdapter {
     return { ...updated };
   }
 
+  async enableHotspotUser(username: string): Promise<HotspotUser> {
+    await this.guard("enableHotspotUser");
+    const user = this.findUser(username);
+    const updated: HotspotUser = { ...user, status: "available" };
+
+    this.users = this.users.map((item) => (item.username === username ? updated : item));
+    return { ...updated };
+  }
+
   async removeHotspotUser(username: string): Promise<void> {
     await this.guard("removeHotspotUser");
     this.findUser(username);
     this.users = this.users.filter((user) => user.username !== username);
     this.activeUsers = this.activeUsers.filter((user) => user.username !== username);
+  }
+
+  async bindHotspotUserToMac(username: string, macAddress: string): Promise<HotspotUser> {
+    await this.guard("bindHotspotUserToMac");
+    const user = this.findUser(username);
+    const updated = { ...user, macAddress: macAddress.toUpperCase() };
+    this.users = this.users.map((item) => item.username === username ? updated : item);
+    return { ...updated };
+  }
+
+  async clearHotspotUserMac(username: string): Promise<HotspotUser> {
+    await this.guard("clearHotspotUserMac");
+    const user = this.findUser(username);
+    const updated = { ...user, macAddress: null };
+    this.users = this.users.map((item) => item.username === username ? updated : item);
+    return { ...updated };
+  }
+
+  async upsertHotspotBypass(
+    binding: import("../../domain/router").HotspotBypassBinding
+  ): Promise<void> {
+    await this.guard("upsertHotspotBypass");
+    this.hotspotBypasses.set(binding.id, { ...binding });
+  }
+
+  async removeHotspotBypass(id: string, _macAddress: string): Promise<void> {
+    await this.guard("removeHotspotBypass");
+    this.hotspotBypasses.delete(id);
   }
 
   async listActiveUsers(): Promise<ActiveHotspotUser[]> {

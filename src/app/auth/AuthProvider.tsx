@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import type { AuthSession, MainAccountRecord, MainAccountSession, Permission, UserRole } from "../../domain/auth";
 import type { InternalProfileRecord } from "../../domain/database";
 import { AccountRepository, InternalProfileRepository, useAppDatabase } from "../../services/database";
-import { AuditLogService } from "../../services/logging";
+import { AuditLogService, LogRetentionService } from "../../services/logging";
 import {
   clearMainAccountSession,
   clearStoredSession,
@@ -66,12 +66,14 @@ type AuthContextValue = {
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+const activityPersistenceIntervalMs = 60_000;
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const { database, isInitialized, isPersistent } = useAppDatabase();
   const accountRepository = useMemo(() => new AccountRepository(database), [database]);
   const internalProfileRepository = useMemo(() => new InternalProfileRepository(database), [database]);
   const auditLogService = useMemo(() => new AuditLogService(database), [database]);
+  const logRetentionService = useMemo(() => new LogRetentionService(database), [database]);
   const [accountSession, setAccountSession] = useState<MainAccountSession | null>(() => readMainAccountSession());
   const [session, setSession] = useState<AuthSession | null>(() => {
     const account = readMainAccountSession();
@@ -87,6 +89,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [firstLaunchRequired] = useState(() => getFirstLaunchRequired());
   const [saasAccount, setSaasAccount] = useState<SaasAuthResult | null>(null);
   const [isSubscriptionChecked, setIsSubscriptionChecked] = useState(false);
+
+  useEffect(() => {
+    if (!isPersistent || !isInitialized || !session?.account_id) {
+      return;
+    }
+
+    void logRetentionService.runAutomatic(session.account_id).catch(() => undefined);
+  }, [
+    isInitialized,
+    isPersistent,
+    logRetentionService,
+    session?.account_id
+  ]);
 
   const logoutProfile = useCallback(() => {
     clearStoredSession();
@@ -182,6 +197,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return null;
       }
 
+      if (Date.now() - current.lastActivityAt < activityPersistenceIntervalMs) {
+        return current;
+      }
+
       const refreshed = refreshMainAccountSession(current);
       storeMainAccountSession(refreshed);
       return refreshed;
@@ -194,6 +213,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (isSessionExpired(current)) {
         clearStoredSession();
         return null;
+      }
+
+      if (Date.now() - current.last_activity_at < activityPersistenceIntervalMs) {
+        return current;
       }
 
       const refreshed = refreshSession(current);
@@ -353,6 +376,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           action: "auth.profile_login",
           category: "authentification",
           internalProfileId: persistentProfile.id,
+          internalProfileRole: role,
           message: `Connexion du profil ${role} réussie.`
         });
       }
@@ -394,6 +418,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         action: "auth.profile_login",
         category: "authentification",
         internalProfileId: persistentProfile.id,
+        internalProfileRole: role,
         message: `Connexion du profil ${role} réussie.`
       });
     }

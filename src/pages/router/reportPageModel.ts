@@ -8,6 +8,7 @@ import type { AuthSession } from "../../domain/auth";
 
 export type ReportTicket = TicketListItem & {
   deletedAt: string | null;
+  printedAt: string[];
   priceHint: number | null;
 };
 
@@ -79,6 +80,7 @@ export function createDemoReportTickets(): ReportTicket[] {
     return {
       ...ticket,
       deletedAt,
+      printedAt: ticket.printedCount > 0 ? [ticket.createdAt] : [],
       priceHint: planPrices[ticket.planId] ?? null,
       status
     };
@@ -140,7 +142,7 @@ export function buildReportSummary(tickets: ReportTicket[], filters: ReportFilte
 
   return {
     activatedTheoreticalCfa: sumTheoreticalValue(activatedTickets),
-    byDay: buildGroupRows(filteredTickets, filters, (ticket) => dateKey(ticket.createdAt), (ticket) => dateKey(ticket.createdAt)),
+    byDay: buildDailyGroupRows(filteredTickets, filters),
     byOperator: buildGroupRows(
       filteredTickets,
       filters,
@@ -159,13 +161,7 @@ export function getTicketsForMetric(
   filters: ReportFilters
 ): ReportTicket[] {
   return tickets.filter((ticket) => {
-    const eventDate = getMetricDate(ticket, metricId);
-
-    if (!eventDate) {
-      return false;
-    }
-
-    return isDateInPeriod(eventDate, filters);
+    return getMetricDates(ticket, metricId).some((eventDate) => isDateInPeriod(eventDate, filters));
   });
 }
 
@@ -202,24 +198,54 @@ export function internalProfileLabel(profileId: string): string {
   const labels: Record<string, string> = {
     "internal-profile-admin": "Admin",
     "internal-profile-agent": "Agent",
-    "internal-profile-guest": "InvitÃ©",
-    "internal-profile-operator": "OpÃ©rateur"
+    "internal-profile-guest": "Invité",
+    "internal-profile-operator": "Opérateur"
   };
 
   return labels[canonicalId] ?? profileId;
 }
 
 export function buildReportCsv(tickets: ReportTicket[]): string {
-  const header = ["Code", "Plan", "Statut", "Routeur", "Profil", "Créé le", "Activé le", "Terminé le", "Prix théorique CFA"];
+  const header = [
+    "Code",
+    "Lot",
+    "Plan",
+    "Statut",
+    "Routeur",
+    "Rôle",
+    "Profil interne",
+    "Créé le",
+    "Imprimé le",
+    "Activé le",
+    "Terminé le",
+    "Expire le",
+    "Supprimé le",
+    "Nombre d'impressions",
+    "Adresse IP",
+    "Adresse MAC",
+    "Téléchargé (octets)",
+    "Envoyé (octets)",
+    "Prix théorique CFA"
+  ];
   const rows = tickets.map((ticket) => [
     ticket.code,
+    ticket.batchId,
     ticket.planName,
     ticket.status,
     ticket.routerName,
+    profileLabel(ticket.operatorProfile),
     internalProfileLabel(ticket.createdByProfileId),
     ticket.createdAt,
+    ticket.printedAt.join(" | "),
     ticket.activatedAt ?? "",
     ticket.completedAt ?? "",
+    ticket.expiresAt ?? "",
+    ticket.deletedAt ?? "",
+    String(ticket.printedCount),
+    ticket.ipAddress ?? "",
+    ticket.macAddress ?? "",
+    String(ticket.downloadedBytes),
+    String(ticket.uploadedBytes),
     ticket.priceHint === null ? "" : String(ticket.priceHint)
   ]);
 
@@ -292,42 +318,95 @@ function buildGroupRows(
   return Array.from(rows.values()).sort((left, right) => right.created - left.created || left.label.localeCompare(right.label));
 }
 
-function getMetricDate(ticket: ReportTicket, metricId: ReportMetricId): string | null {
+function getMetricDates(ticket: ReportTicket, metricId: ReportMetricId): string[] {
   if (metricId === "created") {
-    return ticket.createdAt;
+    return [ticket.createdAt];
   }
 
   if (metricId === "printed") {
-    return ticket.printedCount > 0 ? ticket.createdAt : null;
+    return ticket.printedAt.length > 0
+      ? ticket.printedAt
+      : ticket.printedCount > 0
+        ? [ticket.createdAt]
+        : [];
   }
 
   if (metricId === "activated") {
-    return ticket.activatedAt;
+    return ticket.activatedAt ? [ticket.activatedAt] : [];
   }
 
   if (metricId === "completed") {
-    return ticket.completedAt;
+    return ticket.completedAt ? [ticket.completedAt] : [];
   }
 
   if (metricId === "expired") {
-    return ticket.status === "expiré" ? ticket.expiresAt : null;
+    return ticket.status === "expiré" && ticket.expiresAt ? [ticket.expiresAt] : [];
   }
 
   if (metricId === "deleted") {
-    return ticket.deletedAt;
+    return ticket.deletedAt ? [ticket.deletedAt] : [];
   }
 
-  return ticket.status === "disponible" ? ticket.createdAt : null;
+  return ticket.status === "disponible" ? [ticket.createdAt] : [];
 }
 
 function getTicketActivityDates(ticket: ReportTicket): string[] {
   return [
     ticket.createdAt,
+    ...ticket.printedAt,
     ticket.activatedAt,
     ticket.completedAt,
     ticket.expiresAt,
     ticket.deletedAt
   ].filter((value): value is string => Boolean(value));
+}
+
+function buildDailyGroupRows(tickets: ReportTicket[], filters: ReportFilters): ReportGroupRow[] {
+  const rows = new Map<string, ReportGroupRow>();
+
+  const getRow = (date: string) => {
+    const id = dateKey(date);
+    const row =
+      rows.get(id) ?? {
+        activated: 0,
+        completed: 0,
+        created: 0,
+        id,
+        label: id,
+        theoreticalCfa: 0,
+        tickets: []
+      };
+    rows.set(id, row);
+    return row;
+  };
+  const addTicket = (row: ReportGroupRow, ticket: ReportTicket) => {
+    if (!row.tickets.some((item) => item.id === ticket.id)) {
+      row.tickets.push(ticket);
+    }
+  };
+
+  tickets.forEach((ticket) => {
+    if (isDateInPeriod(ticket.createdAt, filters)) {
+      const row = getRow(ticket.createdAt);
+      row.created += 1;
+      row.theoreticalCfa += ticket.priceHint ?? 0;
+      addTicket(row, ticket);
+    }
+
+    if (ticket.activatedAt && isDateInPeriod(ticket.activatedAt, filters)) {
+      const row = getRow(ticket.activatedAt);
+      row.activated += 1;
+      addTicket(row, ticket);
+    }
+
+    if (ticket.completedAt && isDateInPeriod(ticket.completedAt, filters)) {
+      const row = getRow(ticket.completedAt);
+      row.completed += 1;
+      addTicket(row, ticket);
+    }
+  });
+
+  return Array.from(rows.values()).sort((left, right) => right.id.localeCompare(left.id));
 }
 
 function sumTheoreticalValue(tickets: ReportTicket[]): number {

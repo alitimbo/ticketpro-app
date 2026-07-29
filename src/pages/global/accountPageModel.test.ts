@@ -11,6 +11,7 @@ describe("accountPageModel", () => {
   it("valide les informations principales du compte", () => {
     expect(validateAccountDetails({ companyName: "", displayName: "Douma", phone: "" })).toBe("Entrez le nom de l'entreprise.");
     expect(validateAccountDetails({ companyName: "Douma", displayName: "", phone: "" })).toBe("Entrez le nom affiché.");
+    expect(validateAccountDetails({ companyName: "Douma", displayName: "Douma", phone: "" })).toBe("Entrez le téléphone du propriétaire.");
     expect(validateAccountDetails({ companyName: "Douma", displayName: "Douma", phone: "+22790000000" })).toBeNull();
   });
 

@@ -15,9 +15,12 @@ import {
 } from "lucide-react";
 import { useAuth } from "../../app/auth/AuthProvider";
 import {
+  createRemotePlanIdempotently,
   createPersistedRouterService,
+  deleteRemotePlanIdempotently,
   FakeRouterAdapter,
   RouterService,
+  updateRemotePlanIdempotently,
   type RouterActionLog
 } from "../../services/router";
 import {
@@ -61,6 +64,8 @@ export function PlansPage() {
   const [logs, setLogs] = useState<RouterActionLog[]>([]);
   const [message, setMessage] = useState<string | null>(null);
   const [persistedService, setPersistedService] = useState<RouterService | null>(null);
+  const [selectedPlan, setSelectedPlan] = useState<PlanViewModel | null>(null);
+  const [syncingPlanId, setSyncingPlanId] = useState<string | null>(null);
   const planRepository = useMemo(() => new HotspotPlanRepository(database), [database]);
   const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
@@ -76,6 +81,28 @@ export function PlansPage() {
       }),
     [session]
   );
+
+  const getPersistedService = async (): Promise<RouterService> => {
+    if (persistedService) return persistedService;
+    if (!isInitialized || !session) {
+      throw new Error("La base locale ou la session n'est pas encore prête.");
+    }
+
+    const router = await routerRepository.findById(routerId);
+    if (!router || router.account_id !== session.account_id) {
+      throw new Error("Routeur introuvable pour cette organisation.");
+    }
+
+    const serviceForRouter = await createPersistedRouterService({
+      authSession: session,
+      connections: await connectionRepository.listByRouter(routerId),
+      database,
+      logger: { write: (log) => setLogs((current) => [...current, log]) },
+      router
+    });
+    setPersistedService(serviceForRouter);
+    return serviceForRouter;
+  };
 
   useEffect(() => {
     if (!isPersistent || !isInitialized || !session) {
@@ -183,20 +210,36 @@ export function PlansPage() {
   };
 
   const syncPlan = async (plan: PlanViewModel) => {
-    if (isPersistent) {
-      if (!persistedService) {
-        setMessage("Le routeur n'est pas prêt ou son mot de passe doit être ressaisi.");
-        return;
-      }
+    if (syncingPlanId) return;
+    setSyncingPlanId(plan.id);
+    setMessage(`${plan.name} : synchronisation RouterOS en cours…`);
 
-      const draft = formValuesToPlanDraft(planToFormValues(plan));
-      await persistedService.updateHotspotPlan(plan.profileName, draft);
-      await planRepository.update({ ...planRecordFromDraft(draft, routerId, plan.id, "synced") });
-      setPlans((current) => current.map((item) => (item.id === plan.id ? { ...item, syncStatus: "synced" } : item)));
-    } else {
-      await service.updateHotspotPlan(plan.id, { status: plan.status });
+    try {
+      if (isPersistent) {
+        const activeService = await getPersistedService();
+        const draft = formValuesToPlanDraft(planToFormValues(plan));
+        await updateRemotePlanIdempotently(activeService, plan.profileName, draft);
+        const record = await planRepository.update({
+          ...planRecordFromDraft(draft, routerId, plan.id, "synced")
+        });
+        const syncedPlan = planFromRecord(record, plan.linkedTickets);
+        setPlans((current) =>
+          current.map((item) => (item.id === plan.id ? syncedPlan : item))
+        );
+        setSelectedPlan((current) => (current?.id === plan.id ? syncedPlan : current));
+      } else {
+        await service.updateHotspotPlan(plan.id, { status: plan.status });
+      }
+      setMessage(`${plan.name} synchronisé avec RouterOS.`);
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? `Synchronisation impossible : ${error.message}`
+          : "Synchronisation RouterOS impossible."
+      );
+    } finally {
+      setSyncingPlanId(null);
     }
-    setMessage(`${plan.name} synchronisé.`);
   };
 
   const submitForm = async () => {
@@ -221,10 +264,7 @@ export function PlansPage() {
 
       if (isPersistent) {
         try {
-          if (!persistedService) {
-            throw new Error("Routeur non prêt");
-          }
-          await persistedService.createHotspotPlan(draft);
+          await createRemotePlanIdempotently(await getPersistedService(), draft);
           syncStatus = "synced";
           await planRepository.update({ ...localRecord, sync_status: syncStatus });
         } catch {
@@ -252,10 +292,11 @@ export function PlansPage() {
 
       if (isPersistent) {
         try {
-          if (!persistedService) {
-            throw new Error("Routeur non prêt");
-          }
-          await persistedService.updateHotspotPlan(formState.plan.profileName, draft);
+          await updateRemotePlanIdempotently(
+            await getPersistedService(),
+            formState.plan.profileName,
+            draft
+          );
           syncStatus = "synced";
           await planRepository.update({ ...localRecord, sync_status: syncStatus });
         } catch {
@@ -293,9 +334,9 @@ export function PlansPage() {
     const storedRecord = isPersistent ? await planRepository.create(localRecord) : null;
     let syncStatus: PlanViewModel["syncStatus"] = isPersistent ? "pending" : "synced";
 
-    if (isPersistent && persistedService) {
+    if (isPersistent) {
       try {
-        await persistedService.createHotspotPlan(draft);
+        await createRemotePlanIdempotently(await getPersistedService(), draft);
         syncStatus = "synced";
         await planRepository.update({ ...localRecord, sync_status: syncStatus });
       } catch {
@@ -318,23 +359,40 @@ export function PlansPage() {
     setMessage(`${plan.name} dupliqué.`);
   };
 
-  const disable = async (plan: PlanViewModel) => {
-    const draft = formValuesToPlanDraft({ ...planToFormValues(plan), status: "disabled" });
-    if (isPersistent && persistedService) {
+  const toggleStatus = async (plan: PlanViewModel) => {
+    const nextStatus = plan.status === "active" ? "disabled" : "active";
+    const draft = formValuesToPlanDraft({ ...planToFormValues(plan), status: nextStatus });
+    let syncStatus: PlanViewModel["syncStatus"] = isPersistent ? "pending" : "synced";
+    if (isPersistent) {
       try {
-        await persistedService.updateHotspotPlan(plan.profileName, draft);
+        await updateRemotePlanIdempotently(
+          await getPersistedService(),
+          plan.profileName,
+          draft
+        );
+        syncStatus = "synced";
       } catch {
-        setMessage("Plan désactivé localement ; synchronisation à reprendre.");
+        syncStatus = "pending";
       }
     }
 
     const updated = isPersistent
-      ? planFromRecord(await planRepository.update({ ...planRecordFromDraft(draft, routerId, plan.id, persistedService ? "synced" : "pending") }), plan.linkedTickets)
-      : planFromHotspotPlan(await service.updateHotspotPlan(plan.id, { status: "disabled" }), plan.linkedTickets);
+      ? planFromRecord(
+          await planRepository.update({
+            ...planRecordFromDraft(draft, routerId, plan.id, syncStatus)
+          }),
+          plan.linkedTickets
+        )
+      : planFromHotspotPlan(await service.updateHotspotPlan(plan.id, { status: nextStatus }), plan.linkedTickets);
     setPlans((current) =>
-      current.map((item) => (item.id === plan.id ? { ...item, status: updated.status } : item))
+      current.map((item) => (item.id === plan.id ? updated : item))
     );
-    setMessage(`${plan.name} désactivé.`);
+    const action = nextStatus === "disabled" ? "désactivé" : "réactivé";
+    setMessage(
+      syncStatus === "synced"
+        ? `${plan.name} ${action}.`
+        : `${plan.name} ${action} localement ; synchronisation à reprendre.`
+    );
   };
 
   const remove = async (plan: PlanViewModel) => {
@@ -344,13 +402,18 @@ export function PlansPage() {
     }
 
     if (isPersistent) {
-      if (persistedService) {
-        try {
-          await persistedService.deleteHotspotPlan(plan.profileName);
-        } catch {
-          setMessage("Suppression distante impossible ; le plan reste conservé localement.");
-          return;
-        }
+      try {
+        await deleteRemotePlanIdempotently(
+          await getPersistedService(),
+          plan.profileName
+        );
+      } catch (error) {
+        setMessage(
+          error instanceof Error
+            ? `Suppression distante impossible : ${error.message} Le plan reste conservé localement.`
+            : "Suppression distante impossible ; le plan reste conservé localement."
+        );
+        return;
       }
       await planRepository.remove(plan.id);
     } else {
@@ -410,9 +473,10 @@ export function PlansPage() {
               canManage={canManagePlans}
               key={plan.id}
               onDelete={() => void remove(plan)}
-              onDisable={() => void disable(plan)}
+              onDisable={() => void toggleStatus(plan)}
               onDuplicate={() => void duplicate(plan)}
               onEdit={() => openEditForm(plan)}
+              onView={() => setSelectedPlan(plan)}
               onSync={() => void syncPlan(plan)}
               plan={plan}
             />
@@ -443,6 +507,7 @@ export function PlansPage() {
         onSubmit={() => void submitForm()}
         onToggleAdvanced={() => formState && setFormState({ ...formState, advancedOpen: !formState.advancedOpen })}
       />
+      <PlanDetailDialog onClose={() => setSelectedPlan(null)} plan={selectedPlan} />
     </div>
   );
 }
@@ -454,10 +519,11 @@ type PlanCardProps = {
   onDuplicate: () => void;
   onEdit: () => void;
   onSync: () => void;
+  onView: () => void;
   plan: PlanViewModel;
 };
 
-function PlanCard({ canManage, onDelete, onDisable, onDuplicate, onEdit, onSync, plan }: PlanCardProps) {
+function PlanCard({ canManage, onDelete, onDisable, onDuplicate, onEdit, onSync, onView, plan }: PlanCardProps) {
   return (
     <article className="plan-card">
       <header className="plan-card__header">
@@ -469,12 +535,16 @@ function PlanCard({ canManage, onDelete, onDisable, onDuplicate, onEdit, onSync,
         </div>
         <ActionMenu
           items={[
-            { icon: Eye, label: "Voir", onSelect: () => undefined },
+            { icon: Eye, label: "Voir", onSelect: onView },
             ...(canManage
               ? [
                   { icon: Edit3, label: "Modifier", onSelect: onEdit },
                   { icon: Copy, label: "Dupliquer", onSelect: onDuplicate },
-                  { icon: WifiOff, label: "Désactiver", onSelect: onDisable },
+                  {
+                    icon: WifiOff,
+                    label: plan.status === "active" ? "Désactiver" : "Réactiver",
+                    onSelect: onDisable
+                  },
                   { icon: Trash2, label: "Supprimer", onSelect: onDelete },
                   { icon: RotateCw, label: "Synchroniser", onSelect: onSync }
                 ]
@@ -513,6 +583,72 @@ function PlanCard({ canManage, onDelete, onDisable, onDuplicate, onEdit, onSync,
         </div>
       </dl>
     </article>
+  );
+}
+
+function PlanDetailDialog({
+  onClose,
+  plan
+}: {
+  onClose: () => void;
+  plan: PlanViewModel | null;
+}) {
+  if (!plan) return null;
+
+  return (
+    <div className="dialog-backdrop" role="presentation">
+      <section aria-modal="true" className="client-detail-dialog" role="dialog">
+        <header className="connection-dialog__header">
+          <div className="router-card__icon">
+            <ListChecks aria-hidden="true" />
+          </div>
+          <div>
+            <h2>{plan.name}</h2>
+            <p>Profil MikroTik : {plan.profileName}</p>
+          </div>
+          <Badge status={plan.syncStatus === "synced" ? "success" : "warning"}>
+            {plan.syncStatus === "synced" ? "Synchronisé" : "À synchroniser"}
+          </Badge>
+        </header>
+
+        <dl className="client-detail-grid">
+          <PlanDetailLine label="État commercial" value={plan.status === "active" ? "Actif" : "Inactif"} />
+          <PlanDetailLine label="Durée d’utilisation" value={formatPlanMinutes(plan.durationMinutes)} />
+          <PlanDetailLine
+            label="Validité après activation"
+            value={formatPlanMinutes(plan.validityMinutes ?? plan.durationMinutes)}
+          />
+          <PlanDetailLine
+            label="Volume de données"
+            value={plan.dataLimitMb ? `${plan.dataLimitMb} MB` : "Illimité"}
+          />
+          <PlanDetailLine label="Débit descendant" value={plan.downloadLimit ?? "Non défini"} />
+          <PlanDetailLine label="Débit montant" value={plan.uploadLimit ?? "Non défini"} />
+          <PlanDetailLine label="Appareils simultanés" value={String(plan.sharedUsers)} />
+          <PlanDetailLine
+            label="Prix indicatif"
+            value={plan.priceHint === null ? "Non défini" : `${plan.priceHint} CFA`}
+          />
+          <PlanDetailLine label="Tickets liés" value={String(plan.linkedTickets)} />
+          <PlanDetailLine label="Session RouterOS" value={plan.sessionTimeout} />
+          <PlanDetailLine label="Inactivité" value={plan.idleTimeout} />
+          <PlanDetailLine label="Keepalive" value={plan.keepaliveTimeout} />
+        </dl>
+
+        <div className="confirm-dialog__actions">
+          <Button onClick={onClose} variant="primary">Fermer</Button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function PlanDetailLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <dt>{label}</dt>
+      <dd>{value}</dd>
+    </div>
   );
 }
 

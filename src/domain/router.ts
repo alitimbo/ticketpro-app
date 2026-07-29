@@ -8,6 +8,7 @@ export type RouterErrorCode =
   | "permission_denied"
   | "remote_not_configured"
   | "remote_unavailable"
+  | "router_rejected"
   | "router_offline"
   | "timeout"
   | "vpn_required";
@@ -16,6 +17,7 @@ export type RouterSummary = {
   id: string;
   name: string;
   host: string;
+  hotspotAddress?: string | null;
   connectionMode: RouterConnectionMode;
   isReachable: boolean;
 };
@@ -88,13 +90,29 @@ export type HotspotUser = {
   status: "available" | "active" | "disabled" | "expired";
   comment: string | null;
   createdAt: string;
+  downloadedBytes?: number;
+  uploadedBytes?: number;
+  uptime?: string | null;
+  limitUptime?: string | null;
+  limitBytesTotal?: number | null;
+  macAddress?: string | null;
 };
 
 export type HotspotUserDraft = {
   username: string;
   passwordSecretRef: string;
+  /** RouterOS profile id or profile name, never the local SQLite plan id. */
   planId: string;
   comment?: string | null;
+  /** RouterOS limit-uptime value, for example 3h or 1d. */
+  limitUptime?: string | null;
+  /** RouterOS limit-bytes-total value in bytes. */
+  limitBytesTotal?: number | null;
+};
+
+export type HotspotUserLimits = {
+  limitUptime?: string | null;
+  limitBytesTotal?: number | null;
 };
 
 export type HotspotUsersBatchDraft = {
@@ -103,6 +121,8 @@ export type HotspotUsersBatchDraft = {
   prefix?: string;
   codeLength?: number;
   createdByProfile?: string;
+  limitUptime?: string | null;
+  limitBytesTotal?: number | null;
 };
 
 export type ActiveHotspotUser = {
@@ -114,6 +134,13 @@ export type ActiveHotspotUser = {
   sessionTimeLeft: string;
   downloadedBytes: number;
   uploadedBytes: number;
+};
+
+export type HotspotBypassBinding = {
+  address: string;
+  comment: string;
+  id: string;
+  macAddress: string;
 };
 
 export type RouterHealth = {

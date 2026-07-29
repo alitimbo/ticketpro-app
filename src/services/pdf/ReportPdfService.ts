@@ -16,7 +16,7 @@ export type ReportPdfInput = {
 };
 
 export function generateReportPdf(input: ReportPdfInput): Uint8Array {
-  const rowsPerPage = 34;
+  const rowsPerPage = 28;
   const rowChunks = chunk(input.rows, rowsPerPage);
   const pages = rowChunks.length > 0 ? rowChunks : [[]];
   const objects = new Map<number, string>();
@@ -34,14 +34,26 @@ export function generateReportPdf(input: ReportPdfInput): Uint8Array {
     const lines = [
       { bold: true, size: 18, text: input.title, x: 42, y: 790 },
       { size: 9, text: `Généré le ${input.generatedAt} · Page ${pageIndex + 1}/${pages.length}`, x: 42, y: 770 },
-      ...input.summary.map((text, index) => ({ size: 9, text, x: 42, y: 744 - index * 15 })),
-      { bold: true, size: 8, text: "Code        Plan                  Statut       Routeur              Créé le", x: 42, y: 650 },
-      ...rows.map((row, index) => ({
-        size: 7,
-        text: `${truncate(row.code, 12).padEnd(13)}${truncate(row.plan, 22).padEnd(23)}${truncate(row.status, 12).padEnd(13)}${truncate(row.router, 20).padEnd(21)}${row.createdAt}`,
-        x: 42,
-        y: 632 - index * 16
-      }))
+      ...input.summary.slice(0, 9).map((text, index) => ({ size: 8, text, x: 42, y: 746 - index * 12 })),
+      { bold: true, size: 7, text: "Code", x: 42, y: 622 },
+      { bold: true, size: 7, text: "Plan", x: 100, y: 622 },
+      { bold: true, size: 7, text: "Statut", x: 196, y: 622 },
+      { bold: true, size: 7, text: "Profil", x: 260, y: 622 },
+      { bold: true, size: 7, text: "Routeur", x: 330, y: 622 },
+      { bold: true, size: 7, text: "Prix", x: 420, y: 622 },
+      { bold: true, size: 7, text: "Créé le", x: 485, y: 622 },
+      ...rows.flatMap((row, index) => {
+        const y = 604 - index * 16;
+        return [
+          { size: 6.6, text: truncate(row.code, 10), x: 42, y },
+          { size: 6.6, text: truncate(row.plan, 16), x: 100, y },
+          { size: 6.6, text: truncate(row.status, 10), x: 196, y },
+          { size: 6.6, text: truncate(row.operator, 11), x: 260, y },
+          { size: 6.6, text: truncate(row.router, 14), x: 330, y },
+          { size: 6.6, text: truncate(row.priceLabel, 10), x: 420, y },
+          { size: 6.6, text: row.createdAt, x: 485, y }
+        ];
+      })
     ];
     const stream = `${lines.map(drawText).join("\n")}\n`;
     objects.set(contentId, `<< /Length ${byteLength(stream)} >>\nstream\n${stream}endstream`);

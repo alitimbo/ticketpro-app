@@ -85,6 +85,9 @@ describe("persistance plans et lots", () => {
     );
 
     await expect(database.query("SELECT * FROM tickets WHERE batch_id = ?1", ["batch-test"])).resolves.toHaveLength(1);
+    await expect(
+      batches.updateState("batch-test", "account-test", "partiel", "pending")
+    ).resolves.toMatchObject({ status: "partiel", sync_status: "pending" });
     await plans.remove("plan-test");
     await expect(plans.findById("plan-test")).resolves.toBeNull();
   });

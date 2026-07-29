@@ -1,6 +1,7 @@
 import type { DatabaseClient } from "../database";
 import { AppLogRepository } from "../database/repositories/AppLogRepository";
 import type { RouterActionLog } from "../router";
+import { serializeTechnicalMessage } from "./technicalMessage";
 
 export class DatabaseRouterActionLogger {
   private readonly repository: AppLogRepository;
@@ -19,7 +20,11 @@ export class DatabaseRouterActionLogger {
         internal_profile_id: log.internalProfileId ?? null,
         level: log.level,
         router_id: log.routerId ?? null,
-        technical_message: log.technicalCode ?? null,
+        technical_message: serializeTechnicalMessage({
+          action: log.action,
+          code: log.technicalCode,
+          detail: log.technicalMessage
+        }),
         user_message: log.userMessage
       });
     } catch {
@@ -43,12 +48,12 @@ function categoryForAction(action: string): string {
     return "plans";
   }
 
-  if (normalized.includes("ticket") || normalized.includes("user")) {
-    return "tickets";
-  }
-
   if (normalized.includes("sync") || normalized.includes("compare")) {
     return "synchronisation";
+  }
+
+  if (normalized.includes("ticket") || normalized.includes("user")) {
+    return "tickets";
   }
 
   return "routeur";

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useParams } from "react-router-dom";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -7,14 +8,21 @@ import {
   Eye,
   Filter,
   Info,
+  RefreshCw,
   RotateCcw,
   ScrollText,
+  Search,
   Trash2
 } from "lucide-react";
 import { useAuth } from "../../app/auth/AuthProvider";
-import type { AppLogRecord } from "../../domain/database";
 import { useAppDatabase } from "../../services/database";
 import { AppLogRepository, RouterRepository } from "../../services/database/repositories";
+import { TauriFileService } from "../../services/files";
+import {
+  allowedLogRetentionDays,
+  defaultLogRetentionDays,
+  LogRetentionService
+} from "../../services/logging";
 import {
   ActionMenu,
   Badge,
@@ -25,9 +33,8 @@ import {
   PageHeader,
   StatCard
 } from "../../shared/ui";
-import type { AppStatus, IconComponent } from "../../shared/ui";
 import {
-  canCleanLogs,
+  appLogFromRecord,
   categoryLabel,
   createDemoLogs,
   emptyLogFilters,
@@ -35,111 +42,278 @@ import {
   filterLogs,
   formatLogDate,
   getLogFilterOptions,
+  getLogPageCount,
   levelLabel,
   levelStatus,
   logCategories,
   logLevels,
+  paginateLogs,
   profileLabel,
   scopeLogsForSession,
   type AppLogEntry,
   type LogFilters
 } from "./logsPageModel";
 
+const logPageSize = 40;
+
+type Notice = {
+  status: "error" | "success";
+  text: string;
+} | null;
+
 export function LogsPage() {
+  const { routerId = "routeur" } = useParams();
   const { session } = useAuth();
   const { database, isInitialized, isPersistent } = useAppDatabase();
-  const [logs, setLogs] = useState<AppLogEntry[]>(() => (isPersistent ? [] : createDemoLogs()));
+  const [logs, setLogs] = useState<AppLogEntry[]>(() =>
+    isPersistent ? [] : createDemoLogs()
+  );
   const [filters, setFilters] = useState<LogFilters>(emptyLogFilters);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const [notice, setNotice] = useState<Notice>(null);
   const [cleanDialogOpen, setCleanDialogOpen] = useState(false);
+  const [isCleaning, setIsCleaning] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+  const [retentionDays, setRetentionDays] = useState(defaultLogRetentionDays);
+  const [eligibleForCleanup, setEligibleForCleanup] = useState(0);
+  const [lastCleanupAt, setLastCleanupAt] = useState<string | null>(null);
 
   const appLogRepository = useMemo(() => new AppLogRepository(database), [database]);
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
+  const fileService = useMemo(() => new TauriFileService(), []);
+  const logRetentionService = useMemo(
+    () => new LogRetentionService(database),
+    [database]
+  );
 
   const loadPersistedLogs = async () => {
     if (!isPersistent || !isInitialized || !session) {
       return;
     }
 
-    const [records, routers] = await Promise.all([
-      appLogRepository.listByAccount(session.account_id),
-      routerRepository.listByAccount(session.account_id)
-    ]);
-    const routerNames = new Map(routers.map((router) => [router.id, router.name]));
-    setLogs(records.map((record) => appLogFromRecord(record, routerNames)));
+    setIsLoading(true);
+    try {
+      await logRetentionService.runAutomatic(session.account_id);
+      const [records, routers, policy] = await Promise.all([
+        appLogRepository.listByAccount(session.account_id),
+        routerRepository.listByAccount(session.account_id),
+        logRetentionService.getPolicy(session.account_id)
+      ]);
+      const eligible = await logRetentionService.countEligible(
+        session.account_id,
+        policy.days
+      );
+      const routerNames = new Map(routers.map((router) => [router.id, router.name]));
+      setLogs(records.map((record) => appLogFromRecord(record, routerNames)));
+      setRetentionDays(policy.days);
+      setEligibleForCleanup(eligible);
+      setLastCleanupAt(policy.lastCleanupAt);
+      setLastRefreshedAt(new Date().toISOString());
+    } catch {
+      setNotice({
+        status: "error",
+        text: "Impossible de charger les journaux locaux. Réessayez dans un instant."
+      });
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   useEffect(() => {
     void loadPersistedLogs();
-  }, [appLogRepository, database, isInitialized, isPersistent, routerRepository, session]);
+  }, [
+    appLogRepository,
+    database,
+    isInitialized,
+    isPersistent,
+    logRetentionService,
+    routerRepository,
+    session
+  ]);
 
   const scopedLogs = useMemo(() => scopeLogsForSession(logs, session), [logs, session]);
-  const filteredLogs = useMemo(() => filterLogs(scopedLogs, filters), [scopedLogs, filters]);
+  const filteredLogs = useMemo(
+    () => filterLogs(scopedLogs, filters),
+    [filters, scopedLogs]
+  );
   const options = useMemo(() => getLogFilterOptions(scopedLogs), [scopedLogs]);
+  const pageCount = getLogPageCount(filteredLogs.length, logPageSize);
+  const currentPage = Math.min(page, pageCount);
+  const visibleLogs = useMemo(
+    () => paginateLogs(filteredLogs, currentPage, logPageSize),
+    [currentPage, filteredLogs]
+  );
   const warningCount = scopedLogs.filter((log) => log.level === "warning").length;
-  const errorCount = scopedLogs.filter((log) => log.level === "error" || log.level === "critical").length;
-  const canClean = canCleanLogs(session?.internal_profile_role);
+  const errorCount = scopedLogs.filter(
+    (log) => log.level === "error" || log.level === "critical"
+  ).length;
+  const infoCount = scopedLogs.filter((log) => log.level === "info").length;
+  const canClean = session?.permissions.includes("router.logs.clean") ?? false;
+
+  useEffect(() => {
+    setPage(1);
+    setExpandedId(null);
+  }, [filters]);
 
   const updateFilters = (partial: Partial<LogFilters>) => {
     setFilters((current) => ({ ...current, ...partial }));
-    setMessage(null);
+    setNotice(null);
   };
 
   const resetFilters = () => {
     setFilters(emptyLogFilters);
-    setMessage(null);
+    setNotice(null);
   };
 
   const exportLogs = async () => {
+    if (filteredLogs.length === 0) {
+      setNotice({
+        status: "error",
+        text: "Aucun journal à exporter avec les filtres actuels."
+      });
+      return;
+    }
+
     const csv = exportLogsToCsv(filteredLogs);
+    const fileName = `logs-${routerId}-${new Date().toISOString().slice(0, 10)}.csv`;
+    setIsExporting(true);
+    setNotice(null);
 
     try {
-      await navigator.clipboard.writeText(csv);
-      setMessage("Export logs copié au format CSV.");
+      if (isPersistent) {
+        const relativePath = `exports/logs/${fileName}`;
+        await fileService.writeBytes(
+          relativePath,
+          new TextEncoder().encode(`\uFEFF${csv}`)
+        );
+        try {
+          const exported = await fileService.exportToDownloads(relativePath);
+          setNotice({
+            status: "success",
+            text: `${filteredLogs.length} journal(aux) exporté(s) dans Téléchargements/TicketPro/${exported.file_name}.`
+          });
+        } finally {
+          await fileService.remove(relativePath).catch(() => undefined);
+        }
+      } else {
+        downloadCsv(csv, fileName);
+        setNotice({
+          status: "success",
+          text: `${filteredLogs.length} journal(aux) exporté(s) au format CSV.`
+        });
+      }
     } catch {
-      setMessage("Export CSV préparé. Copie indisponible sur ce poste.");
+      setNotice({
+        status: "error",
+        text: "L’export CSV a échoué. Vérifiez l’accès au dossier Téléchargements."
+      });
+    } finally {
+      setIsExporting(false);
     }
   };
 
   const copyTechnicalDetail = async (log: AppLogEntry) => {
     if (!log.technicalDetail) {
-      setMessage("Aucun détail technique à copier.");
+      setNotice({ status: "error", text: "Aucun détail technique à copier." });
       return;
     }
 
     try {
       await navigator.clipboard.writeText(log.technicalDetail);
-      setMessage("Détail technique copié.");
+      setNotice({ status: "success", text: "Détail technique copié." });
     } catch {
-      setMessage("Copie indisponible sur ce poste.");
+      setNotice({ status: "error", text: "Copie indisponible sur ce poste." });
     }
   };
 
   const cleanOldLogs = async () => {
-    if (isPersistent && session) {
-      const cutoff = new Date();
-      cutoff.setDate(cutoff.getDate() - 30);
-      const removedCount = await appLogRepository.deleteBefore(session.account_id, cutoff.toISOString());
-      await loadPersistedLogs();
+    if (!canClean) {
+      setNotice({
+        status: "error",
+        text: "Vous n’avez pas le droit de nettoyer les journaux."
+      });
       setCleanDialogOpen(false);
-      setExpandedId(null);
-      setMessage(`${removedCount} ancien(s) log(s) nettoyé(s).`);
       return;
     }
 
-    const cutoff = new Date("2026-07-09T10:00:00.000Z").getTime();
-    const removableIds = new Set(
-      scopedLogs.filter((log) => new Date(log.createdAt).getTime() < cutoff).map((log) => log.id)
-    );
-    const remaining = logs.filter((log) => !removableIds.has(log.id));
-    const removedCount = logs.length - remaining.length;
+    setIsCleaning(true);
+    setNotice(null);
+    try {
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - retentionDays);
+      let removedCount = 0;
 
-    setLogs(remaining);
-    setCleanDialogOpen(false);
-    setExpandedId(null);
-    setMessage(`${removedCount} ancien(s) log(s) nettoyé(s).`);
+      if (isPersistent && session) {
+        const result = await logRetentionService.cleanNow(
+          session.account_id,
+          retentionDays
+        );
+        removedCount = result.removedCount;
+        setLastCleanupAt(result.runAt);
+        setEligibleForCleanup(0);
+        await loadPersistedLogs();
+      } else {
+        const removableIds = new Set(
+          scopedLogs
+            .filter((log) => new Date(log.createdAt).getTime() < cutoff.getTime())
+            .map((log) => log.id)
+        );
+        setLogs((current) => current.filter((log) => !removableIds.has(log.id)));
+        removedCount = removableIds.size;
+      }
+
+      setCleanDialogOpen(false);
+      setExpandedId(null);
+      setNotice({
+        status: "success",
+        text: `${removedCount} journal(aux) de plus de ${retentionDays} jours supprimé(s).`
+      });
+    } catch {
+      setNotice({
+        status: "error",
+        text: "Le nettoyage des journaux a échoué. Aucune autre donnée n’a été modifiée."
+      });
+    } finally {
+      setIsCleaning(false);
+    }
+  };
+
+  const updateRetentionPolicy = async (days: number) => {
+    setRetentionDays(days);
+    setNotice(null);
+
+    if (!isPersistent || !session) {
+      return;
+    }
+
+    try {
+      const savedDays = await logRetentionService.setRetentionDays(
+        session.account_id,
+        days
+      );
+      const eligible = await logRetentionService.countEligible(
+        session.account_id,
+        savedDays
+      );
+      setRetentionDays(savedDays);
+      setEligibleForCleanup(eligible);
+      setNotice({
+        status: "success",
+        text:
+          eligible > 0
+            ? `Conservation automatique réglée sur ${savedDays} jours. ${eligible} journal(aux) sont maintenant éligibles au nettoyage.`
+            : `Conservation automatique réglée sur ${savedDays} jours. Aucun journal n’est actuellement trop ancien.`
+      });
+    } catch {
+      setNotice({
+        status: "error",
+        text: "Impossible d’enregistrer la durée de conservation."
+      });
+    }
   };
 
   return (
@@ -147,45 +321,105 @@ export function LogsPage() {
       <PageHeader
         actions={
           <div className="button-row">
-            <Button icon={Download} onClick={() => void exportLogs()}>
-              Exporter logs
+            <Button
+              disabled={isExporting || filteredLogs.length === 0}
+              icon={Download}
+              onClick={() => void exportLogs()}
+            >
+              {isExporting ? "Export…" : "Exporter CSV"}
+            </Button>
+            <Button
+              disabled={isLoading || !isPersistent}
+              icon={RefreshCw}
+              onClick={() => void loadPersistedLogs()}
+              variant="ghost"
+            >
+              {isLoading ? "Actualisation…" : "Actualiser"}
             </Button>
             {canClean ? (
-              <Button icon={Trash2} onClick={() => setCleanDialogOpen(true)} variant="danger">
-                Nettoyer anciens logs
+              <Button
+                disabled={isCleaning}
+                icon={Trash2}
+                onClick={() => setCleanDialogOpen(true)}
+                variant="danger"
+              >
+                Nettoyer
               </Button>
             ) : null}
           </div>
         }
-        description="Trace claire des actions importantes, sans mots de passe ni secrets."
+        description="Trace persistante des actions importantes, sans mots de passe ni secrets."
         eyebrow="Routeur"
         title="Logs"
       />
 
       <div className="stats-grid">
-        <StatCard icon={ScrollText} label="Logs" value={String(filteredLogs.length)} hint="Articles affichés" />
-        <StatCard icon={Info} label="Infos" value={String(logs.filter((log) => log.level === "info").length)} hint="Actions terminées" />
-        <StatCard icon={AlertTriangle} label="Avertissements" value={String(warningCount)} hint="À vérifier" />
-        <StatCard icon={Trash2} label="Erreurs" value={String(errorCount)} hint="Erreurs et critiques" />
+        <StatCard
+          icon={ScrollText}
+          label="Logs"
+          value={String(filteredLogs.length)}
+          hint={`${scopedLogs.length} dans le périmètre`}
+        />
+        <StatCard icon={Info} label="Infos" value={String(infoCount)} hint="Actions terminées" />
+        <StatCard
+          icon={AlertTriangle}
+          label="Avertissements"
+          value={String(warningCount)}
+          hint="À vérifier"
+        />
+        <StatCard
+          icon={Trash2}
+          label="Erreurs"
+          value={String(errorCount)}
+          hint="Erreurs et critiques"
+        />
       </div>
 
       <Card>
         <div className="logs-toolbar">
           <div className="tickets-count">
             <strong>Articles ({filteredLogs.length})</strong>
-            <span>Détails techniques masqués par défaut</span>
+            <span>
+              {lastRefreshedAt
+                ? `Actualisé ${formatLogDate(lastRefreshedAt)}`
+                : "Détails techniques masqués par défaut"}
+            </span>
           </div>
           <label className="date-field">
+            Recherche
+            <div className="input-with-icon">
+              <Search aria-hidden="true" />
+              <input
+                placeholder="Action, message, routeur…"
+                value={filters.query}
+                onChange={(event) => updateFilters({ query: event.target.value })}
+              />
+            </div>
+          </label>
+          <label className="date-field">
             Depuis
-            <input type="date" value={filters.dateFrom} onChange={(event) => updateFilters({ dateFrom: event.target.value })} />
+            <input
+              type="date"
+              value={filters.dateFrom}
+              onChange={(event) => updateFilters({ dateFrom: event.target.value })}
+            />
           </label>
           <label className="date-field">
             À
-            <input type="date" value={filters.dateTo} onChange={(event) => updateFilters({ dateTo: event.target.value })} />
+            <input
+              type="date"
+              value={filters.dateTo}
+              onChange={(event) => updateFilters({ dateTo: event.target.value })}
+            />
           </label>
           <label className="date-field">
             Niveau
-            <select value={filters.level} onChange={(event) => updateFilters({ level: event.target.value as LogFilters["level"] })}>
+            <select
+              value={filters.level}
+              onChange={(event) =>
+                updateFilters({ level: event.target.value as LogFilters["level"] })
+              }
+            >
               <option value="">Tous</option>
               {logLevels.map((level) => (
                 <option key={level} value={level}>
@@ -195,29 +429,63 @@ export function LogsPage() {
             </select>
           </label>
           <Button icon={Filter} onClick={() => setFiltersOpen((current) => !current)}>
-            Filtres
+            {filtersOpen ? "Masquer filtres" : "Filtres"}
           </Button>
         </div>
 
         {filtersOpen ? (
-          <LogsFilterPanel filters={filters} onChange={updateFilters} onReset={resetFilters} options={options} />
+          <LogsFilterPanel
+            filters={filters}
+            onChange={updateFilters}
+            onReset={resetFilters}
+            options={options}
+          />
         ) : null}
       </Card>
 
-      {message ? <p className="form-error form-error--success">{message}</p> : null}
+      {notice ? (
+        <p className={`form-error ${notice.status === "success" ? "form-error--success" : ""}`}>
+          {notice.text}
+        </p>
+      ) : null}
 
       <Card className="logs-list-card">
-        {filteredLogs.length > 0 ? (
+        {isLoading && logs.length === 0 ? (
+          <EmptyState
+            description="Lecture des journaux persistés en cours."
+            icon={RefreshCw}
+            title="Chargement…"
+          />
+        ) : visibleLogs.length > 0 ? (
           <div className="logs-list">
-            {filteredLogs.map((log) => (
+            {visibleLogs.map((log) => (
               <LogRow
                 isExpanded={expandedId === log.id}
                 key={log.id}
                 log={log}
                 onCopyTechnical={() => void copyTechnicalDetail(log)}
-                onToggle={() => setExpandedId((current) => (current === log.id ? null : log.id))}
+                onToggle={() =>
+                  setExpandedId((current) => (current === log.id ? null : log.id))
+                }
               />
             ))}
+            <div className="pagination-row">
+              <Button
+                disabled={currentPage <= 1}
+                onClick={() => setPage((current) => Math.max(1, current - 1))}
+                variant="ghost"
+              >
+                Précédent
+              </Button>
+              <span>Page {currentPage} / {pageCount}</span>
+              <Button
+                disabled={currentPage >= pageCount}
+                onClick={() => setPage((current) => Math.min(pageCount, current + 1))}
+                variant="ghost"
+              >
+                Suivant
+              </Button>
+            </div>
           </div>
         ) : (
           <EmptyState
@@ -226,20 +494,54 @@ export function LogsPage() {
                 Réinitialiser filtres
               </Button>
             }
-            description="Aucun log ne correspond aux filtres."
+            description="Aucun journal ne correspond aux filtres."
             icon={ScrollText}
-            title="Aucun log"
+            title="Aucun journal"
           />
         )}
       </Card>
 
+      {canClean ? (
+        <Card
+          description="Cette politique est persistée et vérifiée automatiquement au démarrage de session, au maximum une fois par jour."
+          title="Conservation des journaux"
+        >
+          <div className="logs-toolbar">
+            <label className="date-field">
+              Conserver
+              <select
+                value={retentionDays}
+                onChange={(event) =>
+                  void updateRetentionPolicy(Number(event.target.value))
+                }
+              >
+                {allowedLogRetentionDays.map((days) => (
+                  <option key={days} value={days}>
+                    {days === 365 ? "1 an" : `${days} jours`}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="tickets-count">
+              <strong>{eligibleForCleanup} éligible(s)</strong>
+              <span>
+                {lastCleanupAt
+                  ? `Dernier nettoyage ${formatLogDate(lastCleanupAt)}`
+                  : "Premier nettoyage automatique en attente"}
+              </span>
+            </div>
+            <Badge status="active">Automatique actif</Badge>
+          </div>
+        </Card>
+      ) : null}
+
       <ConfirmDialog
-        confirmLabel="Nettoyer"
-        description="Seuls les anciens logs de démonstration seront retirés de cette vue. Les logs récents restent visibles."
+        confirmLabel={isCleaning ? "Nettoyage…" : "Nettoyer"}
+        description={`Les journaux de plus de ${retentionDays} jours seront supprimés définitivement pour ce compte. Les journaux récents resteront disponibles.`}
         isOpen={cleanDialogOpen}
         onCancel={() => setCleanDialogOpen(false)}
         onConfirm={cleanOldLogs}
-        title="Nettoyer les anciens logs ?"
+        title="Nettoyer les anciens journaux ?"
       />
     </div>
   );
@@ -262,7 +564,12 @@ function LogsFilterPanel({
     <div className="logs-filter-panel">
       <label className="date-field">
         Catégorie
-        <select value={filters.category} onChange={(event) => onChange({ category: event.target.value as LogFilters["category"] })}>
+        <select
+          value={filters.category}
+          onChange={(event) =>
+            onChange({ category: event.target.value as LogFilters["category"] })
+          }
+        >
           <option value="">Toutes</option>
           {logCategories.map((category) => (
             <option key={category} value={category}>
@@ -273,7 +580,10 @@ function LogsFilterPanel({
       </label>
       <label className="date-field">
         Routeur
-        <select value={filters.routerId} onChange={(event) => onChange({ routerId: event.target.value })}>
+        <select
+          value={filters.routerId}
+          onChange={(event) => onChange({ routerId: event.target.value })}
+        >
           <option value="">Tous</option>
           {options.routers.map((router) => (
             <option key={router.id} value={router.id}>
@@ -284,7 +594,12 @@ function LogsFilterPanel({
       </label>
       <label className="date-field">
         Profil
-        <select value={filters.userProfile} onChange={(event) => onChange({ userProfile: event.target.value as LogFilters["userProfile"] })}>
+        <select
+          value={filters.userProfile}
+          onChange={(event) =>
+            onChange({ userProfile: event.target.value as LogFilters["userProfile"] })
+          }
+        >
           <option value="">Tous</option>
           {options.profiles.map((profile) => (
             <option key={profile} value={profile}>
@@ -313,7 +628,7 @@ function LogRow({
   onCopyTechnical: () => void;
   onToggle: () => void;
 }) {
-  const Icon = logIcon(log.level);
+  const Icon = log.level === "info" ? CheckCircle2 : AlertTriangle;
 
   return (
     <article className={`log-row log-row--${log.level}`}>
@@ -327,7 +642,8 @@ function LogRow({
             <Badge status={levelStatus(log.level)}>{levelLabel(log.level)}</Badge>
           </div>
           <p>
-            {formatLogDate(log.createdAt)} · {categoryLabel(log.category)} · {profileLabel(log.userProfile)}
+            {formatLogDate(log.createdAt)} · {categoryLabel(log.category)} ·{" "}
+            {profileLabel(log.userProfile)}
             {log.routerName ? ` · ${log.routerName}` : ""}
           </p>
         </div>
@@ -335,8 +651,16 @@ function LogRow({
 
       <ActionMenu
         items={[
-          { icon: Eye, label: isExpanded ? "Masquer détail" : "Voir détail", onSelect: onToggle },
-          { icon: Clipboard, label: "Copier détail technique", onSelect: onCopyTechnical }
+          {
+            icon: Eye,
+            label: isExpanded ? "Masquer détail" : "Voir détail",
+            onSelect: onToggle
+          },
+          {
+            icon: Clipboard,
+            label: "Copier détail technique",
+            onSelect: onCopyTechnical
+          }
         ]}
       />
 
@@ -347,7 +671,7 @@ function LogRow({
             <strong>{log.action ?? "Non précisée"}</strong>
           </div>
           <div>
-            <span>Détail technique</span>
+            <span>Détail technique sécurisé</span>
             <code>{log.technicalDetail ?? "Aucun détail technique disponible."}</code>
           </div>
         </div>
@@ -356,27 +680,12 @@ function LogRow({
   );
 }
 
-function logIcon(level: AppLogEntry["level"]): IconComponent {
-  if (level === "info") {
-    return CheckCircle2;
-  }
-
-  return AlertTriangle;
-}
-
-function appLogFromRecord(record: AppLogRecord, routerNames: Map<string, string>): AppLogEntry {
-  return {
-    accountId: record.account_id ?? "",
-    action: record.technical_message,
-    category: record.category as AppLogEntry["category"],
-    createdAt: record.created_at,
-    id: record.id,
-    internalProfileId: record.internal_profile_id,
-    level: record.level,
-    routerId: record.router_id,
-    routerName: record.router_id ? routerNames.get(record.router_id) ?? record.router_id : null,
-    technicalDetail: record.technical_message,
-    userMessage: record.user_message,
-    userProfile: record.created_by_profile as AppLogEntry["userProfile"]
-  };
+function downloadCsv(csv: string, fileName: string): void {
+  const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.click();
+  URL.revokeObjectURL(url);
 }

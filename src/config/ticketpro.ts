@@ -1,0 +1,1 @@
+export const TICKETPRO_SUPPORT_PHONE = "+227 93 10 06 26";

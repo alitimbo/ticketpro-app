@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ActiveHotspotUser, HotspotPlan, HotspotUser } from "../../domain/router";
 import {
+  buildCachedConnectedClientViewModels,
   buildConnectedClientViewModels,
   emptyConnectedClientFilters,
   filterConnectedClients,
@@ -93,8 +94,81 @@ describe("connectedClientsPageModel", () => {
     expect(clients[0]).toMatchObject({
       planName: "1h",
       routerName: "Routeur démo",
+      ticketStatus: "active",
       totalBytes: 55 * 1024 * 1024,
       username: "123456"
+    });
+  });
+
+  it("conserve le plan et l'état local dans le cache hors ligne", () => {
+    const clients = buildCachedConnectedClientViewModels(
+      [{
+        cached_at: "2026-07-29T10:00:00.000Z",
+        created_at: "2026-07-29T10:00:00.000Z",
+        deleted_at: null,
+        downloaded_bytes: 4096,
+        id: "router-1:*A",
+        ip_address: "192.168.88.20",
+        mac_address: "AA:BB:CC:DD:EE:FF",
+        router_id: "router-1",
+        session_time_left: "50m",
+        sync_status: "synced",
+        updated_at: "2026-07-29T10:00:00.000Z",
+        uploaded_bytes: 1024,
+        uptime: "10m",
+        username: "voucher-1"
+      }],
+      [{
+        account_id: "account-1",
+        activated_at: null,
+        batch_id: "batch-1",
+        completed_at: null,
+        created_at: "2026-07-29T09:00:00.000Z",
+        created_by_profile: "admin",
+        created_by_profile_id: "profile-1",
+        deleted_at: null,
+        downloaded_bytes: 0,
+        expires_at: null,
+        id: "ticket-1",
+        ip_address: null,
+        mac_address: null,
+        mikrotik_id: "*U1",
+        password_encrypted: "protected",
+        plan_id: "plan-1h",
+        printed_count: 0,
+        router_id: "router-1",
+        status: "désactivé",
+        sync_status: "synced",
+        updated_at: "2026-07-29T09:00:00.000Z",
+        uploaded_bytes: 0,
+        username: "voucher-1"
+      }],
+      [{
+        created_at: "2026-07-29T09:00:00.000Z",
+        data_limit_mb: null,
+        deleted_at: null,
+        download_limit: "5M",
+        duration_minutes: 60,
+        id: "plan-1h",
+        mikrotik_profile_name: "plan-1h",
+        name: "Forfait 1h",
+        price_hint: 100,
+        router_id: "router-1",
+        shared_users: 1,
+        status: "active",
+        sync_status: "synced",
+        updated_at: "2026-07-29T09:00:00.000Z",
+        upload_limit: "2M",
+        validity_minutes: 180
+      }],
+      { id: "router-1", name: "Routeur test" }
+    );
+
+    expect(clients[0]).toMatchObject({
+      planName: "Forfait 1h",
+      ticketStatus: "disabled",
+      totalBytes: 5120,
+      username: "voucher-1"
     });
   });
 
@@ -123,5 +197,21 @@ describe("connectedClientsPageModel", () => {
     ]);
     expect(formatClientBytes(55 * 1024 * 1024)).toBe("55 MB");
     expect(formatClientBytes(2 * 1024 * 1024 * 1024)).toBe("2.0 Go");
+    expect(formatClientBytes(512)).toBe("512 o");
+    expect(formatClientBytes(2048)).toBe("2.0 Ko");
+  });
+
+  it("comprend les semaines RouterOS pour le filtre de durée", () => {
+    const clients = buildConnectedClientViewModels(
+      [{ ...activeUsers[0], id: "active-week", uptime: "1w2d3h", username: "weekly" }],
+      [],
+      [],
+      { id: "routeur-demo", name: "Routeur démo" }
+    );
+
+    expect(filterConnectedClients(clients, {
+      ...emptyConnectedClientFilters,
+      duration: "long"
+    })).toHaveLength(1);
   });
 });

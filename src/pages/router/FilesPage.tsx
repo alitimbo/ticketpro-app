@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Copy,
   Download,
@@ -14,11 +14,17 @@ import { useAuth } from "../../app/auth/AuthProvider";
 import {
   GeneratedFileRepository,
   HotspotPlanRepository,
+  AccountRepository,
+  AppLogRepository,
+  PrintHistoryRepository,
   RouterRepository,
+  TicketRepository,
   TicketBatchRepository,
   useAppDatabase
 } from "../../services/database";
 import { TauriFileService } from "../../services/files";
+import { AuditLogService } from "../../services/logging";
+import { parseTicketPdfArchiveMetadata, regenerateArchivedTicketPdf } from "../../services/pdf";
 import {
   ActionMenu,
   Badge,
@@ -59,26 +65,30 @@ export function FilesPage() {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [logs, setLogs] = useState<FileLog[]>([]);
+  const [busyFileId, setBusyFileId] = useState<string | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [fileToDelete, setFileToDelete] = useState<ArchivedGeneratedFile | null>(null);
   const generatedFileRepository = useMemo(() => new GeneratedFileRepository(database), [database]);
+  const accountRepository = useMemo(() => new AccountRepository(database), [database]);
+  const appLogRepository = useMemo(() => new AppLogRepository(database), [database]);
+  const auditLogService = useMemo(() => new AuditLogService(database), [database]);
+  const printHistoryRepository = useMemo(() => new PrintHistoryRepository(database), [database]);
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
   const planRepository = useMemo(() => new HotspotPlanRepository(database), [database]);
   const batchRepository = useMemo(() => new TicketBatchRepository(database), [database]);
+  const ticketRepository = useMemo(() => new TicketRepository(database), [database]);
   const fileService = useMemo(() => new TauriFileService(), []);
 
-  useEffect(() => {
+  const loadFiles = useCallback(async () => {
     if (!isPersistent || !isInitialized || !session) {
-      return undefined;
+      return;
     }
 
-    let mounted = true;
-    const currentSession = session;
-
-    async function loadFiles() {
-      const [records, routers, batches] = await Promise.all([
-        generatedFileRepository.listByAccount(currentSession.account_id),
-        routerRepository.listByAccount(currentSession.account_id),
-        batchRepository.listByAccount(currentSession.account_id)
+      const [records, routers, batches, persistedLogs] = await Promise.all([
+        generatedFileRepository.listByAccount(session.account_id),
+        routerRepository.listByAccount(session.account_id),
+        batchRepository.listByAccount(session.account_id),
+        appLogRepository.listByAccount(session.account_id)
       ]);
       const plans = await Promise.all(routers.map((router) => planRepository.listByRouter(router.id)));
       const routerById = new Map(routers.map((router) => [router.id, router]));
@@ -86,12 +96,12 @@ export function FilesPage() {
       const planById = new Map(plans.flat().map((plan) => [plan.id, plan]));
       const archived = await Promise.all(
         records.map(async (record) => {
-          const metadata = await fileService.metadata(record.file_path).catch(() => ({ exists: false }));
+          const metadata = await fileService.metadata(record.file_path).catch(() => null);
           const batch = record.batch_id ? batchById.get(record.batch_id) : null;
           const plan = batch ? planById.get(batch.plan_id) : null;
 
           return archivedFileFromRecord(record, {
-            fileExists: metadata.exists,
+            fileExists: metadata?.exists ?? null,
             planId: plan?.id,
             planName: plan?.name,
             routerName: routerById.get(record.router_id)?.name ?? record.router_id,
@@ -100,10 +110,39 @@ export function FilesPage() {
         })
       );
 
-      if (mounted) {
-        setFiles(archived);
-      }
-    }
+      setFiles(archived);
+      const visibleFileNames = new Set(
+        scopeFilesForSession(archived, session).map((file) => file.fileName)
+      );
+      setLogs(
+        persistedLogs
+          .filter(
+            (log) =>
+              log.category === "fichiers" &&
+              (session.permissions.includes("router.files.read") ||
+                visibleFileNames.has(log.technical_message?.replace(/^file=/, "") ?? ""))
+          )
+          .slice(0, 20)
+          .map((log) => ({
+            createdAt: log.created_at,
+            fileName: log.technical_message?.replace(/^file=/, "") || "Fichier",
+            message: log.user_message.replace(/^\[[^\]]+\]\s*/, "")
+          }))
+      );
+  }, [
+    appLogRepository,
+    batchRepository,
+    fileService,
+    generatedFileRepository,
+    isInitialized,
+    isPersistent,
+    planRepository,
+    routerRepository,
+    session
+  ]);
+
+  useEffect(() => {
+    let mounted = true;
 
     void loadFiles().catch(() => {
       if (mounted) {
@@ -114,30 +153,48 @@ export function FilesPage() {
     return () => {
       mounted = false;
     };
-  }, [batchRepository, fileService, generatedFileRepository, isInitialized, isPersistent, planRepository, routerRepository, session]);
+  }, [loadFiles]);
 
   const scopedFiles = useMemo(() => scopeFilesForSession(files, session), [files, session]);
   const filteredFiles = useMemo(() => filterArchivedFiles(scopedFiles, filters), [scopedFiles, filters]);
   const filterOptions = useMemo(() => buildFilterOptions(scopedFiles), [scopedFiles]);
   const availableCount = scopedFiles.filter((file) => file.status === "available").length;
-  const missingCount = scopedFiles.length - availableCount;
+  const missingCount = scopedFiles.filter((file) => file.status === "missing").length;
 
   const updateFilters = (partial: Partial<FileFilters>) => {
     setFilters((current) => ({ ...current, ...partial }));
     setMessage(null);
   };
 
-  const writeLog = (file: ArchivedGeneratedFile, messageText: string) => {
+  const writeLog = (
+    file: ArchivedGeneratedFile,
+    action: string,
+    messageText: string,
+    level: "error" | "info" | "warning" = "info"
+  ) => {
     setLogs((current) => [
       { createdAt: new Date().toISOString(), fileName: file.fileName, message: messageText },
       ...current
     ]);
+
+    if (isPersistent && session) {
+      void auditLogService.write({
+        accountId: session.account_id,
+        action,
+        category: "fichiers",
+        internalProfileId: session.internal_profile_id,
+        internalProfileRole: session.internal_profile_role,
+        level,
+        message: messageText,
+        technicalMessage: `file=${file.fileName}`
+      });
+    }
   };
 
   const openFile = async (file: ArchivedGeneratedFile) => {
     if (file.status === "missing") {
       setMessage("Fichier introuvable : impossible de l'ouvrir.");
-      writeLog(file, "Ouverture refusée : fichier introuvable.");
+      writeLog(file, "file.open.failed", "Ouverture refusée : fichier introuvable.", "warning");
       return;
     }
 
@@ -146,57 +203,163 @@ export function FilesPage() {
         await fileService.open(file.localPath);
       }
       setMessage(`${file.fileName} ouvert.`);
-      writeLog(file, "Ouverture demandée.");
+      writeLog(file, "file.opened", "Fichier ouvert.");
     } catch {
       setMessage("Le fichier n'a pas pu être ouvert.");
-      writeLog(file, "Ouverture échouée.");
+      writeLog(file, "file.open.failed", "Ouverture échouée.", "error");
     }
   };
 
-  const copyFile = async (file: ArchivedGeneratedFile) => {
+  const revealFile = async (file: ArchivedGeneratedFile) => {
     if (file.status === "missing") {
-      setMessage("Fichier introuvable : copie impossible.");
-      writeLog(file, "Copie refusée : fichier introuvable.");
+      setMessage("Fichier introuvable : impossible d'ouvrir son dossier.");
+      writeLog(file, "file.reveal.failed", "Ouverture du dossier refusée : fichier introuvable.", "warning");
       return;
     }
 
     try {
-      await navigator.clipboard?.writeText(file.localPath);
-      setMessage("Chemin local copié.");
+      await fileService.reveal(file.localPath);
+      setMessage(`${file.fileName} sélectionné dans son dossier.`);
+      writeLog(file, "file.revealed", "Dossier du fichier ouvert.");
     } catch {
-      setMessage(`Chemin local : ${file.localPath}`);
+      setMessage("Le dossier du fichier n'a pas pu être ouvert.");
+      writeLog(file, "file.reveal.failed", "Ouverture du dossier échouée.", "error");
     }
-
-    writeLog(file, "Chemin local copié pour export.");
   };
 
-  const reprintFile = (file: ArchivedGeneratedFile) => {
+  const copyPath = async (file: ArchivedGeneratedFile) => {
+    try {
+      await navigator.clipboard.writeText(file.localPath);
+      setMessage("Chemin local copié.");
+      writeLog(file, "file.path_copied", "Chemin local copié.");
+    } catch {
+      setMessage(`Copie impossible. Chemin local : ${file.localPath}`);
+      writeLog(file, "file.path_copy.failed", "Copie du chemin échouée.", "warning");
+    }
+  };
+
+  const exportFile = async (file: ArchivedGeneratedFile) => {
     if (file.status === "missing") {
-      setMessage("Fichier introuvable : réimpression impossible.");
-      writeLog(file, "Réimpression refusée : fichier introuvable.");
+      setMessage("Fichier introuvable : export impossible.");
+      writeLog(file, "file.export.failed", "Export refusé : fichier introuvable.", "warning");
       return;
     }
 
-    setMessage(`${file.fileName} envoyé vers la préparation d'impression.`);
-    writeLog(file, "Réimpression demandée.");
+    setBusyFileId(file.id);
+    try {
+      const exported = await fileService.exportToDownloads(file.localPath);
+      setMessage(`${exported.file_name} exporté dans Téléchargements/TicketPro.`);
+      writeLog(file, "file.exported", `Fichier exporté sous ${exported.file_name}.`);
+    } catch {
+      setMessage("Le fichier n'a pas pu être exporté vers Téléchargements.");
+      writeLog(file, "file.export.failed", "Export vers Téléchargements échoué.", "error");
+    } finally {
+      setBusyFileId(null);
+    }
   };
 
-  const regenerateFile = (file: ArchivedGeneratedFile) => {
-    if (!file.canRegenerate) {
-      setMessage("Régénération impossible pour ce fichier.");
-      writeLog(file, "Régénération refusée.");
+  const reprintFile = async (file: ArchivedGeneratedFile) => {
+    if (file.status === "missing" || !file.batchId || !session) {
+      setMessage("Fichier ou lot introuvable : réimpression impossible.");
+      writeLog(file, "file.print.failed", "Réimpression refusée : fichier ou lot introuvable.", "warning");
       return;
     }
 
-    setFiles((current) =>
-      current.map((item) =>
-        item.id === file.id
-          ? { ...item, createdAt: new Date().toISOString(), status: "available" }
-          : item
-      )
-    );
-    setMessage(`${file.fileName} régénéré localement.`);
-    writeLog(file, "Fichier régénéré.");
+    setBusyFileId(file.id);
+    try {
+      const printers = await fileService.listPrinters();
+      const printer = printers.find((item) => item.is_default) ?? printers[0];
+      if (!printer) {
+        throw new Error("Aucune imprimante Windows n'est installée.");
+      }
+
+      await fileService.printFile(file.localPath, printer.name);
+      const pdfFormat = parseTicketPdfArchiveMetadata(file.metadataJson)?.format ?? "a4";
+      try {
+        await printHistoryRepository.create({
+          account_id: session.account_id,
+          batch_id: file.batchId,
+          created_by_profile: session.internal_profile_role,
+          created_by_profile_id: session.internal_profile_id,
+          format: pdfFormat,
+          id: `print-${crypto.randomUUID()}`,
+          mode: "batch",
+          printer_id: printer.id,
+          printer_name: printer.name,
+          router_id: file.routerId,
+          status: "printed",
+          ticket_count: file.ticketQuantity ?? 0,
+          user_message: `${file.ticketQuantity ?? 0} ticket(s) envoyés à ${printer.name}.`
+        });
+        setMessage(`${file.fileName} envoyé à ${printer.name}.`);
+        writeLog(file, "file.printed", `Fichier envoyé à ${printer.name}.`);
+      } catch {
+        setMessage(`${file.fileName} a été envoyé à ${printer.name}, mais l'historique n'a pas pu être enregistré.`);
+        writeLog(
+          file,
+          "file.print_history.failed",
+          `Fichier envoyé à ${printer.name}, historique non enregistré.`,
+          "warning"
+        );
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Windows a refusé l'impression.";
+      setMessage(`Réimpression impossible : ${detail}`);
+      writeLog(file, "file.print.failed", `Réimpression échouée : ${detail}`, "error");
+    } finally {
+      setBusyFileId(null);
+    }
+  };
+
+  const regenerateFile = async (file: ArchivedGeneratedFile) => {
+    if (!file.canRegenerate || !file.batchId || !session) {
+      setMessage("Régénération impossible pour ce fichier.");
+      writeLog(file, "file.regenerate.failed", "Régénération refusée.", "warning");
+      return;
+    }
+
+    setBusyFileId(file.id);
+    try {
+      const [record, account, batch] = await Promise.all([
+        generatedFileRepository.findById(file.id),
+        accountRepository.findById(session.account_id),
+        batchRepository.findById(file.batchId)
+      ]);
+      if (!record || record.account_id !== session.account_id || !account || !batch) {
+        throw new Error("Les données d'origine du fichier sont introuvables.");
+      }
+
+      const [router, plan, tickets] = await Promise.all([
+        routerRepository.findById(batch.router_id),
+        planRepository.findById(batch.plan_id),
+        ticketRepository.listByBatch(batch.id)
+      ]);
+      if (!router || !plan) {
+        throw new Error("Le routeur ou le plan d'origine est introuvable.");
+      }
+
+      const regenerated = await regenerateArchivedTicketPdf({
+        account,
+        batch,
+        file: record,
+        plan,
+        router,
+        tickets
+      });
+      await fileService.writeBytes(record.file_path, regenerated.bytes);
+      await generatedFileRepository.markRegenerated(record.id, session.account_id);
+      setFiles((current) =>
+        current.map((item) => (item.id === file.id ? { ...item, status: "available" } : item))
+      );
+      setMessage(`${file.fileName} régénéré avec ${regenerated.ticketCount} ticket(s).`);
+      writeLog(file, "file.regenerated", `PDF régénéré avec ${regenerated.ticketCount} ticket(s).`);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "La régénération a échoué.";
+      setMessage(`Régénération impossible : ${detail}`);
+      writeLog(file, "file.regenerate.failed", `Régénération échouée : ${detail}`, "error");
+    } finally {
+      setBusyFileId(null);
+    }
   };
 
   const deleteHistory = async () => {
@@ -215,8 +378,20 @@ export function FilesPage() {
 
     setFiles((current) => current.filter((file) => file.id !== fileToDelete.id));
     setMessage(`${fileToDelete.fileName} supprimé de l'historique. Le fichier local n'a pas été supprimé.`);
-    writeLog(fileToDelete, "Suppression de l'historique uniquement.");
+    writeLog(fileToDelete, "file.history_deleted", "Suppression de l'historique uniquement.");
     setFileToDelete(null);
+  };
+
+  const refreshFiles = async () => {
+    setIsRefreshing(true);
+    try {
+      await loadFiles();
+      setMessage("État des fichiers actualisé depuis le disque.");
+    } catch {
+      setMessage("L'état des fichiers n'a pas pu être actualisé.");
+    } finally {
+      setIsRefreshing(false);
+    }
   };
 
   const resetFilters = () => {
@@ -228,9 +403,14 @@ export function FilesPage() {
     <div className="page-stack">
       <PageHeader
         actions={
-          <Button icon={Filter} onClick={() => setFiltersOpen((current) => !current)} size="large">
-            Filtres
-          </Button>
+          <>
+            <Button disabled={isRefreshing} icon={RefreshCw} onClick={() => void refreshFiles()} size="large" variant="secondary">
+              {isRefreshing ? "Actualisation..." : "Actualiser"}
+            </Button>
+            <Button icon={Filter} onClick={() => setFiltersOpen((current) => !current)} size="large">
+              Filtres
+            </Button>
+          </>
         }
         description="Archive locale des PDF de tickets, rapports PDF et exports CSV générés par l'application."
         eyebrow="Routeur"
@@ -292,12 +472,15 @@ export function FilesPage() {
             {filteredFiles.map((file) => (
               <FileArchiveRow
                 file={file}
+                isBusy={busyFileId === file.id}
                 key={file.id}
-                onCopy={() => void copyFile(file)}
+                onCopyPath={() => void copyPath(file)}
                 onDeleteHistory={() => setFileToDelete(file)}
+                onExport={() => void exportFile(file)}
                 onOpen={() => openFile(file)}
-                onRegenerate={() => regenerateFile(file)}
-                onReprint={() => reprintFile(file)}
+                onRegenerate={() => void regenerateFile(file)}
+                onReveal={() => void revealFile(file)}
+                onReprint={() => void reprintFile(file)}
               />
             ))}
           </div>
@@ -355,30 +538,38 @@ const fileTypes: GeneratedFileType[] = ["tickets_pdf", "report_pdf", "report_csv
 
 function FileArchiveRow({
   file,
-  onCopy,
+  isBusy,
+  onCopyPath,
   onDeleteHistory,
+  onExport,
   onOpen,
   onRegenerate,
+  onReveal,
   onReprint
 }: {
   file: ArchivedGeneratedFile;
-  onCopy: () => void;
+  isBusy: boolean;
+  onCopyPath: () => void;
   onDeleteHistory: () => void;
+  onExport: () => void;
   onOpen: () => void;
   onRegenerate: () => void;
+  onReveal: () => void;
   onReprint: () => void;
 }) {
   const Icon = file.fileType === "csv_export" || file.fileType === "report_csv" ? FileDown : FileText;
-  const status = file.status === "available" ? "success" : "error";
+  const status = file.status === "available" ? "success" : file.status === "missing" ? "error" : "warning";
   const menuItems: Array<{ icon: IconComponent; label: string; onSelect: () => void }> = [
-    { icon: FolderOpen, label: "Ouvrir", onSelect: onOpen }
+    { icon: FileText, label: "Ouvrir le fichier", onSelect: onOpen },
+    { icon: FolderOpen, label: "Afficher dans le dossier", onSelect: onReveal }
   ];
 
   if (file.fileType === "tickets_pdf") {
     menuItems.push({ icon: Printer, label: "Réimprimer", onSelect: onReprint });
   }
 
-  menuItems.push({ icon: Copy, label: "Exporter / copier", onSelect: onCopy });
+  menuItems.push({ icon: Download, label: "Exporter vers Téléchargements", onSelect: onExport });
+  menuItems.push({ icon: Copy, label: "Copier le chemin", onSelect: onCopyPath });
 
   if (file.canRegenerate) {
     menuItems.push({ icon: RefreshCw, label: "Régénérer", onSelect: onRegenerate });
@@ -408,7 +599,7 @@ function FileArchiveRow({
       </div>
       <div className="file-row__actions">
         <Badge status={status as AppStatus}>{fileStatusLabel(file.status)}</Badge>
-        <ActionMenu items={menuItems} />
+        <ActionMenu disabled={isBusy} items={menuItems} />
       </div>
     </article>
   );

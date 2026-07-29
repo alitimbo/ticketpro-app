@@ -18,6 +18,7 @@ pub struct MikroTikApiRequest {
     retries: Option<u8>,
     command: String,
     params: Option<HashMap<String, Value>>,
+    queries: Option<HashMap<String, Value>>,
 }
 
 pub type ApiRow = HashMap<String, String>;
@@ -31,7 +32,7 @@ impl Read for ApiStream {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         match self {
             Self::Tcp(stream) => stream.read(buffer),
-            Self::Tls(stream) => stream.read(buffer)
+            Self::Tls(stream) => stream.read(buffer),
         }
     }
 }
@@ -40,20 +41,26 @@ impl Write for ApiStream {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
         match self {
             Self::Tcp(stream) => stream.write(buffer),
-            Self::Tls(stream) => stream.write(buffer)
+            Self::Tls(stream) => stream.write(buffer),
         }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
             Self::Tcp(stream) => stream.flush(),
-            Self::Tls(stream) => stream.flush()
+            Self::Tls(stream) => stream.flush(),
         }
     }
 }
 
 #[tauri::command]
-pub fn mikrotik_api_call(request: MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
+pub async fn mikrotik_api_call(request: MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
+    tauri::async_runtime::spawn_blocking(move || mikrotik_api_call_blocking(request))
+        .await
+        .map_err(|error| format!("router offline: tâche RouterOS interrompue: {error}"))?
+}
+
+fn mikrotik_api_call_blocking(request: MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
     let retries = request.retries.unwrap_or(1);
     let mut last_error = "router offline".to_string();
 
@@ -77,24 +84,24 @@ fn execute_once(request: &MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
     let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(5000));
     let address = (request.host.as_str(), request.port)
         .to_socket_addrs()
-        .map_err(|_| "router offline: address unavailable".to_string())?
+        .map_err(|error| format!("router offline: address unavailable: {error}"))?
         .next()
         .ok_or_else(|| "router offline: address unavailable".to_string())?;
     let stream = TcpStream::connect_timeout(&address, timeout).map_err(map_io_error)?;
 
     stream
         .set_read_timeout(Some(timeout))
-        .map_err(|_| "timeout: read timeout unavailable".to_string())?;
+        .map_err(|error| format!("timeout: read timeout unavailable: {error}"))?;
     stream
         .set_write_timeout(Some(timeout))
-        .map_err(|_| "timeout: write timeout unavailable".to_string())?;
+        .map_err(|error| format!("timeout: write timeout unavailable: {error}"))?;
 
     if request.use_ssl {
-        let connector = TlsConnector::new().map_err(|_| "api ssl: TLS indisponible".to_string())?;
+        let connector = TlsConnector::new().map_err(|error| format!("api ssl: TLS indisponible: {error}"))?;
         let mut stream = ApiStream::Tls(
             connector
                 .connect(&request.host, stream)
-                .map_err(|_| "api ssl: négociation TLS échouée".to_string())?,
+                .map_err(|error| format!("api ssl: négociation TLS échouée: {error}"))?,
         );
         execute_session(&mut stream, request)
     } else {
@@ -115,26 +122,37 @@ fn execute_session<S: Read + Write>(stream: &mut S, request: &MikroTikApiRequest
     read_response(stream)?;
 
     let mut words = vec![request.command.clone()];
-
-    if let Some(params) = &request.params {
-        for (key, value) in params {
-            if value.is_null() {
-                continue;
-            }
-
-            match value {
-                Value::Bool(true) => words.push(format!("={}=", key)),
-                Value::Bool(false) => {}
-                Value::Number(number) => words.push(format!("={}={}", key, number)),
-                Value::String(text) if !text.is_empty() => words.push(format!("={}={}", key, text)),
-                Value::String(_) => {}
-                _ => words.push(format!("={}={}", key, value)),
-            }
-        }
-    }
+    append_api_words(&mut words, "=", request.params.as_ref());
+    append_api_words(&mut words, "?", request.queries.as_ref());
 
     send_sentence(stream, &words)?;
     read_response(stream)
+}
+
+fn append_api_words(
+    words: &mut Vec<String>,
+    prefix: &str,
+    entries: Option<&HashMap<String, Value>>,
+) {
+    let Some(entries) = entries else {
+        return;
+    };
+
+    for (key, value) in entries {
+        if let Some(serialized) = serialize_api_value(value) {
+            words.push(format!("{prefix}{key}={serialized}"));
+        }
+    }
+}
+
+fn serialize_api_value(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::String(value) => Some(value.clone()),
+        Value::Array(_) | Value::Object(_) => Some(value.to_string()),
+    }
 }
 
 fn send_sentence<S: Read + Write>(stream: &mut S, words: &[String]) -> Result<(), String> {
@@ -312,7 +330,7 @@ fn map_trap(row: ApiRow) -> String {
         return "hotspot not found".to_string();
     }
 
-    message
+    format!("router rejected: {message}")
 }
 
 fn map_io_error(error: std::io::Error) -> String {
@@ -325,8 +343,8 @@ fn map_io_error(error: std::io::Error) -> String {
         | ErrorKind::AddrNotAvailable
         | ErrorKind::ConnectionAborted
         | ErrorKind::ConnectionReset
-        | ErrorKind::NotConnected => "router offline".to_string(),
-        _ => "router offline".to_string(),
+        | ErrorKind::NotConnected => format!("router offline: {error}"),
+        _ => format!("router offline: {error}"),
     }
 }
 
@@ -336,4 +354,34 @@ fn is_non_retryable(error: &str) -> bool {
         || normalized.contains("permission denied")
         || normalized.contains("duplicate user")
         || normalized.contains("hotspot not found")
+        || normalized.contains("router rejected:")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn encodes_attributes_and_queries_with_distinct_routeros_prefixes() {
+        let mut attributes = HashMap::new();
+        attributes.insert("name".to_string(), json!("ticketpro-vpn"));
+        attributes.insert("disabled".to_string(), json!(false));
+        let mut queries = HashMap::new();
+        queries.insert("comment".to_string(), json!("TicketPro WireGuard"));
+
+        let mut words = vec!["/ip/firewall/filter/print".to_string()];
+        append_api_words(&mut words, "=", Some(&attributes));
+        append_api_words(&mut words, "?", Some(&queries));
+
+        assert!(words.contains(&"=name=ticketpro-vpn".to_string()));
+        assert!(words.contains(&"=disabled=false".to_string()));
+        assert!(words.contains(&"?comment=TicketPro WireGuard".to_string()));
+    }
+
+    #[test]
+    fn omits_null_values_but_preserves_empty_strings() {
+        assert_eq!(serialize_api_value(&Value::Null), None);
+        assert_eq!(serialize_api_value(&json!("")), Some(String::new()));
+    }
 }

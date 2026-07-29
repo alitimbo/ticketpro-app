@@ -4,6 +4,11 @@ export { FakeLocalRouterDiscoveryProvider } from "./LocalRouterDiscoveryProvider
 export { MikroTikRouterAdapter } from "./MikroTikRouterAdapter";
 export { TauriRouterOsApiTransport } from "./RouterOsApiTransport";
 export { RouterService, RouterServiceError, translateRouterError } from "./RouterService";
+export {
+  createRemotePlanIdempotently,
+  deleteRemotePlanIdempotently,
+  updateRemotePlanIdempotently
+} from "./RemoteHotspotPlanSync";
 export { createPersistedRouterService } from "./PersistedRouterService";
 export { PreparedRemoteConnectionProvider, remoteSecurityWarnings } from "./RemoteConnectionProvider";
 export { RouterAdapterError, isRouterAdapterError } from "./RouterAdapterError";

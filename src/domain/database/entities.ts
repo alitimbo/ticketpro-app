@@ -163,6 +163,7 @@ export type RouterRecord = {
   serial_number: string | null;
   routeros_version: string | null;
   local_ip: string;
+  hotspot_address: string | null;
   notes: string | null;
   api_port: number;
   api_ssl_port: number;
@@ -268,6 +269,7 @@ export type GeneratedFileRecord = {
   file_name: string;
   file_path: string;
   format: string;
+  metadata_json: string | null;
   created_by_profile: string;
   created_by_profile_id: string;
   created_at: string;
@@ -342,12 +344,12 @@ export type AppLogRecord = {
 
 export type CreateRouterInput = Omit<
   RouterRecord,
-  "created_at" | "deleted_at" | "notes" | "subscription_counted" | "sync_status" | "updated_at"
+  "created_at" | "deleted_at" | "hotspot_address" | "notes" | "subscription_counted" | "sync_status" | "updated_at"
 > &
   Partial<
     Pick<
       RouterRecord,
-      "created_at" | "deleted_at" | "notes" | "subscription_counted" | "sync_status" | "updated_at"
+      "created_at" | "deleted_at" | "hotspot_address" | "notes" | "subscription_counted" | "sync_status" | "updated_at"
     >
   >;
 
@@ -397,12 +399,12 @@ export type CreateTicketInput = Omit<
 
 export type CreateGeneratedFileInput = Omit<
   GeneratedFileRecord,
-  "created_at" | "updated_at" | "deleted_at" | "sync_status"
+  "created_at" | "updated_at" | "deleted_at" | "metadata_json" | "sync_status"
 > &
   Partial<
     Pick<
       GeneratedFileRecord,
-      "created_at" | "updated_at" | "deleted_at" | "sync_status"
+      "created_at" | "updated_at" | "deleted_at" | "metadata_json" | "sync_status"
     >
   >;
 

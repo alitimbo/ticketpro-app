@@ -8,7 +8,8 @@ import {
   getRouterLimitMessage,
   listRoutersForAccount,
   routerCardFromRecord,
-  routerConnectionInputsFromCard
+  routerConnectionInputsFromCard,
+  routerRecordFromCard
 } from "./routerPageModel";
 import { countRoutersForSubscription, getSubscriptionOverview } from "./subscriptionPageModel";
 
@@ -85,6 +86,7 @@ describe("routerPageModel", () => {
       id: "router-persisted",
       label: "Zone persistée",
       last_seen_at: "2026-07-13T10:00:00.000Z",
+      hotspot_address: "wifi.ticketpro.local",
       local_ip: "192.168.10.1",
       model: "RB5009",
       name: "Zone persistée",
@@ -134,6 +136,7 @@ describe("routerPageModel", () => {
     const card = routerCardFromRecord(record, connections);
 
     expect(card).toMatchObject({
+      hotspotAddress: "wifi.ticketpro.local",
       id: "router-persisted",
       notes: "Test SQLite",
       preferredMode: "vpn",
@@ -142,5 +145,10 @@ describe("routerPageModel", () => {
       status: "active"
     });
     expect(routerConnectionInputsFromCard(card).map((connection) => connection.mode)).toEqual(["local", "vpn"]);
+    expect(routerRecordFromCard(card).hotspot_address).toBe("wifi.ticketpro.local");
+
+    const localCard = { ...card, preferredMode: "local" as const };
+    expect(localCard.remoteMode).toBe("vpn");
+    expect(routerConnectionInputsFromCard(localCard).map((connection) => connection.mode)).toEqual(["local", "vpn"]);
   });
 });

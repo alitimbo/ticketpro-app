@@ -12,6 +12,7 @@ export type TicketStatus =
   | "activé"
   | "complété"
   | "disponible"
+  | "désactivé"
   | "erreur_sync"
   | "expiré"
   | "imprimé"
@@ -25,7 +26,6 @@ export type TicketGenerationOptions = {
   pdfFormat: TicketPdfFormat;
   pdfTemplate: TicketPdfTemplate;
   prefix: string;
-  supportPhone: string;
   usernameEqualsPassword: boolean;
 };
 
@@ -58,7 +58,6 @@ export const defaultTicketGenerationOptions: TicketGenerationOptions = {
   pdfFormat: "a4",
   pdfTemplate: "economy",
   prefix: "",
-  supportPhone: "",
   usernameEqualsPassword: true
 };
 
@@ -78,6 +77,7 @@ export const ticketPdfTemplateLabels: Record<TicketPdfTemplate, string> = {
 
 export const ticketStatuses: TicketStatus[] = [
   "disponible",
+  "désactivé",
   "imprimé",
   "activé",
   "complété",
@@ -147,7 +147,7 @@ export function buildTicketBatch(input: {
     code_length: input.options.codeLength,
     created_by_profile: input.operatorRole,
     created_by_profile_id: input.operatorProfileId,
-    generated_file_id: input.options.createPdf ? `${input.id}-pdf` : null,
+    generated_file_id: `${input.id}-pdf`,
     id: input.id,
     operator_profile: input.operatorRole,
     plan_id: input.planId,
@@ -247,7 +247,7 @@ export function ticketStatusLabel(status: TicketStatus): string {
 }
 
 export function createBatchId(): string {
-  return `batch-${Date.now()}`;
+  return `batch-${crypto.randomUUID()}`;
 }
 
 export function buildFileName(batchId: string): string {
@@ -258,6 +258,7 @@ export function buildTicketPdfInput(input: {
   batch: CreateTicketBatchInput;
   fileName: string;
   generatedAt: string;
+  ownerPhone: string;
   plan: HotspotPlan;
   router: RouterSummary;
   tickets: CreateTicketInput[];
@@ -272,11 +273,12 @@ export function buildTicketPdfInput(input: {
     fileName: input.fileName,
     format: input.batch.generated_file_id ? defaultTicketGenerationOptions.pdfFormat : "a4",
     generatedAt: input.generatedAt,
+    hotspotAddress: input.router.hotspotAddress?.trim() || "Adresse Hotspot à configurer",
+    ownerPhone: input.ownerPhone.trim(),
     planName: input.plan.name,
     priceLabel: input.plan.priceHint === null ? null : `CFA${input.plan.priceHint}`,
     qrCodeEnabled: false,
     routerId: input.router.id,
-    supportPhone: null,
     template: defaultTicketGenerationOptions.pdfTemplate,
     tickets: input.tickets.map((ticket) => ({
       passwordSecretRef: ticket.password_encrypted,
@@ -291,6 +293,7 @@ export function buildTicketPdfInputFromOptions(input: {
   fileName: string;
   generatedAt: string;
   options: TicketGenerationOptions;
+  ownerPhone: string;
   plan: HotspotPlan;
   router: RouterSummary;
   tickets: CreateTicketInput[];
@@ -298,9 +301,10 @@ export function buildTicketPdfInputFromOptions(input: {
   return {
     ...buildTicketPdfInput(input),
     format: input.options.pdfFormat,
-    qrCodeEnabled: input.options.generateQrCode,
-    supportPhone: input.options.supportPhone.trim() || null,
-    template: input.options.pdfTemplate
+    // QR intentionally disabled in the generation UI until the captive-portal
+    // authentication flow has been validated end to end.
+    qrCodeEnabled: false,
+    template: input.options.pdfTemplate === "qr" ? "economy" : input.options.pdfTemplate
   };
 }
 
