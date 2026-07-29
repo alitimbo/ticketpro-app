@@ -1,5 +1,7 @@
 import type { UserRole } from "../../domain/auth";
+import type { ActiveHotspotUser, HotspotPlan, HotspotUser } from "../../domain/router";
 import { hasAnyPermission } from "../../services/auth";
+import type { RouterAccessPolicy } from "../../services/access";
 
 export type RouterQuickActionId = "clients" | "createTickets" | "report" | "testRouter" | "tickets";
 
@@ -7,6 +9,15 @@ export type RouterQuickAction = {
   id: RouterQuickActionId;
   label: string;
   to?: string;
+};
+
+export type RouterHomeIndicators = {
+  activePlanCount: number;
+  connectedClientCount: number;
+  generatedPdfCount: number;
+  localVoucherCount: number;
+  routerPlanCount: number;
+  routerVoucherCount: number;
 };
 
 export function getRouterQuickActions(role: UserRole, routerId: string): RouterQuickAction[] {
@@ -66,4 +77,33 @@ export function formatBytes(value: number): string {
   }
 
   return `${Math.round(size)} ${units[unitIndex]}`;
+}
+
+export function shouldShowDeviceProtectionNotice(
+  policy: Pick<
+    RouterAccessPolicy,
+    "antiSharingMode" | "lockVoucherToFirstMac"
+  > | null
+): boolean {
+  return Boolean(
+    policy &&
+      (!policy.lockVoucherToFirstMac || policy.antiSharingMode !== "strict")
+  );
+}
+
+export function buildRouterHomeIndicators(input: {
+  activeUsers: ActiveHotspotUser[];
+  generatedPdfCount: number;
+  localVoucherCount: number;
+  plans: HotspotPlan[];
+  routerUsers: HotspotUser[];
+}): RouterHomeIndicators {
+  return {
+    activePlanCount: input.plans.filter((plan) => plan.status === "active").length,
+    connectedClientCount: input.activeUsers.length,
+    generatedPdfCount: input.generatedPdfCount,
+    localVoucherCount: input.localVoucherCount,
+    routerPlanCount: input.plans.length,
+    routerVoucherCount: input.routerUsers.length
+  };
 }

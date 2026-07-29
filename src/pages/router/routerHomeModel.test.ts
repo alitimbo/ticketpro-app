@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { formatBytes, getRouterQuickActions } from "./routerHomeModel";
+import {
+  buildRouterHomeIndicators,
+  formatBytes,
+  getRouterQuickActions,
+  shouldShowDeviceProtectionNotice
+} from "./routerHomeModel";
 
 describe("routerHomeModel", () => {
   it("adapte les actions rapides selon le rôle", () => {
@@ -27,5 +32,40 @@ describe("routerHomeModel", () => {
   it("formate les volumes mémoire", () => {
     expect(formatBytes(84 * 1024 * 1024)).toBe("84 Mo");
     expect(formatBytes(256 * 1024 * 1024)).toBe("256 Mo");
+  });
+
+  it("signale uniquement un verrouillage voucher explicitement désactivé", () => {
+    expect(shouldShowDeviceProtectionNotice(null)).toBe(false);
+    expect(shouldShowDeviceProtectionNotice({
+      antiSharingMode: "observe",
+      lockVoucherToFirstMac: false
+    })).toBe(true);
+    expect(shouldShowDeviceProtectionNotice({
+      antiSharingMode: "observe",
+      lockVoucherToFirstMac: true
+    })).toBe(true);
+    expect(shouldShowDeviceProtectionNotice({
+      antiSharingMode: "strict",
+      lockVoucherToFirstMac: true
+    })).toBe(false);
+  });
+
+  it("sépare les vouchers locaux, les comptes RouterOS et les sessions actives", () => {
+    const indicators = buildRouterHomeIndicators({
+      activeUsers: [{}, {}],
+      generatedPdfCount: 4,
+      localVoucherCount: 12,
+      plans: [{ status: "active" }, { status: "disabled" }, { status: "active" }],
+      routerUsers: [{}, {}, {}, {}, {}]
+    } as Parameters<typeof buildRouterHomeIndicators>[0]);
+
+    expect(indicators).toEqual({
+      activePlanCount: 2,
+      connectedClientCount: 2,
+      generatedPdfCount: 4,
+      localVoucherCount: 12,
+      routerPlanCount: 3,
+      routerVoucherCount: 5
+    });
   });
 });

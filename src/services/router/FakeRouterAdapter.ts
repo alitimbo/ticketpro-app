@@ -334,6 +334,12 @@ export class FakeRouterAdapter implements RouterAdapter {
     return { ...updated };
   }
 
+  async configureHotspotAntiTethering(
+    _config: import("../../domain/router").HotspotAntiTetheringConfig
+  ): Promise<void> {
+    await this.guard("configureHotspotAntiTethering");
+  }
+
   async upsertHotspotBypass(
     binding: import("../../domain/router").HotspotBypassBinding
   ): Promise<void> {

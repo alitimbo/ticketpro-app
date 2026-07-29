@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import {
   Network,
   Plus,
@@ -55,6 +55,8 @@ const emptyInfrastructureDevice: Omit<InfrastructureDevice, "id"> = {
 export function RouterSettingsPage() {
   const { session } = useAuth();
   const { routerId = "" } = useParams();
+  const [searchParams] = useSearchParams();
+  const shouldFocusAntiSharing = searchParams.get("section") === "anti-partage";
   const { database, isInitialized, isPersistent } = useAppDatabase();
   const canView = canViewRouterSettings(session?.internal_profile_role);
   const canEditSensitive = canEditRouterSensitiveSettings(session?.internal_profile_role);
@@ -135,6 +137,18 @@ export function RouterSettingsPage() {
       mounted = false;
     };
   }, [accessPolicySyncService, connectionRepository, isInitialized, routerId, routerRepository, session]);
+
+  useEffect(() => {
+    if (isLoading || !shouldFocusAntiSharing) return undefined;
+
+    const frame = window.requestAnimationFrame(() => {
+      const section = document.getElementById("controle-acces-anti-partage");
+      section?.scrollIntoView({ behavior: "smooth", block: "center" });
+      section?.focus({ preventScroll: true });
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [isLoading, shouldFocusAntiSharing]);
 
   const updateSettings = (partial: Partial<RouterSettings>) => {
     setSettings((current) => ({ ...current, ...partial }));
@@ -325,6 +339,22 @@ export function RouterSettingsPage() {
     }
   };
 
+  const applyAntiSharingPolicy = async (policy: RouterAccessPolicy) => {
+    if (!router || !session) throw new Error("Routeur ou session introuvable.");
+    const connections = await connectionRepository.listByRouter(router.id);
+    const service = await createPersistedRouterService({
+      authSession: session,
+      connections,
+      database,
+      router
+    });
+    await service.configureHotspotAntiTethering({
+      blockIpv4Ttl: policy.monitorIpv4Ttl,
+      blockIpv6: policy.monitorIpv6HopLimit,
+      enabled: policy.antiSharingMode === "strict"
+    });
+  };
+
   const saveAccessPolicy = async () => {
     if (!canEditSensitive || !router || !session) {
       setFeedback({ kind: "error", text: "Seul l'Admin peut modifier cette politique réseau." });
@@ -348,6 +378,7 @@ export function RouterSettingsPage() {
     setFeedback(null);
 
     try {
+      await applyAntiSharingPolicy(accessPolicy);
       await applyInfrastructurePolicy(savedAccessPolicy, accessPolicy);
 
       const syncResult = await accessPolicySyncService.saveAndSync(
@@ -396,7 +427,8 @@ export function RouterSettingsPage() {
     setFeedback(null);
     try {
       const syncResult = choice === "remote"
-        ? await (async () => {
+          ? await (async () => {
+            await applyAntiSharingPolicy(conflictingRemotePolicy.policy);
             await applyInfrastructurePolicy(
               savedAccessPolicy,
               conflictingRemotePolicy.policy
@@ -409,13 +441,17 @@ export function RouterSettingsPage() {
               cloudRouterId
             );
           })()
-        : await accessPolicySyncService.overwriteRemote(
-            session.account_id,
-            router.id,
-            accessPolicy,
-            conflictingRemotePolicy.revision,
-            cloudRouterId
-          );
+        : await (async () => {
+            await applyAntiSharingPolicy(accessPolicy);
+            await applyInfrastructurePolicy(savedAccessPolicy, accessPolicy);
+            return accessPolicySyncService.overwriteRemote(
+              session.account_id,
+              router.id,
+              accessPolicy,
+              conflictingRemotePolicy.revision,
+              cloudRouterId
+            );
+          })();
       setAccessPolicy(syncResult.policy);
       setSavedAccessPolicy(structuredClone(syncResult.policy));
       setAccessPolicySyncStatus(syncResult.status);
@@ -533,8 +569,11 @@ export function RouterSettingsPage() {
       </Card>
 
       <Card
+        className={shouldFocusAntiSharing ? "router-settings-focus" : ""}
+        id="controle-acces-anti-partage"
+        tabIndex={-1}
         title="Contrôle d'accès et anti-partage"
-        description="Associez chaque voucher à son premier appareil. Les contrôles TTL avancés restent en observation jusqu'à leur calibration sur un routeur réel."
+        description="Le mode strict verrouille les vouchers, bloque les TTL caractéristiques du tethering et coupe IPv6 sur le réseau Hotspot."
       >
         <div className="option-list">
           <label className="toggle-option">
@@ -553,43 +592,52 @@ export function RouterSettingsPage() {
             Contrôle du partage de connexion
             <select
               disabled={!canEditSensitive || isLoading}
-              onChange={(event) => updateAccessPolicy({
-                antiSharingMode: event.target.value as RouterAccessPolicy["antiSharingMode"]
-              })}
+              onChange={(event) => {
+                const antiSharingMode =
+                  event.target.value as RouterAccessPolicy["antiSharingMode"];
+                updateAccessPolicy(antiSharingMode === "strict"
+                  ? {
+                      antiSharingMode,
+                      lockVoucherToFirstMac: true,
+                      monitorIpv4Ttl: true,
+                      monitorIpv6HopLimit: true
+                    }
+                  : { antiSharingMode });
+              }}
               value={accessPolicy.antiSharingMode}
             >
               <option value="disabled">Désactivé</option>
               <option value="observe">Observation et préparation</option>
-              <option disabled value="strict">Strict — après calibration réelle</option>
+              <option value="strict">Strict — bloquer le partage</option>
             </select>
             <small>
-              Le verrou MAC empêche le même voucher sur plusieurs appareils. Un téléphone faisant du NAT
-              exige en plus une calibration TTL/Hop Limit avant tout blocage strict.
+              Le mode strict bloque les TTL 63 et 127 des clients Hotspot authentifiés,
+              force une seule session par voucher et empêche le contournement IPv6.
             </small>
           </label>
           <label className="toggle-option">
             <input
               checked={accessPolicy.monitorIpv4Ttl}
-              disabled={!canEditSensitive || isLoading}
+              disabled={!canEditSensitive || isLoading || accessPolicy.antiSharingMode === "strict"}
               onChange={(event) => updateAccessPolicy({
                 monitorIpv4Ttl: event.target.checked
               })}
               type="checkbox"
             />
             <Network aria-hidden="true" />
-            <span>Préparer la surveillance TTL IPv4</span>
+            <span>Détecter et bloquer les TTL de partage IPv4</span>
           </label>
           <label className="toggle-option">
             <input
               checked={accessPolicy.monitorIpv6HopLimit}
-              disabled={!canEditSensitive || isLoading}
+              disabled={!canEditSensitive || isLoading || accessPolicy.antiSharingMode === "strict"}
               onChange={(event) => updateAccessPolicy({
                 monitorIpv6HopLimit: event.target.checked
               })}
               type="checkbox"
             />
             <Network aria-hidden="true" />
-            <span>Préparer la surveillance Hop Limit IPv6</span>
+            <span>Bloquer IPv6 sur le réseau Hotspot en mode strict</span>
           </label>
         </div>
       </Card>

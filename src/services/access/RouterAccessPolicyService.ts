@@ -72,6 +72,16 @@ export class RouterAccessPolicyService {
 export function validateRouterAccessPolicy(
   policy: RouterAccessPolicy
 ): string | null {
+  if (policy.antiSharingMode === "strict" && !policy.lockVoucherToFirstMac) {
+    return "Le mode strict exige le verrouillage du voucher sur le premier appareil.";
+  }
+  if (policy.antiSharingMode === "strict" && !policy.monitorIpv4Ttl) {
+    return "Le mode strict exige le blocage TTL IPv4.";
+  }
+  if (policy.antiSharingMode === "strict" && !policy.monitorIpv6HopLimit) {
+    return "Le mode strict exige le blocage IPv6 sur le réseau Hotspot.";
+  }
+
   const seenMacs = new Set<string>();
   const seenIps = new Set<string>();
 

@@ -97,6 +97,12 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
     return this.delegate.clearHotspotUserMac(username);
   }
 
+  configureHotspotAntiTethering(
+    config: import("../../domain/router").HotspotAntiTetheringConfig
+  ) {
+    return this.delegate.configureHotspotAntiTethering(config);
+  }
+
   upsertHotspotBypass(binding: import("../../domain/router").HotspotBypassBinding) {
     return this.delegate.upsertHotspotBypass(binding);
   }

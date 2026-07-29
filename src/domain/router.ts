@@ -143,6 +143,12 @@ export type HotspotBypassBinding = {
   macAddress: string;
 };
 
+export type HotspotAntiTetheringConfig = {
+  blockIpv4Ttl: boolean;
+  blockIpv6: boolean;
+  enabled: boolean;
+};
+
 export type RouterHealth = {
   cpuLoad: number;
   memoryUsed: number;

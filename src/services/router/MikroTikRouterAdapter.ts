@@ -330,6 +330,69 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     return this.findUserByName(username);
   }
 
+  async configureHotspotAntiTethering(
+    config: import("../../domain/router").HotspotAntiTetheringConfig
+  ): Promise<void> {
+    const hotspotServers = await this.getHotspotServers();
+    const activeInterfaces = Array.from(new Set(
+      hotspotServers
+        .filter((server) => server.isEnabled && server.interfaceName !== "inconnue")
+        .map((server) => server.interfaceName)
+    ));
+    if (config.enabled && activeInterfaces.length === 0) {
+      throw new RouterAdapterError(
+        "hotspot_not_found",
+        "No active Hotspot interface available for anti-tethering"
+      );
+    }
+
+    const ipv4Rules = config.enabled && config.blockIpv4Ttl
+      ? [63, 127].map((ttl) => ({
+          action: "drop",
+          chain: "forward",
+          comment: `TicketPro anti-tethering:IPv4 TTL ${ttl}`,
+          hotspot: "auth",
+          ttl: String(ttl)
+        }))
+      : [];
+    await this.reconcileManagedFirewallRules(
+      "/ip/firewall/filter",
+      ipv4Rules
+    );
+
+    const ipv6Rules = config.enabled && config.blockIpv6
+      ? activeInterfaces.map((interfaceName) => ({
+          action: "drop",
+          chain: "forward",
+          comment: `TicketPro anti-tethering:IPv6 ${interfaceName}`,
+          "in-interface": interfaceName
+        }))
+      : [];
+    try {
+      await this.reconcileManagedFirewallRules(
+        "/ipv6/firewall/filter",
+        ipv6Rules
+      );
+    } catch (error) {
+      if (config.enabled && config.blockIpv6) throw error;
+      // RouterOS v6 can run without the optional IPv6 package. Disabling an
+      // inactive policy must remain possible in that situation.
+    }
+
+    if (config.enabled) {
+      const profiles = await this.call("/ip/hotspot/user/profile/print");
+      for (const profile of profiles) {
+        const profileId = pick(profile, ".id", "id");
+        if (profileId && pick(profile, "shared-users") !== "1") {
+          await this.call("/ip/hotspot/user/profile/set", {
+            numbers: profileId,
+            "shared-users": "1"
+          });
+        }
+      }
+    }
+  }
+
   async upsertHotspotBypass(
     binding: import("../../domain/router").HotspotBypassBinding
   ): Promise<void> {
@@ -494,6 +557,61 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     }
 
     return user;
+  }
+
+  private async reconcileManagedFirewallRules(
+    menu: "/ip/firewall/filter" | "/ipv6/firewall/filter",
+    desiredRules: Array<Record<string, string>>
+  ): Promise<void> {
+    const rows = await this.call(`${menu}/print`);
+    const managedPrefix = "TicketPro anti-tethering:";
+    const managedRows = rows.filter((row) =>
+      pick(row, "comment")?.startsWith(managedPrefix)
+    );
+    const desiredComments = new Set(desiredRules.map((rule) => rule.comment));
+    const firstForwardRuleId = pick(
+      rows.find((row) =>
+        pick(row, "chain") === "forward" &&
+        !pick(row, "comment")?.startsWith(managedPrefix) &&
+        !isTruthy(pick(row, "dynamic"))
+      ) ?? {},
+      ".id",
+      "id"
+    );
+
+    for (const rule of desiredRules) {
+      const matches = managedRows.filter(
+        (row) => pick(row, "comment") === rule.comment
+      );
+      const existingId = pick(matches[0] ?? {}, ".id", "id");
+      if (existingId) {
+        await this.call(`${menu}/set`, {
+          ...rule,
+          numbers: existingId
+        });
+      } else {
+        await this.call(`${menu}/add`, {
+          ...rule,
+          "place-before": firstForwardRuleId ?? null
+        });
+      }
+
+      for (const duplicate of matches.slice(1)) {
+        const duplicateId = pick(duplicate, ".id", "id");
+        if (duplicateId) {
+          await this.call(`${menu}/remove`, { numbers: duplicateId });
+        }
+      }
+    }
+
+    for (const row of managedRows) {
+      const comment = pick(row, "comment") ?? "";
+      if (desiredComments.has(comment)) continue;
+      const ruleId = pick(row, ".id", "id");
+      if (ruleId) {
+        await this.call(`${menu}/remove`, { numbers: ruleId });
+      }
+    }
   }
 
   private async call(command: string, params: RouterOsApiRequest["params"] = {}): Promise<RouterOsApiRow[]> {

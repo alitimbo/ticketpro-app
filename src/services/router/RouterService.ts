@@ -201,6 +201,16 @@ export class RouterService {
     );
   }
 
+  configureHotspotAntiTethering(
+    config: import("../../domain/router").HotspotAntiTetheringConfig
+  ) {
+    return this.run(
+      "configureHotspotAntiTethering",
+      () => this.adapter.configureHotspotAntiTethering(config),
+      "router.settings.manage"
+    );
+  }
+
   upsertHotspotBypass(binding: import("../../domain/router").HotspotBypassBinding) {
     return this.run(
       "upsertHotspotBypass",

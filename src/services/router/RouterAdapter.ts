@@ -2,6 +2,7 @@ import type {
   ActiveHotspotUser,
   HotspotPlan,
   HotspotPlanDraft,
+  HotspotAntiTetheringConfig,
   HotspotBypassBinding,
   HotspotServer,
   HotspotUser,
@@ -32,6 +33,7 @@ export interface RouterAdapter {
   removeHotspotUser(username: string): Promise<void>;
   bindHotspotUserToMac(username: string, macAddress: string): Promise<HotspotUser>;
   clearHotspotUserMac(username: string): Promise<HotspotUser>;
+  configureHotspotAntiTethering(config: HotspotAntiTetheringConfig): Promise<void>;
   upsertHotspotBypass(binding: HotspotBypassBinding): Promise<void>;
   removeHotspotBypass(id: string, macAddress: string): Promise<void>;
   listActiveUsers(): Promise<ActiveHotspotUser[]>;

@@ -2,12 +2,13 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
   Activity,
+  AlertTriangle,
+  ArrowRight,
   CalendarClock,
   Cpu,
   FileText,
   Gauge,
   HardDrive,
-  Printer,
   Radio,
   RefreshCw,
   Router,
@@ -27,6 +28,7 @@ import type {
 } from '../../domain/router'
 import { useAuth } from '../../app/auth/AuthProvider'
 import {
+  GeneratedFileRepository,
   HotspotPlanRepository,
   RouterConnectionRepository,
   RouterRepository,
@@ -40,6 +42,11 @@ import {
   RouterServiceError
 } from '../../services/router'
 import {
+  defaultRouterAccessPolicy,
+  RouterAccessPolicyService,
+  type RouterAccessPolicy
+} from '../../services/access'
+import {
   compareLocalAndRouterTickets,
   type TicketSyncSummary
 } from '../../services/sync'
@@ -52,14 +59,22 @@ import {
   StatCard,
   StatusDot
 } from '../../shared/ui'
-import { formatBytes, getRouterQuickActions } from './routerHomeModel'
+import {
+  buildRouterHomeIndicators,
+  formatBytes,
+  getRouterQuickActions,
+  shouldShowDeviceProtectionNotice
+} from './routerHomeModel'
 import { createDemoTickets, ticketFromRecord } from './ticketsPageModel'
 
 type RouterDashboardData = {
   activeUsers: ActiveHotspotUser[]
   dateTime: RouterDateTime
+  generatedPdfCount: number
   health: RouterHealth
+  localVoucherCount: number
   plans: HotspotPlan[]
+  routerName: string
   servers: HotspotServer[]
   systemInfo: RouterSystemInfo
   users: HotspotUser[]
@@ -100,7 +115,18 @@ export function RouterHomePage () {
     () => new HotspotPlanRepository(database),
     [database]
   )
+  const generatedFileRepository = useMemo(
+    () => new GeneratedFileRepository(database),
+    [database]
+  )
+  const accessPolicyService = useMemo(
+    () => new RouterAccessPolicyService(database),
+    [database]
+  )
   const [dashboard, setDashboard] = useState<RouterDashboardData | null>(null)
+  const [accessPolicy, setAccessPolicy] = useState<RouterAccessPolicy | null>(
+    null
+  )
   const [cpuLoad, setCpuLoad] = useState(0)
   const [connectionMessage, setConnectionMessage] =
     useState('Connexion en cours')
@@ -123,17 +149,32 @@ export function RouterHomePage () {
       try {
         let activeService: RouterService
         let localTickets = createDemoTickets()
+        let loadedAccessPolicy = structuredClone(defaultRouterAccessPolicy)
+        let generatedPdfCount = 0
+        let routerName = 'Routeur de démonstration'
 
         if (isPersistent) {
           const router = await routerRepository.findById(routerId)
           if (!router || router.account_id !== routerSession.account_id) {
             throw new Error('Routeur introuvable pour cette organisation.')
           }
-          const [connections, ticketRecords, planRecords] = await Promise.all([
+          const [connections, ticketRecords, planRecords, generatedFiles] =
+            await Promise.all([
             connectionRepository.listByRouter(routerId),
             ticketRepository.listByRouter(routerId),
-            planRepository.listByRouter(routerId)
+            planRepository.listByRouter(routerId),
+            generatedFileRepository.listByAccount(routerSession.account_id)
           ])
+          routerName = router.name
+          generatedPdfCount = generatedFiles.filter(
+            file =>
+              file.router_id === routerId &&
+              file.format.toLowerCase() === 'pdf'
+          ).length
+          const policy = await accessPolicyService
+            .get(routerSession.account_id, routerId)
+            .catch(() => structuredClone(defaultRouterAccessPolicy))
+          loadedAccessPolicy = policy
           const plansById = new Map(planRecords.map(plan => [plan.id, plan]))
           localTickets = ticketRecords.map(ticket =>
             ticketFromRecord(
@@ -177,11 +218,15 @@ export function RouterHomePage () {
         }
 
         setService(activeService)
+        setAccessPolicy(loadedAccessPolicy)
         setDashboard({
           activeUsers,
           dateTime,
+          generatedPdfCount,
           health,
+          localVoucherCount: localTickets.length,
           plans,
+          routerName,
           servers,
           systemInfo,
           users
@@ -212,8 +257,10 @@ export function RouterHomePage () {
       isMounted = false
     }
   }, [
+    accessPolicyService,
     connectionRepository,
     database,
+    generatedFileRepository,
     isInitialized,
     isPersistent,
     planRepository,
@@ -229,16 +276,22 @@ export function RouterHomePage () {
     }
 
     const interval = window.setInterval(() => {
-      void service
-        .getRouterHealth()
-        .then(health => {
+      void Promise.all([
+        service.getRouterHealth(),
+        service.listActiveUsers(),
+        service.listHotspotUsers()
+      ])
+        .then(([health, activeUsers, users]) => {
           setCpuLoad(health.cpuLoad)
-          setDashboard(current => (current ? { ...current, health } : current))
+          setDashboard(current =>
+            current ? { ...current, activeUsers, health, users } : current
+          )
+          setConnectionMessage('Routeur connecté')
         })
         .catch(() =>
           setConnectionMessage('Actualisation du routeur impossible')
         )
-    }, 10_000)
+    }, 15_000)
 
     return () => window.clearInterval(interval)
   }, [service])
@@ -288,6 +341,13 @@ export function RouterHomePage () {
   }
 
   const hotspotEnabled = dashboard.servers.some(server => server.isEnabled)
+  const indicators = buildRouterHomeIndicators({
+    activeUsers: dashboard.activeUsers,
+    generatedPdfCount: dashboard.generatedPdfCount,
+    localVoucherCount: dashboard.localVoucherCount,
+    plans: dashboard.plans,
+    routerUsers: dashboard.users
+  })
   const memoryPercent = Math.round(
     (dashboard.health.memoryUsed / dashboard.health.memoryTotal) * 100
   )
@@ -298,6 +358,9 @@ export function RouterHomePage () {
         syncSummary.localMissing > 0 ||
         syncSummary.routerMissing > 0)
   )
+  const showDeviceProtectionNotice =
+    userCan('router.settings') &&
+    shouldShowDeviceProtectionNotice(accessPolicy)
 
   return (
     <div className='page-stack'>
@@ -318,8 +381,38 @@ export function RouterHomePage () {
         }
         description='Vue claire du routeur sélectionné, de ses tickets et de son état actuel.'
         eyebrow='Routeur'
-        title='Boutique centre'
+        title={dashboard.routerName}
       />
+
+      {showDeviceProtectionNotice ? (
+        <section
+          aria-label='Protection des vouchers désactivée'
+          className='router-security-notice'
+        >
+          <div className='router-security-notice__icon'>
+            <AlertTriangle aria-hidden='true' />
+          </div>
+          <div className='router-security-notice__content'>
+            <strong>Blocage du partage de connexion incomplet</strong>
+            <p>
+              Activez la protection stricte pour verrouiller les vouchers et
+              bloquer le trafic provenant d'appareils connectés derrière un
+              téléphone.
+            </p>
+          </div>
+          <Button
+            icon={ArrowRight}
+            onClick={() =>
+              navigate(
+                `/routeurs/${routerId}/parametres?section=anti-partage`
+              )
+            }
+            variant='primary'
+          >
+            Configurer
+          </Button>
+        </section>
+      ) : null}
 
       <section className='router-hero'>
         <div className='router-hero__main'>
@@ -342,7 +435,7 @@ export function RouterHomePage () {
       <div className='page-grid'>
         <Card className='span-8' title='Informations routeur'>
           <div className='router-info-grid'>
-            <InfoItem label='Zone' value='Boutique centre' />
+            <InfoItem label='Nom enregistré' value={dashboard.routerName} />
             <InfoItem label='Modèle' value={dashboard.systemInfo.model} />
             <InfoItem label='Carte' value={dashboard.systemInfo.boardName} />
             <InfoItem
@@ -387,49 +480,49 @@ export function RouterHomePage () {
         <div className='span-4'>
           <StatCard
             icon={Activity}
-            label='Actifs'
-            value={String(dashboard.activeUsers.length)}
-            hint='Clients connectés'
+            label='Clients connectés'
+            value={String(indicators.connectedClientCount)}
+            hint='Sessions Hotspot actives'
           />
         </div>
         <div className='span-4'>
           <StatCard
             icon={Ticket}
-            label='Tickets'
-            value={String(dashboard.users.length)}
-            hint='Tickets simulés'
+            label='Vouchers locaux'
+            value={String(indicators.localVoucherCount)}
+            hint='Enregistrés dans TicketPro'
           />
         </div>
         <div className='span-4'>
           <StatCard
             icon={FileText}
-            label='Plans'
-            value={String(dashboard.plans.length)}
-            hint='Offres disponibles'
+            label='Plans actifs'
+            value={String(indicators.activePlanCount)}
+            hint={`${indicators.routerPlanCount} profil(s) RouterOS détecté(s)`}
           />
         </div>
         <div className='span-4'>
           <StatCard
             icon={Users}
-            label='Utilisateurs Hotspot'
-            value={String(dashboard.users.length)}
-            hint='Comptes locaux'
+            label='Vouchers MikroTik'
+            value={String(indicators.routerVoucherCount)}
+            hint='Comptes Hotspot présents sur le routeur'
           />
         </div>
         <div className='span-4'>
           <StatCard
-            icon={Printer}
-            label='Imprimante'
-            value='Prête'
-            hint='PDF disponibles'
+            icon={FileText}
+            label='PDF générés'
+            value={String(indicators.generatedPdfCount)}
+            hint='Fichiers archivés pour ce routeur'
           />
         </div>
         <div className='span-4'>
           <StatCard
             icon={CalendarClock}
-            label='Dernière synchronisation'
-            value='Maintenant'
-            hint={dashboard.health.uptime}
+            label='Disponibilité routeur'
+            value={dashboard.health.uptime}
+            hint='Temps de fonctionnement RouterOS'
           />
         </div>
         <div className='span-4'>

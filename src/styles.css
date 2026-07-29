@@ -1712,6 +1712,57 @@ a {
   box-shadow: var(--shadow-sm);
 }
 
+.router-security-notice {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+  border: 1px solid #f2c66d;
+  border-radius: var(--radius-md);
+  background: #fff8e8;
+  box-shadow: var(--shadow-sm);
+}
+
+.router-security-notice__icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  color: #9a5b00;
+  background: #ffe8b0;
+}
+
+.router-security-notice__icon svg {
+  width: 22px;
+  height: 22px;
+}
+
+.router-security-notice__content {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.router-security-notice__content strong {
+  display: block;
+  color: #724400;
+  font-size: 0.98rem;
+}
+
+.router-security-notice__content p {
+  margin: 4px 0 0;
+  color: #795719;
+  line-height: 1.45;
+}
+
+.router-settings-focus {
+  border-color: #e2ae48;
+  box-shadow: 0 0 0 3px rgb(226 174 72 / 18%), var(--shadow-sm);
+  outline: none;
+}
+
 .router-hero__main {
   display: flex;
   align-items: center;
@@ -3838,6 +3889,15 @@ a {
   .router-hero {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .router-security-notice {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .router-security-notice .button {
+    margin-left: 56px;
   }
 
   .router-hero__states {

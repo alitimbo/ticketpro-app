@@ -84,4 +84,16 @@ describe("RouterAccessPolicyService", () => {
 
     expect(error).toContain("déclarée plusieurs fois");
   });
+
+  it("exige toutes les protections lorsque le mode strict est sélectionné", () => {
+    const error = validateRouterAccessPolicy({
+      antiSharingMode: "strict",
+      infrastructureDevices: [],
+      lockVoucherToFirstMac: false,
+      monitorIpv4Ttl: true,
+      monitorIpv6HopLimit: true
+    });
+
+    expect(error).toContain("verrouillage du voucher");
+  });
 });

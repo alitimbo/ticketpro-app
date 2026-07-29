@@ -443,4 +443,128 @@ describe("MikroTikRouterAdapter", () => {
     expect(removeCalls).toHaveLength(1);
     expect(removeCalls[0]?.params).toEqual({ numbers: "*TP1" });
   });
+
+  it("installe idempotemment le blocage du partage Hotspot", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/print": [{
+        ".id": "*HS1",
+        disabled: "false",
+        interface: "ether1",
+        name: "ticketpro-hotspot"
+      }],
+      "/ip/firewall/filter/print": [
+        {
+          ".id": "*TP63",
+          action: "drop",
+          chain: "forward",
+          comment: "TicketPro anti-tethering:IPv4 TTL 63",
+          hotspot: "auth",
+          ttl: "63"
+        },
+        {
+          ".id": "*F0",
+          action: "accept",
+          chain: "forward",
+          comment: "Règle installateur"
+        }
+      ],
+      "/ipv6/firewall/filter/print": [{
+        ".id": "*V0",
+        action: "accept",
+        chain: "forward",
+        comment: "Règle IPv6 installateur"
+      }],
+      "/ip/hotspot/user/profile/print": [
+        { ".id": "*P1", name: "6h", "shared-users": "3" },
+        { ".id": "*P2", name: "1j", "shared-users": "1" }
+      ]
+    });
+    const adapter = createAdapter(transport);
+
+    await adapter.configureHotspotAntiTethering({
+      blockIpv4Ttl: true,
+      blockIpv6: true,
+      enabled: true
+    });
+
+    expect(
+      transport.calls.find((call) =>
+        call.command === "/ip/firewall/filter/set"
+      )?.params
+    ).toMatchObject({
+      comment: "TicketPro anti-tethering:IPv4 TTL 63",
+      hotspot: "auth",
+      numbers: "*TP63",
+      ttl: "63"
+    });
+    expect(
+      transport.calls.find((call) =>
+        call.command === "/ip/firewall/filter/add"
+      )?.params
+    ).toMatchObject({
+      action: "drop",
+      comment: "TicketPro anti-tethering:IPv4 TTL 127",
+      hotspot: "auth",
+      "place-before": "*F0",
+      ttl: "127"
+    });
+    expect(
+      transport.calls.find((call) =>
+        call.command === "/ipv6/firewall/filter/add"
+      )?.params
+    ).toMatchObject({
+      action: "drop",
+      comment: "TicketPro anti-tethering:IPv6 ether1",
+      "in-interface": "ether1",
+      "place-before": "*V0"
+    });
+    expect(
+      transport.calls.filter((call) =>
+        call.command === "/ip/hotspot/user/profile/set"
+      )
+    ).toEqual([
+      expect.objectContaining({
+        params: {
+          numbers: "*P1",
+          "shared-users": "1"
+        }
+      })
+    ]);
+  });
+
+  it("retire seulement les règles anti-partage gérées par TicketPro", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/print": [],
+      "/ip/firewall/filter/print": [
+        {
+          ".id": "*TP63",
+          chain: "forward",
+          comment: "TicketPro anti-tethering:IPv4 TTL 63"
+        },
+        {
+          ".id": "*MANUAL",
+          chain: "forward",
+          comment: "Blocage manuel TTL"
+        }
+      ],
+      "/ipv6/firewall/filter/print": [{
+        ".id": "*TPV6",
+        chain: "forward",
+        comment: "TicketPro anti-tethering:IPv6 ether1"
+      }]
+    });
+    const adapter = createAdapter(transport);
+
+    await adapter.configureHotspotAntiTethering({
+      blockIpv4Ttl: true,
+      blockIpv6: true,
+      enabled: false
+    });
+
+    expect(
+      transport.calls
+        .filter((call) => call.command.endsWith("/remove"))
+        .map((call) => call.params?.numbers)
+    ).toEqual(["*TP63", "*TPV6"]);
+  });
 });
