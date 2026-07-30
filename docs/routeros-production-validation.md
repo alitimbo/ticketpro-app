@@ -42,6 +42,23 @@ Le PC TicketPro doit pouvoir joindre l'adresse LAN du routeur et le port TCP 872
 5. Depuis un autre accès Internet, activer un pair opérateur et ouvrir le routeur dans TicketPro.
 6. Redémarrer le PC, le VPS et le MikroTik puis répéter le test distant.
 
+### Réinstallation de TicketPro
+
+La suppression de l'application ou de sa base locale ne doit pas imposer de
+supprimer le tunnel sur le MikroTik. Après avoir reconnecté le même compte et
+réenregistré le routeur par son adresse LAN :
+
+1. ouvrir **VPN distant WireGuard** ;
+2. sélectionner le routeur puis lancer son provisionnement ;
+3. TicketPro détecte l'interface `ticketpro-vpn`, réutilise sa clé publique et
+   récupère auprès du VPS l'adresse déjà attribuée ;
+4. TicketPro reconstruit le pair et la connexion VPN dans la base locale sans
+   remplacer la clé privée conservée par RouterOS.
+
+Le message attendu contient `Tunnel VPN existant récupéré`. Si l'installation
+se fait sur un autre PC, un nouveau pair opérateur est nécessaire : la clé
+privée d'un poste opérateur n'est jamais stockée sur le VPS.
+
 ## Commandes de validation du code
 
 ```bash

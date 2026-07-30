@@ -25,9 +25,23 @@ pub struct WireGuardTunnelStatus {
     pub tunnel_name: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledWireGuardTunnel {
+    pub active: bool,
+    pub assigned_address: Option<String>,
+    pub public_key: Option<String>,
+    pub tunnel_name: String,
+}
+
 #[tauri::command]
 pub fn wireguard_available() -> bool {
     wireguard_executable().is_some()
+}
+
+#[tauri::command]
+pub fn wireguard_list_ticketpro_tunnels() -> Result<Vec<InstalledWireGuardTunnel>, String> {
+    list_ticketpro_tunnels()
 }
 
 #[tauri::command]
@@ -175,6 +189,29 @@ fn wireguard_executable() -> Option<PathBuf> {
 #[cfg(not(windows))]
 fn wireguard_executable() -> Option<PathBuf> {
     None
+}
+
+#[cfg(windows)]
+fn wireguard_tool_executable() -> Option<PathBuf> {
+    let candidates = [
+        PathBuf::from(r"C:\Program Files\WireGuard\wg.exe"),
+        PathBuf::from(r"C:\Program Files (x86)\WireGuard\wg.exe"),
+    ];
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .or_else(|| {
+            let output = Command::new("where").arg("wg.exe").output().ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let path = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()?
+                .trim()
+                .to_string();
+            (!path.is_empty()).then(|| PathBuf::from(path))
+        })
 }
 
 #[cfg(not(windows))]
@@ -362,6 +399,94 @@ fn tunnel_service_exists(tunnel_name: &str) -> bool {
 #[cfg(not(windows))]
 fn tunnel_service_exists(_tunnel_name: &str) -> bool {
     false
+}
+
+#[cfg(windows)]
+fn list_ticketpro_tunnels() -> Result<Vec<InstalledWireGuardTunnel>, String> {
+    let script = "Get-Service -Name 'WireGuardTunnel$tp-*' -ErrorAction SilentlyContinue | ForEach-Object { $_.Name.Substring(16) + '|' + $_.Status }";
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "Impossible d'inventorier les tunnels WireGuard TicketPro : {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let wireguard_tool = wireguard_tool_executable();
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.trim().splitn(2, '|');
+            let tunnel_name = fields.next()?;
+            let status = fields.next()?;
+            if validate_tunnel_name(tunnel_name).is_err() || !tunnel_name.starts_with("tp-") {
+                return None;
+            }
+            let assigned_address = tunnel_ipv4_address(tunnel_name);
+            let public_key = wireguard_tool.as_ref().and_then(|tool| {
+                let result = Command::new(tool)
+                    .args(["show", tunnel_name, "public-key"])
+                    .output()
+                    .ok()?;
+                if !result.status.success() {
+                    return None;
+                }
+                let key = String::from_utf8_lossy(&result.stdout).trim().to_string();
+                (!key.is_empty()).then_some(key)
+            });
+            Some(InstalledWireGuardTunnel {
+                active: status.eq_ignore_ascii_case("Running"),
+                assigned_address,
+                public_key,
+                tunnel_name: tunnel_name.to_string(),
+            })
+        })
+        .collect())
+}
+
+#[cfg(windows)]
+fn tunnel_ipv4_address(tunnel_name: &str) -> Option<String> {
+    let output = Command::new("netsh.exe")
+        .args([
+            "interface",
+            "ipv4",
+            "show",
+            "addresses",
+            &format!("name={tunnel_name}"),
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .map(|token| token.trim_matches(|character: char| !character.is_ascii_digit() && character != '.'))
+        .find(|candidate| is_ipv4_address(candidate))
+        .map(ToOwned::to_owned)
+}
+
+fn is_ipv4_address(value: &str) -> bool {
+    let octets = value
+        .split('.')
+        .map(str::parse::<u8>)
+        .collect::<Result<Vec<_>, _>>();
+    matches!(octets, Ok(parts) if parts.len() == 4)
+}
+
+#[cfg(not(windows))]
+fn list_ticketpro_tunnels() -> Result<Vec<InstalledWireGuardTunnel>, String> {
+    Ok(Vec::new())
 }
 
 #[cfg(test)]

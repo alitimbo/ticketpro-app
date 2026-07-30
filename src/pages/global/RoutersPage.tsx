@@ -60,6 +60,8 @@ import {
   type RouterFormValues
 } from "./routerPageModel";
 import { countRoutersForSubscription, getSubscriptionOverview } from "./subscriptionPageModel";
+import { RouterCloudRecoveryService } from "../../services/recovery";
+import { removeSaasRouterRecoverySnapshot } from "../../services/saas";
 
 const statusLabels: Record<RouterCardData["status"], string> = {
   active: "Connecté",
@@ -97,6 +99,12 @@ export function RoutersPage() {
   const [isDeleting, setIsDeleting] = useState(false);
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
   const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
+  const recoveryService = useMemo(
+    () => accountId && session
+      ? new RouterCloudRecoveryService(database, accountId, session.internal_profile_id)
+      : null,
+    [accountId, database, session]
+  );
 
   useEffect(() => {
     if (!isInitialized || !accountId) return undefined;
@@ -105,7 +113,21 @@ export function RoutersPage() {
 
     async function loadRouters() {
       try {
-        const records = await routerRepository.listByAccount(scopedAccountId);
+        let records = await routerRepository.listByAccount(scopedAccountId);
+        if (isPersistent && recoveryService) {
+          const recovery = await recoveryService.restoreMissingRouters();
+          if (recovery.restoredRouterIds.length > 0 && mounted) {
+            setMessage(
+              `${recovery.restoredRouterIds.length} routeur(s) restauré(s) depuis le coffre TicketPro. Vérification réelle en attente.`
+            );
+          }
+          records = await routerRepository.listByAccount(scopedAccountId);
+        }
+        if (isPersistent && records.length > 0 && recoveryService && canEditRouter) {
+          void recoveryService.backupAll().catch(() => {
+            // La sauvegarde sera retentée au prochain chargement sans bloquer le travail local.
+          });
+        }
         const cards = await Promise.all(
           records.map(async (record) =>
             routerCardFromRecord(record, await connectionRepository.listByRouter(record.id))
@@ -114,7 +136,7 @@ export function RoutersPage() {
         if (mounted) setRouters(cards.length > 0 || isPersistent ? cards : demoRouters);
       } catch (error) {
         if (!mounted) return;
-        setMessage(error instanceof Error ? error.message : "Impossible de charger les routeurs.");
+        setMessage(readUnknownError(error, "Impossible de charger les routeurs."));
         if (!isPersistent) setRouters(demoRouters);
       }
     }
@@ -123,7 +145,15 @@ export function RoutersPage() {
     return () => {
       mounted = false;
     };
-  }, [accountId, connectionRepository, isInitialized, isPersistent, routerRepository]);
+  }, [
+    accountId,
+    canEditRouter,
+    connectionRepository,
+    isInitialized,
+    isPersistent,
+    recoveryService,
+    routerRepository
+  ]);
 
   const accountRouters = useMemo(() => {
     const scopedRouters = listRoutersForAccount(routers, accountId);
@@ -303,9 +333,17 @@ export function RoutersPage() {
             routerConnectionInputsFromCard(created)
           );
         }
+        let cloudSuffix = "";
+        if (isPersistent && recoveryService) {
+          try {
+            await recoveryService.backupRouter(created.id);
+          } catch {
+            cloudSuffix = " Sauvegarde VPS en attente ; elle sera retentée automatiquement.";
+          }
+        }
         setRouters((current) => [created, ...current]);
         setMessage(
-          `${created.zoneName} ajouté. DNS Hotspot ${hotspotDns.action === "created" ? "créé" : "mis à jour"} : ${hotspotDns.dnsName}.`
+          `${created.zoneName} ajouté. DNS Hotspot ${hotspotDns.action === "created" ? "créé" : "mis à jour"} : ${hotspotDns.dnsName}.${cloudSuffix}`
         );
         setFormState(null);
       } catch (error) {
@@ -347,9 +385,17 @@ export function RoutersPage() {
         await routerRepository.update(routerRecordFromCard(updated));
         await connectionRepository.replaceForRouter(updated.id, routerConnectionInputsFromCard(updated));
       }
+      let cloudSuffix = "";
+      if (isPersistent && recoveryService) {
+        try {
+          await recoveryService.backupRouter(updated.id);
+        } catch {
+          cloudSuffix = " Sauvegarde VPS en attente ; elle sera retentée automatiquement.";
+        }
+      }
       setRouters((current) => current.map((router) => (router.id === updated.id ? updated : router)));
       setMessage(
-        `${updated.zoneName} modifié. DNS Hotspot ${hotspotDns.action === "created" ? "créé" : "mis à jour"} : ${hotspotDns.dnsName}.`
+        `${updated.zoneName} modifié. DNS Hotspot ${hotspotDns.action === "created" ? "créé" : "mis à jour"} : ${hotspotDns.dnsName}.${cloudSuffix}`
       );
       setFormState(null);
     } catch (error) {
@@ -461,6 +507,7 @@ export function RoutersPage() {
       requireProfilePermission(session, "global.routers.delete");
       if (isPersistent) {
         if (!accountId) throw new Error("Compte actif introuvable.");
+        await removeSaasRouterRecoverySnapshot(router.id);
         await routerRepository.remove(accountId, router.id);
       }
       setRouters((current) => current.filter((item) => item.id !== router.id));
@@ -661,6 +708,21 @@ export function RoutersPage() {
       />
     </div>
   );
+}
+
+function readUnknownError(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message.trim()) return error.message.trim();
+  if (typeof error === "string" && error.trim()) return error.trim();
+  if (error && typeof error === "object") {
+    const candidate = error as { error?: unknown; message?: unknown };
+    if (typeof candidate.message === "string" && candidate.message.trim()) {
+      return candidate.message.trim();
+    }
+    if (typeof candidate.error === "string" && candidate.error.trim()) {
+      return candidate.error.trim();
+    }
+  }
+  return fallback;
 }
 
 type RouterCardProps = {

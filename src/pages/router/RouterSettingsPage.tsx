@@ -27,6 +27,7 @@ import {
   type RouterAccessPolicySyncStatus
 } from "../../services/access";
 import { createPersistedRouterService, RouterServiceError } from "../../services/router";
+import { RouterCloudRecoveryService } from "../../services/recovery";
 import { encryptLocalSecret } from "../../services/security/localSecrets";
 import { Badge, Button, Card, DataListItem, PageHeader, PasswordField, StatusDot } from "../../shared/ui";
 import {
@@ -65,6 +66,12 @@ export function RouterSettingsPage() {
   const accessPolicySyncService = useMemo(
     () => new RouterAccessPolicySyncService(database),
     [database]
+  );
+  const recoveryService = useMemo(
+    () => session
+      ? new RouterCloudRecoveryService(database, session.account_id, session.internal_profile_id)
+      : null,
+    [database, session]
   );
   const [router, setRouter] = useState<RouterRecord | null>(null);
   const [settings, setSettings] = useState<RouterSettings>(defaultRouterSettings);
@@ -193,9 +200,17 @@ export function RouterSettingsPage() {
 
       setRouter(updated);
       setSettings(routerRecordToSettings(updated));
+      let cloudBackupPending = false;
+      try {
+        await recoveryService?.backupRouter(updated.id);
+      } catch {
+        cloudBackupPending = true;
+      }
       setFeedback({
         kind: "success",
-        text: "Paramètres enregistrés dans la base locale et connexion locale mise à jour."
+        text: cloudBackupPending
+          ? "Paramètres enregistrés localement. La sauvegarde VPS sera retentée à la prochaine connexion."
+          : "Paramètres enregistrés localement et sauvegardés sur le VPS."
       });
       setTestMessage("À retester");
     } catch (error) {

@@ -38,6 +38,14 @@ for env_file in "$INFRA_DIR/license-api/.env" "$INFRA_DIR/wireguard-hub/.env" "$
   fi
 done
 
+ROUTER_VAULT_KEY=$(sed -n 's/^ROUTER_VAULT_KEY=//p' "$INFRA_DIR/license-api/.env" 2>/dev/null | tail -n 1)
+ROUTER_VAULT_KEY_BYTES=$(printf '%s' "$ROUTER_VAULT_KEY" | base64 -d 2>/dev/null | wc -c | tr -d ' ')
+if [ "$ROUTER_VAULT_KEY_BYTES" = "32" ]; then
+  ok "coffre RouterOS configuré"
+else
+  fail "ROUTER_VAULT_KEY doit contenir 32 octets encodés en base64"
+fi
+
 WG_CONFIG="$INFRA_DIR/wireguard-hub/wireguard/wg0.conf"
 if [ ! -f "$WG_CONFIG" ]; then
   fail "$WG_CONFIG absent"

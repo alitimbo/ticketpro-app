@@ -47,6 +47,7 @@ WG_PUBLIC_KEY=$(printf '%s' "$WG_PRIVATE_KEY" | wg pubkey)
 HUB_MASTER_TOKEN=$(openssl rand -hex 32)
 LICENSE_MASTER_TOKEN=$(openssl rand -hex 32)
 LICENSE_HASH_SECRET=$(openssl rand -hex 48)
+ROUTER_VAULT_KEY=$(openssl rand -base64 32 | tr -d '\n')
 
 printf '%s\n' "$WG_PRIVATE_KEY" > "$INFRA_DIR/wireguard-hub/wireguard/server_private.key"
 printf '%s\n' "$WG_PUBLIC_KEY" > "$INFRA_DIR/wireguard-hub/wireguard/server_public.key"
@@ -77,6 +78,7 @@ printf '%s\n' "$WG_PUBLIC_KEY" > "$INFRA_DIR/wireguard-hub/wireguard/server_publ
   echo "APP_UPDATE_MANIFEST_PATH=/data/app-updates/stable.json"
   echo "LICENSE_MASTER_TOKEN=$LICENSE_MASTER_TOKEN"
   echo "LICENSE_HASH_SECRET=$LICENSE_HASH_SECRET"
+  echo "ROUTER_VAULT_KEY=$ROUTER_VAULT_KEY"
   echo "LICENSE_DEFAULT_ADMIN_PASSWORD=${LICENSE_DEFAULT_ADMIN_PASSWORD:-admin123}"
   echo "IPAY_BASE_URL=${IPAY_BASE_URL:-https://api.i-pay.money}"
   echo "IPAY_ENV=$IPAY_ENV"

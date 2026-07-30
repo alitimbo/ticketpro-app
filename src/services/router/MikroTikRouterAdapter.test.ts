@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { protectTicketPassword } from "../tickets";
+import { protectTicketPassword, resolveTicketPasswordValue } from "../tickets";
 import { MikroTikRouterAdapter, normalizeMikroTikError } from "./MikroTikRouterAdapter";
 import type { RouterOsApiRequest, RouterOsApiRow, RouterOsApiTransport } from "./RouterOsApiTransport";
 
@@ -14,6 +14,17 @@ class MockRouterOsTransport implements RouterOsApiTransport {
       const rows = this.responses["/ip/hotspot/ip-binding/print"] ?? [];
       const bindingId = String(request.params?.numbers ?? "");
       const index = rows.findIndex((row) => row[".id"] === bindingId || row.id === bindingId);
+      if (index >= 0) rows.splice(index, 1);
+      return [];
+    }
+    if (
+      request.command === "/ip/firewall/filter/remove"
+      || request.command === "/ipv6/firewall/filter/remove"
+    ) {
+      const printCommand = request.command.replace(/\/remove$/, "/print");
+      const rows = this.responses[printCommand] ?? [];
+      const ruleId = String(request.params?.numbers ?? "");
+      const index = rows.findIndex((row) => row[".id"] === ruleId || row.id === ruleId);
       if (index >= 0) rows.splice(index, 1);
       return [];
     }
@@ -138,6 +149,26 @@ describe("MikroTikRouterAdapter", () => {
       memoryTotal: 256,
       memoryUsed: 156
     });
+  });
+
+  it("convertit une durée RouterOS exprimée en semaines", async () => {
+    const adapter = createAdapter(new MockRouterOsTransport({
+      "/ip/hotspot/user/profile/print": [{
+        ".id": "*P7",
+        name: "7-jours",
+        "rate-limit": "2M/5M",
+        "session-timeout": "1w",
+        "shared-users": "1"
+      }]
+    }));
+
+    await expect(adapter.getHotspotPlans()).resolves.toEqual([
+      expect.objectContaining({
+        durationMinutes: 10_080,
+        profileName: "7-jours",
+        validityMinutes: 10_080
+      })
+    ]);
   });
 
   it("crée un utilisateur réel avec les limites RouterOS sans exposer le mot de passe", async () => {
@@ -437,6 +468,97 @@ describe("MikroTikRouterAdapter", () => {
     });
   });
 
+  it("protège immédiatement le vrai mot de passe lu lors d'une récupération RouterOS", async () => {
+    const adapter = createAdapter(new MockRouterOsTransport({
+      "/ip/hotspot/user/print": [{
+        ".id": "*U5",
+        name: "CLIENT01",
+        password: "Secret-987",
+        profile: "plan-3h"
+      }]
+    }));
+
+    const [user] = await adapter.listHotspotUsers();
+
+    expect(user.passwordSecretRef).not.toContain("Secret-987");
+    await expect(resolveTicketPasswordValue(user)).resolves.toBe("Secret-987");
+  });
+
+  it("détecte un tunnel TicketPro existant après une réinstallation locale", async () => {
+    const transport = new MockRouterOsTransport({
+      "/interface/wireguard/print": [{
+        ".id": "*WG1",
+        name: "ticketpro-vpn",
+        "public-key": "router-public"
+      }],
+      "/ip/address/print": [{
+        ".id": "*ADDR1",
+        address: "10.250.0.2/32",
+        interface: "ticketpro-vpn"
+      }],
+      "/interface/wireguard/peers/print": [{
+        ".id": "*PEER1",
+        interface: "ticketpro-vpn",
+        "public-key": "server-public"
+      }]
+    });
+    const adapter = createAdapter(transport);
+
+    await expect(adapter.getWireGuardInstallation("ticketpro-vpn")).resolves.toEqual({
+      assignedAddress: "10.250.0.2/32",
+      interfaceName: "ticketpro-vpn",
+      publicKey: "router-public",
+      serverPublicKeys: ["server-public"]
+    });
+  });
+
+  it("réadopte une interface WireGuard sans remplacer sa clé privée", async () => {
+    const transport = new MockRouterOsTransport({
+      "/interface/wireguard/print": [{
+        ".id": "*WG1",
+        name: "ticketpro-vpn",
+        "public-key": "router-public"
+      }],
+      "/ip/address/print": [{
+        ".id": "*ADDR1",
+        address: "10.250.0.2/32",
+        interface: "ticketpro-vpn"
+      }],
+      "/interface/wireguard/peers/print": [{
+        ".id": "*PEER1",
+        interface: "ticketpro-vpn",
+        "public-key": "server-public"
+      }],
+      "/ip/route/print": [{
+        ".id": "*ROUTE1",
+        "dst-address": "10.250.0.0/24"
+      }],
+      "/ip/firewall/filter/print": [{
+        ".id": "*FILTER1",
+        comment: "TicketPro WireGuard"
+      }]
+    });
+    const adapter = createAdapter(transport);
+
+    await adapter.provisionWireGuard({
+      assignedAddress: "10.250.0.2/32",
+      interfaceName: "ticketpro-vpn",
+      serverAllowedIps: "10.250.0.0/24",
+      serverEndpoint: "vpn.example.com",
+      serverPort: 51820,
+      serverPublicKey: "server-public"
+    });
+
+    const interfaceSet = transport.calls.find((call) => call.command === "/interface/wireguard/set");
+    expect(interfaceSet?.params).toEqual({
+      "listen-port": 13231,
+      numbers: "*WG1"
+    });
+    expect(transport.calls.some((call) => call.command === "/interface/wireguard/add")).toBe(false);
+    expect(transport.calls.some((call) => call.command === "/ip/address/add")).toBe(false);
+    expect(transport.calls.some((call) => call.command === "/interface/wireguard/peers/add")).toBe(false);
+  });
+
   it("verrouille puis libère un utilisateur Hotspot par adresse MAC", async () => {
     const transport = new MockRouterOsTransport({
       "/ip/hotspot/user/print": [{
@@ -592,6 +714,48 @@ describe("MikroTikRouterAdapter", () => {
     ]);
   });
 
+  it("lit l'état réel des protections et des bypass TicketPro", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/firewall/filter/print": [{
+        ".id": "*TP63",
+        comment: "TicketPro anti-tethering:IPv4 TTL 63",
+        disabled: "false"
+      }],
+      "/ipv6/firewall/filter/print": [{
+        ".id": "*TPV6",
+        comment: "TicketPro anti-tethering:IPv6 ether1",
+        disabled: "false"
+      }],
+      "/ip/hotspot/ip-binding/print": [
+        {
+          ".id": "*B1",
+          address: "192.168.88.10",
+          comment: "TicketPro infrastructure:antenna-1 Antenne nord (antenna)",
+          "mac-address": "AA:BB:CC:DD:EE:10",
+          type: "bypassed"
+        },
+        {
+          ".id": "*MANUAL",
+          comment: "Bypass installateur",
+          "mac-address": "AA:BB:CC:DD:EE:20"
+        }
+      ]
+    });
+    const adapter = createAdapter(transport);
+
+    await expect(adapter.getHotspotAntiTetheringState()).resolves.toEqual({
+      blockIpv4Ttl: true,
+      blockIpv6: true,
+      managedRuleCount: 2
+    });
+    await expect(adapter.listManagedHotspotBypasses()).resolves.toEqual([{
+      address: "192.168.88.10",
+      comment: "Antenne nord (antenna)",
+      id: "antenna-1",
+      macAddress: "AA:BB:CC:DD:EE:10"
+    }]);
+  });
+
   it("reprend automatiquement la syntaxe TTL des anciennes versions RouterOS", async () => {
     const calls: RouterOsApiRequest[] = [];
     const responses: Record<string, RouterOsApiRow[]> = {
@@ -666,5 +830,74 @@ describe("MikroTikRouterAdapter", () => {
         .filter((call) => call.command.endsWith("/remove"))
         .map((call) => call.params?.numbers)
     ).toEqual(["*TP63", "*TPV6"]);
+  });
+
+  it("retire réellement les règles TTL quand la case IPv4 est décochée", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/print": [{
+        ".id": "*HS1",
+        disabled: "false",
+        interface: "ether1",
+        name: "ticketpro-hotspot"
+      }],
+      "/ip/firewall/filter/print": [
+        {
+          ".id": "*TP63",
+          chain: "forward",
+          comment: "TicketPro anti-tethering:IPv4 TTL 63"
+        },
+        {
+          ".id": "*TP127",
+          chain: "forward",
+          comment: "TicketPro anti-tethering:IPv4 TTL 127"
+        },
+        {
+          ".id": "*MANUAL",
+          chain: "forward",
+          comment: "Blocage manuel TTL"
+        }
+      ],
+      "/ipv6/firewall/filter/print": [],
+      "/ip/hotspot/user/profile/print": []
+    });
+    const adapter = createAdapter(transport);
+
+    await adapter.configureHotspotAntiTethering({
+      blockIpv4Ttl: false,
+      blockIpv6: false,
+      enabled: true
+    });
+
+    expect(
+      transport.calls
+        .filter((call) => call.command === "/ip/firewall/filter/remove")
+        .map((call) => call.params?.numbers)
+    ).toEqual(["*TP63", "*TP127"]);
+    expect(
+      transport.calls.filter((call) => call.command === "/ip/firewall/filter/print")
+    ).toHaveLength(2);
+  });
+
+  it("refuse de confirmer la désactivation si RouterOS conserve une règle TTL", async () => {
+    const ttlRule = {
+      ".id": "*TP63",
+      chain: "forward",
+      comment: "TicketPro anti-tethering:IPv4 TTL 63"
+    };
+    const transport: RouterOsApiTransport = {
+      async call(request) {
+        if (request.command === "/ip/hotspot/print") return [];
+        if (request.command === "/ip/firewall/filter/print") return [ttlRule];
+        if (request.command === "/ipv6/firewall/filter/print") return [];
+        return [];
+      }
+    };
+    const adapter = createAdapter(transport);
+
+    await expect(adapter.configureHotspotAntiTethering({
+      blockIpv4Ttl: false,
+      blockIpv6: false,
+      enabled: false
+    })).rejects.toThrow("RouterOS kept a TicketPro anti-tethering rule after removal");
   });
 });

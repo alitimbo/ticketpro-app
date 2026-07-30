@@ -116,6 +116,25 @@ before(async () => {
       }));
       return;
     }
+    if (request.url === "/v1/peers/list") {
+      response.end(JSON.stringify({
+        account_id: body.account_id,
+        peers: [{
+          assigned_address: "10.250.7.3/32",
+          name: "PC récupéré",
+          peer_type: "operator",
+          public_key: "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=",
+          status: "active"
+        }, {
+          assigned_address: "10.250.7.2/32",
+          name: "Routeur masqué",
+          peer_type: "router",
+          public_key: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+          status: "active"
+        }]
+      }));
+      return;
+    }
     response.end(JSON.stringify({
       account_id: body.account_id,
       address_pool: "10.250.7.0/24",
@@ -136,6 +155,7 @@ before(async () => {
       APP_UPDATE_MANIFEST_PATH: updateManifestPath,
       LICENSE_MASTER_TOKEN: masterToken,
       LICENSE_HASH_SECRET: "integration-hash-secret-at-least-32-characters",
+      ROUTER_VAULT_KEY: Buffer.alloc(32, 7).toString("base64"),
       IPAY_BASE_URL: `http://127.0.0.1:${ipayPort}`,
       IPAY_ENV: "test",
       IPAY_PUBLIC_KEY: "ipay-public-test",
@@ -223,7 +243,9 @@ test("l'essai SaaS dure 7 jours, limite à un routeur et un forfait payant le re
   });
   assert.equal(trial.status, 200);
   assert.equal(trial.payload.organization.status, "active");
-  assert.equal(trial.payload.subscription.status, "active");
+  assert.equal(trial.payload.subscription.status, "trial");
+  assert.equal(trial.payload.subscription.is_trial, true);
+  assert.equal(trial.payload.subscription.grace_period_end, null);
   assert.equal(trial.payload.subscription.router_limit, 1);
   assert.equal(trial.payload.subscription.plan.code, "TRIAL-7D");
   assert.equal(trial.payload.access.can_manage_routers, true);
@@ -279,6 +301,34 @@ test("l'essai SaaS dure 7 jours, limite à un routeur et un forfait payant le re
     }
   });
   assert.equal(secondTrial.status, 409);
+
+  const expiringTrial = await api("/v1/saas/register-trial", {
+    body: {
+      organization_name: "Essai Sans Grâce",
+      name: "Client Sans Grâce",
+      email: "trial.expired@example.com",
+      password: "EssaiExpire123",
+      confirm_password: "EssaiExpire123"
+    }
+  });
+  assert.equal(expiringTrial.status, 200);
+  const trialDb = new DatabaseSync(databasePath);
+  trialDb.prepare(`
+    UPDATE organization_subscriptions
+    SET current_period_end = ?, updated_at = ?
+    WHERE organization_id = ?
+  `).run(
+    new Date(Date.now() - 60_000).toISOString(),
+    new Date().toISOString(),
+    expiringTrial.payload.organization.id
+  );
+  trialDb.close();
+  const expiredTrialServices = await api("/v1/saas/services/access", {
+    method: "GET",
+    token: expiringTrial.payload.session.token
+  });
+  assert.equal(expiredTrialServices.status, 402);
+  assert.equal(expiredTrialServices.payload.details.subscription.is_trial, true);
 });
 
 test("les politiques réseau sont versionnées, isolées par organisation et protégées contre les conflits", async () => {
@@ -293,7 +343,7 @@ test("les politiques réseau sont versionnées, isolées par organisation et pro
   });
   assert.equal(owner.status, 200);
   const policy = {
-    antiSharingMode: "observe",
+    antiSharingMode: "strict",
     infrastructureDevices: [{
       id: "antenna-north",
       internetBypass: true,
@@ -329,6 +379,38 @@ test("les politiques réseau sont versionnées, isolées par organisation et pro
   assert.equal(fetched.status, 200);
   assert.equal(fetched.payload.policy.policy.lockVoucherToFirstMac, true);
 
+  const ttlDisabledPolicy = {
+    ...policy,
+    monitorIpv4Ttl: false
+  };
+  const updated = await api("/v1/saas/router-access-policy", {
+    token: owner.payload.session.token,
+    body: {
+      base_revision: 1,
+      policy: ttlDisabledPolicy,
+      router_id: "router-shared-name"
+    }
+  });
+  assert.equal(updated.status, 200);
+  assert.equal(updated.payload.policy.revision, 2);
+  assert.equal(updated.payload.policy.policy.monitorIpv4Ttl, false);
+
+  const history = await api(
+    "/v1/saas/router-access-policy/history?router_id=router-shared-name",
+    { method: "GET", token: owner.payload.session.token }
+  );
+  assert.equal(history.status, 200);
+  assert.deepEqual(
+    history.payload.history.map((entry) => ({
+      revision: entry.revision,
+      monitorIpv4Ttl: entry.policy.monitorIpv4Ttl
+    })),
+    [
+      { revision: 2, monitorIpv4Ttl: false },
+      { revision: 1, monitorIpv4Ttl: true }
+    ]
+  );
+
   const conflict = await api("/v1/saas/router-access-policy", {
     token: owner.payload.session.token,
     body: {
@@ -339,12 +421,12 @@ test("les politiques réseau sont versionnées, isolées par organisation et pro
   });
   assert.equal(conflict.status, 409);
   assert.equal(conflict.payload.details.code, "ROUTER_ACCESS_POLICY_CONFLICT");
-  assert.equal(conflict.payload.details.remote_policy.revision, 1);
+  assert.equal(conflict.payload.details.remote_policy.revision, 2);
 
   const invalidNatBypass = await api("/v1/saas/router-access-policy", {
     token: owner.payload.session.token,
     body: {
-      base_revision: 1,
+      base_revision: 2,
       policy: {
         ...policy,
         infrastructureDevices: [{
@@ -372,6 +454,125 @@ test("les politiques réseau sont versionnées, isolées par organisation et pro
   );
   assert.equal(isolatedRead.status, 200);
   assert.equal(isolatedRead.payload.policy, null);
+});
+
+test("le coffre cloud restaure le parc, les plans et le VPN sans exposer les secrets dans SQLite", async () => {
+  const owner = await api("/v1/saas/register-trial", {
+    body: {
+      organization_name: "Reprise Parc A",
+      name: "Propriétaire Reprise",
+      email: "recovery.owner@example.com",
+      password: "RepriseSimple123",
+      confirm_password: "RepriseSimple123"
+    }
+  });
+  assert.equal(owner.status, 200);
+  const routerSnapshot = {
+    id: "router-original",
+    stable_identity: "serial:CHR-RECOVERY-001",
+    name: "Site central",
+    label: "Site central",
+    model: "CCR2004",
+    board_name: "CCR2004-1G-12S+2XS",
+    serial_number: "CHR-RECOVERY-001",
+    routeros_version: "7.20",
+    local_ip: "192.168.88.1",
+    hotspot_address: "wifi.central.test",
+    notes: "Routeur principal",
+    api_port: 8728,
+    api_ssl_port: 8729,
+    username: "ticketpro",
+    credential: "SecretRouterOS-123",
+    connection_mode: "vpn",
+    status: "active",
+    last_seen_at: "2026-07-29T12:00:00.000Z",
+    connections: [
+      { mode: "local", host: "192.168.88.1", port: 8728, use_ssl: false, status: "inactive" },
+      { mode: "vpn", host: "10.250.7.2", port: 8728, use_ssl: false, status: "active" }
+    ],
+    plans: [{
+      id: "plan-6h",
+      name: "6 heures",
+      duration_minutes: 360,
+      validity_minutes: 1440,
+      data_limit_mb: null,
+      download_limit: "5M",
+      upload_limit: "2M",
+      shared_users: 1,
+      price_hint: 500,
+      mikrotik_profile_name: "6h",
+      status: "active"
+    }],
+    vpn: {
+      assigned_address: "10.250.7.2/32",
+      public_key: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+      status: "active"
+    }
+  };
+  const saved = await api("/v1/saas/routers/snapshot", {
+    token: owner.payload.session.token,
+    body: { router: routerSnapshot }
+  });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.payload.router.id, "router-original");
+  assert.equal(saved.payload.router.credential, "SecretRouterOS-123");
+
+  const recovered = await api("/v1/saas/routers/recovery", {
+    method: "GET",
+    token: owner.payload.session.token
+  });
+  assert.equal(recovered.status, 200);
+  assert.equal(recovered.payload.routers.length, 1);
+  assert.equal(recovered.payload.routers[0].plans[0].mikrotik_profile_name, "6h");
+  assert.equal(recovered.payload.routers[0].vpn.assigned_address, "10.250.7.2/32");
+  assert.equal(recovered.payload.routers[0].credential, "SecretRouterOS-123");
+
+  const database = new DatabaseSync(databasePath);
+  const stored = database.prepare(
+    "SELECT credential_ciphertext FROM organization_routers WHERE id = ?"
+  ).get("router-original");
+  database.close();
+  assert.ok(stored.credential_ciphertext.startsWith("v1."));
+  assert.equal(stored.credential_ciphertext.includes("SecretRouterOS-123"), false);
+
+  const deduplicated = await api("/v1/saas/routers/snapshot", {
+    token: owner.payload.session.token,
+    body: {
+      router: {
+        ...routerSnapshot,
+        id: "router-after-reinstall",
+        name: "Site central restauré"
+      }
+    }
+  });
+  assert.equal(deduplicated.status, 200);
+  assert.equal(deduplicated.payload.router.id, "router-original");
+  assert.equal(deduplicated.payload.router.name, "Site central restauré");
+
+  const removed = await api("/v1/saas/routers/remove", {
+    token: owner.payload.session.token,
+    body: { router_id: "router-original" }
+  });
+  assert.equal(removed.status, 200);
+  const emptyRecovery = await api("/v1/saas/routers/recovery", {
+    method: "GET",
+    token: owner.payload.session.token
+  });
+  assert.equal(emptyRecovery.payload.routers.length, 0);
+
+  const reactivated = await api("/v1/saas/routers/snapshot", {
+    token: owner.payload.session.token,
+    body: {
+      router: {
+        ...routerSnapshot,
+        id: "router-after-second-install",
+        credential: "SecretRouterOS-456"
+      }
+    }
+  });
+  assert.equal(reactivated.status, 200);
+  assert.equal(reactivated.payload.router.id, "router-original");
+  assert.equal(reactivated.payload.router.credential, "SecretRouterOS-456");
 });
 
 test("une inscription abandonnée sans essai ni paiement ne peut pas ouvrir de session", async () => {
@@ -605,6 +806,16 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
   assert.equal(saasPeer.payload.assigned_address, "10.250.7.2/32");
   assert.equal(hubRequests.at(-1).body.account_id, completion.payload.organization.id);
 
+  const saasOperatorPeers = await api("/v1/saas/vpn/peers", {
+    method: "GET",
+    token: sessionToken
+  });
+  assert.equal(saasOperatorPeers.status, 200);
+  assert.equal(saasOperatorPeers.payload.peers.length, 1);
+  assert.equal(saasOperatorPeers.payload.peers[0].name, "PC récupéré");
+  assert.equal(saasOperatorPeers.payload.peers[0].peer_type, "operator");
+  assert.equal(hubRequests.at(-1).url, "/v1/peers/list");
+
   const login = await api("/v1/saas/auth/login", {
     body: {
       email: "amina.saas@example.com",
@@ -654,6 +865,33 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
     completion.payload.organization.id
   );
   integrationDb.close();
+
+  const graceServices = await api("/v1/saas/services/access", {
+    method: "GET",
+    token: loginAfterReset.payload.session.token
+  });
+  assert.equal(graceServices.status, 200);
+
+  const graceAccount = await api("/v1/saas/auth/me", {
+    method: "GET",
+    token: loginAfterReset.payload.session.token
+  });
+  assert.equal(graceAccount.status, 200);
+  assert.equal(graceAccount.payload.subscription.status, "grace_period");
+  assert.equal(graceAccount.payload.subscription.is_active, true);
+  assert.equal(graceAccount.payload.subscription.grace_days_remaining, 7);
+
+  const expiredDb = new DatabaseSync(databasePath);
+  expiredDb.prepare(`
+    UPDATE organization_subscriptions
+    SET current_period_end = ?, updated_at = ?
+    WHERE organization_id = ?
+  `).run(
+    new Date(Date.now() - 8 * 86_400_000).toISOString(),
+    new Date().toISOString(),
+    completion.payload.organization.id
+  );
+  expiredDb.close();
 
   const expiredServices = await api("/v1/saas/services/access", {
     method: "GET",

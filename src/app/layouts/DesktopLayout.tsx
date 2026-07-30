@@ -6,6 +6,7 @@ import { getRouterNavigation, globalNavigation } from "../navigation/routes";
 import { Button, SidebarItem, StatusDot } from "../../shared/ui";
 import ticketProLogo from "../../../src-tauri/icons/icon.png";
 import { AppUpdateNotice } from "./AppUpdateNotice";
+import { WireGuardRecoveryBootstrap } from "./WireGuardRecoveryBootstrap";
 
 type DesktopLayoutProps = {
   scope: "global" | "router";
@@ -30,6 +31,7 @@ export function DesktopLayout({ scope }: DesktopLayoutProps) {
 
   return (
     <div className={sidebarCollapsed ? "app-shell app-shell--sidebar-collapsed" : "app-shell"}>
+      <WireGuardRecoveryBootstrap />
       <aside className="sidebar" aria-label="Navigation principale">
         <div className="sidebar__brand">
           <img className="sidebar__mark" src={ticketProLogo} alt="" aria-hidden="true" />

@@ -12,6 +12,7 @@ import {
   ShieldOff
 } from "lucide-react";
 import { useAuth } from "../../app/auth/AuthProvider";
+import type { AuthSession } from "../../domain/auth";
 import type { RouterRecord, VpnNetworkRecord, VpnPeerRecord } from "../../domain/database";
 import {
   RouterConnectionRepository,
@@ -35,6 +36,11 @@ import { bootstrapSaasVpn, revokeSaasVpnPeer, upsertSaasVpnPeer } from "../../se
 import { Badge, Button, Card, EmptyState, PageHeader } from "../../shared/ui";
 import { decryptLocalSecret } from "../../services/security/localSecrets";
 import { RouterService } from "../../services/router";
+import {
+  RouterCloudRecoveryService,
+  RouterStateReconciliationService,
+  WireGuardOperatorRecoveryService
+} from "../../services/recovery";
 
 type NetworkForm = {
   name: string;
@@ -60,6 +66,22 @@ export function VpnPage() {
   const peerRepository = useMemo(() => new VpnPeerRepository(database), [database]);
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
   const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
+  const recoveryService = useMemo(
+    () => accountId && session
+      ? new RouterCloudRecoveryService(database, accountId, session.internal_profile_id)
+      : null,
+    [accountId, database, session]
+  );
+  const reconciliationService = useMemo(
+    () => session ? new RouterStateReconciliationService(database, session) : null,
+    [database, session]
+  );
+  const operatorRecoveryService = useMemo(
+    () => accountId
+      ? new WireGuardOperatorRecoveryService(database, accountId)
+      : null,
+    [accountId, database]
+  );
   const [network, setNetwork] = useState<VpnNetworkRecord | null>(null);
   const [peers, setPeers] = useState<VpnPeerRecord[]>([]);
   const [routers, setRouters] = useState<RouterRecord[]>([]);
@@ -71,6 +93,8 @@ export function VpnPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
   const bootstrapAccountRef = useRef<string | null>(null);
+  const operatorRecoveryRef = useRef<string | null>(null);
+  const routerValidationRef = useRef<string | null>(null);
 
   const load = async () => {
     if (!accountId || !isInitialized) return;
@@ -140,6 +164,38 @@ export function VpnPage() {
     void saveNetwork();
   }, [accountId, isLoaded, network]);
 
+  useEffect(() => {
+    if (!accountId || !network || !operatorRecoveryService || !isInitialized) return;
+    const recoveryKey = `${accountId}:${network.id}`;
+    if (operatorRecoveryRef.current === recoveryKey) return;
+    operatorRecoveryRef.current = recoveryKey;
+
+    void operatorRecoveryService.recover(network)
+      .then(async (result) => {
+        if (result.adopted > 0 || result.removedRevoked > 0) {
+          await load();
+        }
+        if (result.adopted > 0) {
+          setMessage(
+            `${result.adopted} tunnel(s) WireGuard existant(s) récupéré(s) automatiquement sur ce PC.`
+          );
+        }
+        if (result.unresolved > 0) {
+          setError(
+            `${result.unresolved} tunnel(s) TicketPro installé(s) n'appartiennent pas au compte actif ou ne peuvent pas être identifiés. Ils ont été conservés par sécurité.`
+          );
+        }
+      })
+      .catch((recoveryError: unknown) => {
+        operatorRecoveryRef.current = null;
+        setError(
+          recoveryError instanceof Error
+            ? recoveryError.message
+            : "La récupération du tunnel WireGuard existant a échoué."
+        );
+      });
+  }, [accountId, isInitialized, network, operatorRecoveryService]);
+
   const persistVpnConnection = async (
     router: RouterRecord,
     host: string,
@@ -190,22 +246,25 @@ export function VpnPage() {
   };
 
   const validateDraftRouterPeers = async (): Promise<number> => {
-    if (!accountId) return 0;
-    let activatedCount = 0;
-
-    for (const routerPeer of peers.filter(
+    if (!accountId || !session || !reconciliationService) return 0;
+    const draftRouterPeers = peers.filter(
       (peer) => peer.peer_type === "router" && peer.status === "draft" && peer.router_id
-    )) {
+    );
+    const results = await mapWithConcurrency(draftRouterPeers, 8, async (routerPeer) => {
       const router = routers.find((item) => item.id === routerPeer.router_id);
-      if (!router) continue;
+      if (!router) return false;
       const vpnHost = routerPeer.assigned_address.split("/")[0];
 
       try {
         const password = await decryptLocalSecret(router.encrypted_password);
-        await verifyRouterOverVpn(router, vpnHost, password);
+        await verifyRouterOverVpn(router, vpnHost, password, 3);
+        await reconciliationService.reconcile(
+          router,
+          createRouterService(router, vpnHost, 8728, password, session)
+        );
         await persistVpnConnection(router, vpnHost, true, null);
         await peerRepository.updateStatus(accountId, routerPeer.id, "active");
-        activatedCount += 1;
+        return true;
       } catch (validationError) {
         await persistVpnConnection(
           router,
@@ -213,11 +272,44 @@ export function VpnPage() {
           false,
           validationError instanceof Error ? validationError.message : "Validation distante impossible."
         );
+        return false;
       }
-    }
+    });
 
-    return activatedCount;
+    return results.filter(Boolean).length;
   };
+
+  useEffect(() => {
+    const activeOperators = peers
+      .filter((peer) => peer.peer_type === "operator" && peer.status === "active")
+      .map((peer) => peer.id)
+      .sort();
+    const draftRouters = peers
+      .filter((peer) => peer.peer_type === "router" && peer.status === "draft")
+      .map((peer) => peer.id)
+      .sort();
+    if (activeOperators.length === 0 || draftRouters.length === 0) return;
+    const validationKey = `${activeOperators.join(",")}:${draftRouters.join(",")}`;
+    if (routerValidationRef.current === validationKey) return;
+    routerValidationRef.current = validationKey;
+    void validateDraftRouterPeers()
+      .then(async (activatedRouters) => {
+        await load();
+        if (activatedRouters > 0) {
+          setMessage(
+            `${activatedRouters} routeur(s) restauré(s) et validé(s) automatiquement via le tunnel WireGuard récupéré.`
+          );
+        }
+      })
+      .catch((validationError: unknown) => {
+        routerValidationRef.current = null;
+        setError(
+          validationError instanceof Error
+            ? validationError.message
+            : "La validation automatique des routeurs restaurés a échoué."
+        );
+      });
+  }, [peers, routers]);
 
   const createRouterPeer = async () => {
     if (!accountId || !network) {
@@ -235,25 +327,40 @@ export function VpnPage() {
     }
 
     let remotePublicKey: string | null = null;
+    let shouldRollbackRemotePeer = false;
     let localPeerId: string | null = null;
     try {
       setError(null);
       setMessage("Provisionnement WireGuard du MikroTik en cours…");
-      const keyPair = generateWireGuardKeyPair();
+      const routerPassword = await decryptLocalSecret(router.encrypted_password);
+      const routerService = createRouterService(
+        router,
+        router.local_ip,
+        router.api_port,
+        routerPassword,
+        session
+      );
+      const existingInstallation = await routerService.getWireGuardInstallation("ticketpro-vpn");
+      const keyPair = existingInstallation ? null : generateWireGuardKeyPair();
+      const publicKey = existingInstallation?.publicKey ?? keyPair?.publicKey;
+      if (!publicKey) {
+        throw new Error("La clé publique WireGuard du MikroTik est introuvable.");
+      }
       const remotePeer = await upsertSaasVpnPeer({
         name: router.name,
         peerType: "router",
-        publicKey: keyPair.publicKey
+        publicKey
       });
       if (!remotePeer.assigned_address) {
         throw new Error("Le serveur VPN n'a pas attribué d'adresse au routeur.");
       }
-      remotePublicKey = keyPair.publicKey;
+      remotePublicKey = publicKey;
+      shouldRollbackRemotePeer = Boolean(keyPair);
       const assignmentConflicts = await peerRepository.findAssignmentConflicts(
         accountId,
         network.id,
         remotePeer.assigned_address,
-        keyPair.publicKey
+        publicKey
       );
       const peer = await peerRepository.create({
         id: `vpn-peer-${crypto.randomUUID()}`,
@@ -262,8 +369,8 @@ export function VpnPage() {
         router_id: router.id,
         peer_type: "router",
         name: router.name,
-        public_key: keyPair.publicKey,
-        private_key_encrypted: await protectWireGuardPrivateKey(keyPair.privateKey),
+        public_key: publicKey,
+        private_key_encrypted: keyPair ? await protectWireGuardPrivateKey(keyPair.privateKey) : null,
         assigned_address: remotePeer.assigned_address,
         allowed_ips: remotePeer.assigned_address,
         endpoint_address: null,
@@ -273,12 +380,10 @@ export function VpnPage() {
       });
       await reconcileConflictingLocalPeers(assignmentConflicts);
       localPeerId = peer.id;
-      const privateKey = await revealWireGuardPrivateKey(peer.private_key_encrypted ?? "");
-      const routerPassword = await decryptLocalSecret(router.encrypted_password);
-      await createRouterService(router, router.local_ip, router.api_port, routerPassword).provisionWireGuard({
+      await routerService.provisionWireGuard({
         assignedAddress: peer.assigned_address,
         interfaceName: "ticketpro-vpn",
-        privateKey,
+        privateKey: keyPair?.privateKey,
         serverAllowedIps: network.address_pool,
         serverEndpoint: network.server_endpoint,
         serverPort: network.server_port,
@@ -297,6 +402,10 @@ export function VpnPage() {
       if (peers.some((item) => item.peer_type === "operator" && item.status === "active")) {
         try {
           await verifyRouterOverVpn(router, vpnHost, routerPassword);
+          await reconciliationService?.reconcile(
+            router,
+            createRouterService(router, vpnHost, 8728, routerPassword, session)
+          );
           await persistVpnConnection(router, vpnHost, true, null);
           await peerRepository.updateStatus(accountId, peer.id, "active");
           validatedNow = true;
@@ -305,14 +414,26 @@ export function VpnPage() {
         }
       }
 
+      let cloudBackupPending = false;
+      try {
+        await recoveryService?.backupRouter(router.id);
+      } catch {
+        cloudBackupPending = true;
+      }
       await load();
+      const provisioningMessage = validatedNow
+          ? existingInstallation
+            ? `Tunnel VPN existant récupéré et connexion RouterOS distante validée pour ${router.name}.`
+            : `Pair VPN créé et connexion RouterOS distante validée pour ${router.name}.`
+          : existingInstallation
+            ? `Tunnel VPN existant récupéré pour ${router.name}. Activez un poste opérateur pour valider la connexion distante.`
+            : `Pair VPN injecté dans ${router.name}. Activez un poste opérateur pour valider la connexion distante.`;
       setMessage(
-        validatedNow
-          ? `Pair VPN créé et connexion RouterOS distante validée pour ${router.name}.`
-          : `Pair VPN injecté dans ${router.name}. Activez un poste opérateur pour valider la connexion distante.`
+        provisioningMessage
+        + (cloudBackupPending ? " Sauvegarde VPS en attente de reconnexion." : "")
       );
     } catch (peerError: unknown) {
-      if (remotePublicKey) {
+      if (remotePublicKey && shouldRollbackRemotePeer) {
         try {
           await revokeSaasVpnPeer({ peerType: "router", publicKey: remotePublicKey });
           if (localPeerId) await peerRepository.updateStatus(accountId, localPeerId, "revoked");
@@ -386,11 +507,11 @@ export function VpnPage() {
         }
       }
 
-      let activatedRouters = 0;
+      let validationStarted = false;
       if (wireGuardAvailable) {
         await startWireGuardTunnel(tunnelName, operatorConfig);
         await peerRepository.updateStatus(accountId, peer.id, "active");
-        activatedRouters = await validateDraftRouterPeers();
+        validationStarted = true;
       } else {
         downloadText(operatorConfig, `${safeFileName(peer.name)}-wireguard.conf`);
       }
@@ -399,9 +520,26 @@ export function VpnPage() {
       await load();
       setMessage(
         wireGuardAvailable
-          ? `Profil ${peer.name} activé. ${activatedRouters} routeur(s) distant(s) validé(s).`
+          ? `Profil ${peer.name} activé. Validation et restauration des routeurs en arrière-plan…`
           : `Profil ${peer.name} créé en brouillon. Importez le fichier généré dans WireGuard pour l'activer.`
       );
+      if (validationStarted) {
+        void validateDraftRouterPeers()
+          .then(async (activatedRouters) => {
+            await load();
+            setMessage(
+              `Profil ${peer.name} activé. ${activatedRouters} routeur(s) distant(s) `
+              + "validé(s) et réconcilié(s) avec leur état MikroTik réel."
+            );
+          })
+          .catch((validationError: unknown) => {
+            setError(
+              validationError instanceof Error
+                ? validationError.message
+                : "La restauration distante n'a pas pu être terminée."
+            );
+          });
+      }
     } catch (peerError: unknown) {
       if (remotePublicKey) {
         try {
@@ -592,8 +730,15 @@ export function VpnPage() {
   );
 }
 
-function createRouterService(router: RouterRecord, host: string, port: number, password: string): RouterService {
+function createRouterService(
+  router: RouterRecord,
+  host: string,
+  port: number,
+  password: string,
+  authSession?: AuthSession | null
+): RouterService {
   return new RouterService({
+    authSession,
     mikrotik: {
       connectionMode: host === router.local_ip ? "local" : "vpn",
       host,
@@ -618,21 +763,53 @@ async function stopConflictingOperatorTunnels(conflicts: VpnPeerRecord[]): Promi
   }
 }
 
-async function verifyRouterOverVpn(router: RouterRecord, host: string, password: string): Promise<void> {
+async function verifyRouterOverVpn(
+  router: RouterRecord,
+  host: string,
+  password: string,
+  maximumAttempts = 10
+): Promise<void> {
   let lastError: unknown = null;
-  for (let attempt = 0; attempt < 10; attempt += 1) {
+  for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
     try {
       await createRouterService(router, host, 8728, password).testConnection();
       return;
     } catch (validationError) {
       lastError = validationError;
-      await delay(1500);
+      if (attempt + 1 < maximumAttempts) {
+        await delay(1500);
+      }
     }
   }
 
   throw new Error(
     `RouterOS ne répond pas sur ${host}:8728 via WireGuard. Vérifiez le handshake, le firewall input et le service API. ${lastError instanceof Error ? lastError.message : ""}`.trim()
   );
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  operation: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  const worker = async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await operation(items[index]);
+    }
+  };
+
+  await Promise.all(
+    Array.from(
+      { length: Math.min(Math.max(concurrency, 1), items.length) },
+      () => worker()
+    )
+  );
+  return results;
 }
 
 function delay(milliseconds: number): Promise<void> {

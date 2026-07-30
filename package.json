@@ -10,7 +10,7 @@
     "lint": "tsc --noEmit",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:license-api": "node --test infra/license-api/server.integration.mjs",
+    "test:license-api": "node --test infra/license-api/subscription-notification-policy.node-test.mjs infra/license-api/server.integration.mjs",
     "type-check": "tsc --noEmit",
     "version:set": "node scripts/set-version.mjs",
     "tauri": "tauri",

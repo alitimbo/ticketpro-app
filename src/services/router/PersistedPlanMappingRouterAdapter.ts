@@ -107,8 +107,16 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
     return this.delegate.configureHotspotAntiTethering(config);
   }
 
+  getHotspotAntiTetheringState() {
+    return this.delegate.getHotspotAntiTetheringState();
+  }
+
   upsertHotspotBypass(binding: import("../../domain/router").HotspotBypassBinding) {
     return this.delegate.upsertHotspotBypass(binding);
+  }
+
+  listManagedHotspotBypasses() {
+    return this.delegate.listManagedHotspotBypasses();
   }
 
   removeHotspotBypass(id: string, macAddress: string) {
@@ -133,6 +141,10 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
 
   getRouterDateTime() {
     return this.delegate.getRouterDateTime();
+  }
+
+  getWireGuardInstallation(interfaceName: string) {
+    return this.delegate.getWireGuardInstallation(interfaceName);
   }
 
   provisionWireGuard(config: RouterWireGuardConfig) {

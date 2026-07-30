@@ -44,6 +44,7 @@ import {
   type PlanFormValues,
   type PlanViewModel
 } from "./plansPageModel";
+import { RouterCloudRecoveryService } from "../../services/recovery";
 
 type PlanFormState = {
   error: string | null;
@@ -68,6 +69,12 @@ export function PlansPage() {
   const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
   const ticketRepository = useMemo(() => new TicketRepository(database), [database]);
+  const recoveryService = useMemo(
+    () => session
+      ? new RouterCloudRecoveryService(database, session.account_id, session.internal_profile_id)
+      : null,
+    [database, session]
+  );
   const service = useMemo(
     () =>
       new RouterService({
@@ -100,6 +107,15 @@ export function PlansPage() {
     });
     setPersistedService(serviceForRouter);
     return serviceForRouter;
+  };
+
+  const backupRouterSnapshot = async () => {
+    if (!isPersistent || !recoveryService) return;
+    try {
+      await recoveryService.backupRouter(routerId);
+    } catch {
+      setMessage("Plan enregistré ; sauvegarde VPS en attente de reconnexion.");
+    }
   };
 
   useEffect(() => {
@@ -213,8 +229,34 @@ export function PlansPage() {
     try {
       if (isPersistent) {
         const activeService = await getPersistedService();
-        const draft = formValuesToPlanDraft(planToFormValues(plan));
-        await updateRemotePlanIdempotently(activeService, plan.profileName, draft);
+        let draft = formValuesToPlanDraft(planToFormValues(plan));
+        if (plan.syncStatus === "synced") {
+          const remotePlan = (await activeService.getHotspotPlans()).find(
+            (candidate) =>
+              candidate.profileName === plan.profileName
+              || candidate.id === plan.profileName
+          );
+          if (!remotePlan) {
+            throw new Error("Le profil est absent du MikroTik.");
+          }
+          // Pour un plan déjà synchronisé, le bouton relit RouterOS. Le nom
+          // commercial et le prix restent locaux, car RouterOS ne les stocke
+          // pas toujours dans le profil Hotspot.
+          draft = {
+            dataLimitMb: remotePlan.dataLimitMb,
+            downloadLimit: remotePlan.downloadLimit,
+            durationMinutes: remotePlan.durationMinutes,
+            name: plan.name,
+            priceHint: plan.priceHint,
+            profileName: remotePlan.profileName,
+            sharedUsers: remotePlan.sharedUsers,
+            status: remotePlan.status,
+            uploadLimit: remotePlan.uploadLimit,
+            validityMinutes: remotePlan.validityMinutes
+          };
+        } else {
+          await updateRemotePlanIdempotently(activeService, plan.profileName, draft);
+        }
         const record = await planRepository.update({
           ...planRecordFromDraft(draft, routerId, plan.id, "synced")
         });
@@ -223,10 +265,15 @@ export function PlansPage() {
           current.map((item) => (item.id === plan.id ? syncedPlan : item))
         );
         setSelectedPlan((current) => (current?.id === plan.id ? syncedPlan : current));
+        await backupRouterSnapshot();
       } else {
         await service.updateHotspotPlan(plan.id, { status: plan.status });
       }
-      setMessage(`${plan.name} synchronisé avec RouterOS.`);
+      setMessage(
+        plan.syncStatus === "synced"
+          ? `${plan.name} actualisé depuis RouterOS.`
+          : `${plan.name} synchronisé vers RouterOS.`
+      );
     } catch (error) {
       setMessage(
         error instanceof Error
@@ -274,6 +321,7 @@ export function PlansPage() {
       const viewModel = created;
 
       setPlans((current) => [viewModel, ...current]);
+      if (isPersistent) await backupRouterSnapshot();
       setMessage(`${viewModel.name} créé.`);
     } else if (formState.plan) {
       let syncStatus: PlanViewModel["syncStatus"] = isPersistent ? "pending" : "synced";
@@ -300,6 +348,7 @@ export function PlansPage() {
       const viewModel = updated;
 
       setPlans((current) => current.map((plan) => (plan.id === viewModel.id ? viewModel : plan)));
+      if (isPersistent) await backupRouterSnapshot();
       setMessage(`${viewModel.name} modifié.`);
     }
 
@@ -334,6 +383,7 @@ export function PlansPage() {
     const copy = created;
 
     setPlans((current) => [copy, ...current]);
+    if (isPersistent) await backupRouterSnapshot();
     setMessage(`${plan.name} dupliqué.`);
   };
 
@@ -365,6 +415,7 @@ export function PlansPage() {
     setPlans((current) =>
       current.map((item) => (item.id === plan.id ? updated : item))
     );
+    if (isPersistent) await backupRouterSnapshot();
     const action = nextStatus === "disabled" ? "désactivé" : "réactivé";
     setMessage(
       syncStatus === "synced"
@@ -394,6 +445,7 @@ export function PlansPage() {
         return;
       }
       await planRepository.remove(plan.id);
+      await backupRouterSnapshot();
     } else {
       await service.deleteHotspotPlan(plan.id);
     }

@@ -32,11 +32,18 @@ export type RouterConnectionTest = {
 export type RouterWireGuardConfig = {
   assignedAddress: string;
   interfaceName: string;
-  privateKey: string;
+  privateKey?: string;
   serverAllowedIps: string;
   serverEndpoint: string;
   serverPort: number;
   serverPublicKey: string;
+};
+
+export type RouterWireGuardInstallation = {
+  assignedAddress: string | null;
+  interfaceName: string;
+  publicKey: string;
+  serverPublicKeys: string[];
 };
 
 export type RouterWireGuardPeerReference = {
@@ -154,6 +161,12 @@ export type HotspotAntiTetheringConfig = {
   blockIpv4Ttl: boolean;
   blockIpv6: boolean;
   enabled: boolean;
+};
+
+export type HotspotAntiTetheringState = {
+  blockIpv4Ttl: boolean;
+  blockIpv6: boolean;
+  managedRuleCount: number;
 };
 
 export type RouterHealth = {

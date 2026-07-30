@@ -3,6 +3,14 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 INFRA_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+LICENSE_ENV="$INFRA_DIR/license-api/.env"
+
+if [ -f "$LICENSE_ENV" ] && ! grep -q '^ROUTER_VAULT_KEY=' "$LICENSE_ENV"; then
+  umask 077
+  ROUTER_VAULT_KEY=$(openssl rand -base64 32 | tr -d '\n')
+  printf 'ROUTER_VAULT_KEY=%s\n' "$ROUTER_VAULT_KEY" >> "$LICENSE_ENV"
+  echo "ROUTER_VAULT_KEY générée. Sauvegardez immédiatement le fichier license-api/.env hors du VPS."
+fi
 
 "$SCRIPT_DIR/preflight.sh"
 

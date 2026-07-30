@@ -36,13 +36,16 @@ export interface RouterAdapter {
   bindHotspotUserToMac(username: string, macAddress: string): Promise<HotspotUser>;
   clearHotspotUserMac(username: string): Promise<HotspotUser>;
   configureHotspotAntiTethering(config: HotspotAntiTetheringConfig): Promise<void>;
+  getHotspotAntiTetheringState(): Promise<import("../../domain/router").HotspotAntiTetheringState>;
   upsertHotspotBypass(binding: HotspotBypassBinding): Promise<void>;
+  listManagedHotspotBypasses(): Promise<HotspotBypassBinding[]>;
   removeHotspotBypass(id: string, macAddress: string): Promise<void>;
   listActiveUsers(): Promise<ActiveHotspotUser[]>;
   disconnectActiveUser(username: string): Promise<void>;
   getRouterHealth(): Promise<RouterHealth>;
   getInterfaceTraffic(): Promise<InterfaceTraffic[]>;
   getRouterDateTime(): Promise<RouterDateTime>;
+  getWireGuardInstallation(interfaceName: string): Promise<import("../../domain/router").RouterWireGuardInstallation | null>;
   provisionWireGuard(config: import("../../domain/router").RouterWireGuardConfig): Promise<void>;
   removeWireGuardPeer(reference: import("../../domain/router").RouterWireGuardPeerReference): Promise<void>;
 }

@@ -7,10 +7,32 @@ export type WireGuardTunnelStatus = {
   tunnelName: string;
 };
 
+export type InstalledWireGuardTunnel = {
+  active: boolean;
+  assignedAddress: string | null;
+  publicKey: string | null;
+  tunnelName: string;
+};
+
 export function buildWireGuardTunnelName(peerId: string): string {
+  if (/^tp-[a-zA-Z0-9_=+.-]+$/.test(peerId) && peerId.length <= 32) {
+    return peerId;
+  }
   const normalized = peerId.replace(/[^a-zA-Z0-9_=+.-]/g, "-");
   const suffix = normalized.slice(-29) || "tunnel";
   return `tp-${suffix}`;
+}
+
+export async function listInstalledTicketProTunnels(): Promise<InstalledWireGuardTunnel[]> {
+  if (!isTauriRuntime()) {
+    return [];
+  }
+
+  try {
+    return await invoke<InstalledWireGuardTunnel[]>("wireguard_list_ticketpro_tunnels");
+  } catch (error) {
+    throw normalizeTauriError(error, "Impossible d'inventorier les tunnels WireGuard TicketPro.");
+  }
 }
 
 export async function isWireGuardAvailable(): Promise<boolean> {

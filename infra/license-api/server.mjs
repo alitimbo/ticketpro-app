@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import nodemailer from "nodemailer";
+import { subscriptionNotificationEvent } from "./subscription-notification-policy.mjs";
 
 const PORT = Number(process.env.LICENSE_PORT ?? 8787);
 const HOST = process.env.LICENSE_BIND ?? "127.0.0.1";
@@ -12,6 +13,7 @@ const APP_UPDATE_MANIFEST_PATH = process.env.APP_UPDATE_MANIFEST_PATH
   ?? path.join(path.dirname(DB_PATH), "app-updates", "stable.json");
 const MASTER_TOKEN = process.env.LICENSE_MASTER_TOKEN ?? "";
 const HASH_SECRET = process.env.LICENSE_HASH_SECRET ?? "";
+const ROUTER_VAULT_KEY = process.env.ROUTER_VAULT_KEY ?? "";
 const IPAY_BASE_URL = String(process.env.IPAY_BASE_URL ?? "https://api.i-pay.money").replace(/\/$/, "");
 const IPAY_ENV = process.env.IPAY_ENV ?? "";
 const IPAY_PUBLIC_KEY = process.env.IPAY_PUBLIC_KEY ?? "";
@@ -24,6 +26,9 @@ const SAAS_PASSWORD_RESET_URL = String(
 );
 const SAAS_INVITATION_URL = String(
   process.env.SAAS_INVITATION_URL ?? "https://ticketpro.autoticket-ne.com/accept-invitation"
+);
+const SAAS_SUBSCRIPTION_URL = String(
+  process.env.SAAS_SUBSCRIPTION_URL ?? "https://ticketpro.autoticket-ne.com/"
 );
 const SMTP_HOST = String(process.env.SMTP_HOST ?? "");
 const SMTP_PORT = Number(process.env.SMTP_PORT ?? 465);
@@ -40,6 +45,9 @@ const SAAS_TRIAL_DAYS = 7;
 const SAAS_TRIAL_ROUTER_LIMIT = 1;
 const SAAS_TRIAL_PLAN_ID = "ticketpro-trial-7-days";
 const SAAS_TRIAL_PLAN_CODE = "TRIAL-7D";
+const SAAS_PAID_GRACE_DAYS = 7;
+const DAY_MS = 86_400_000;
+const SUBSCRIPTION_NOTIFICATION_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const ORGANIZATION_APP_ROLES = new Set(["admin", "operator", "agent", "guest"]);
 const ORGANIZATION_ROLE_PERMISSIONS = {
   admin: [
@@ -73,6 +81,7 @@ let smtpTransporter = null;
 if (HASH_SECRET.length < 32) {
   throw new Error("LICENSE_HASH_SECRET doit contenir au moins 32 caractères.");
 }
+const routerVaultKey = decodeRouterVaultKey(ROUTER_VAULT_KEY);
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const db = new DatabaseSync(DB_PATH);
@@ -317,6 +326,58 @@ db.exec(`
     PRIMARY KEY (organization_id, router_id)
   );
 
+  CREATE TABLE IF NOT EXISTS subscription_notifications (
+    subscription_id TEXT NOT NULL REFERENCES organization_subscriptions(id) ON DELETE CASCADE,
+    event_key TEXT NOT NULL,
+    recipient_email TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('sending', 'sent')),
+    created_at TEXT NOT NULL,
+    sent_at TEXT,
+    PRIMARY KEY (subscription_id, event_key, recipient_email)
+  );
+
+  CREATE TABLE IF NOT EXISTS router_access_policy_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    router_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    policy_json TEXT NOT NULL,
+    changed_by_user_id TEXT NOT NULL REFERENCES organization_users(id),
+    changed_at TEXT NOT NULL,
+    UNIQUE (organization_id, router_id, revision)
+  );
+
+  CREATE TABLE IF NOT EXISTS organization_routers (
+    id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    stable_identity TEXT NOT NULL,
+    name TEXT NOT NULL,
+    label TEXT NOT NULL,
+    model TEXT,
+    board_name TEXT,
+    serial_number TEXT,
+    routeros_version TEXT,
+    local_ip TEXT NOT NULL,
+    hotspot_address TEXT,
+    notes TEXT,
+    api_port INTEGER NOT NULL,
+    api_ssl_port INTEGER NOT NULL,
+    username TEXT NOT NULL,
+    credential_ciphertext TEXT NOT NULL,
+    connection_mode TEXT NOT NULL CHECK(connection_mode IN ('local', 'vpn', 'distant_ip', 'agent_future')),
+    connections_json TEXT NOT NULL,
+    plans_json TEXT NOT NULL,
+    vpn_json TEXT,
+    status TEXT NOT NULL CHECK(status IN ('active', 'offline', 'warning')),
+    last_seen_at TEXT,
+    created_by_user_id TEXT NOT NULL REFERENCES organization_users(id),
+    updated_by_user_id TEXT NOT NULL REFERENCES organization_users(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT,
+    UNIQUE (organization_id, stable_identity)
+  );
+
   CREATE TABLE IF NOT EXISTS reseller_registrations (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL UNIQUE,
@@ -398,8 +459,14 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_organization_sessions_token ON organization_sessions(token_hash);
   CREATE INDEX IF NOT EXISTS idx_organization_subscriptions_organization
     ON organization_subscriptions(organization_id, current_period_end);
+  CREATE INDEX IF NOT EXISTS idx_subscription_notifications_status
+    ON subscription_notifications(status, created_at);
   CREATE INDEX IF NOT EXISTS idx_router_access_policies_organization
     ON router_access_policies(organization_id, updated_at);
+  CREATE INDEX IF NOT EXISTS idx_router_access_policy_history_router
+    ON router_access_policy_history(organization_id, router_id, revision DESC);
+  CREATE INDEX IF NOT EXISTS idx_organization_routers_organization
+    ON organization_routers(organization_id, deleted_at, updated_at DESC);
   CREATE INDEX IF NOT EXISTS idx_payment_orders_transaction ON payment_orders(transaction_id);
   CREATE INDEX IF NOT EXISTS idx_payment_orders_reseller ON payment_orders(reseller_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_payment_orders_registration ON payment_orders(reseller_registration_id);
@@ -868,21 +935,72 @@ const statements = {
   `),
   expireOrganizationSubscriptions: db.prepare(`
     UPDATE organization_subscriptions SET status = 'expired', updated_at = ?
-    WHERE organization_id = ? AND status = 'active' AND current_period_end <= ?
+    WHERE organization_id = ? AND status = 'active' AND (
+      (plan_id = ? AND current_period_end <= ?)
+      OR (plan_id <> ? AND current_period_end <= ?)
+    )
+  `),
+  expireDueOrganizationSubscriptions: db.prepare(`
+    UPDATE organization_subscriptions SET status = 'expired', updated_at = ?
+    WHERE status = 'active' AND (
+      (plan_id = ? AND current_period_end <= ?)
+      OR (plan_id <> ? AND current_period_end <= ?)
+    )
   `),
   expireOrganizationSubscriptionById: db.prepare(`
     UPDATE organization_subscriptions
-    SET status = 'expired', current_period_end = ?, updated_at = ?
+    SET status = 'expired', updated_at = ?
     WHERE id = ? AND status = 'active'
   `),
   findActiveOrganizationSubscription: db.prepare(`
     SELECT * FROM organization_subscriptions
-    WHERE organization_id = ? AND status = 'active' AND current_period_end > ?
+    WHERE organization_id = ? AND status = 'active'
     ORDER BY current_period_end DESC LIMIT 1
   `),
   findLatestOrganizationSubscription: db.prepare(`
     SELECT * FROM organization_subscriptions
     WHERE organization_id = ? ORDER BY current_period_end DESC LIMIT 1
+  `),
+  listActiveOrganizationSubscriptions: db.prepare(`
+    SELECT subscription.*, organization.name AS organization_name
+    FROM organization_subscriptions AS subscription
+    JOIN organizations AS organization ON organization.id = subscription.organization_id
+    WHERE subscription.status = 'active' OR subscription.plan_id = ?
+    ORDER BY subscription.current_period_end ASC
+  `),
+  hasPaidOrganizationSubscription: db.prepare(`
+    SELECT 1 AS found FROM organization_subscriptions
+    WHERE organization_id = ? AND plan_id <> ?
+    LIMIT 1
+  `),
+  listOrganizationOwnerRecipients: db.prepare(`
+    SELECT DISTINCT user.email, user.name
+    FROM organization_memberships AS membership
+    JOIN organization_users AS user ON user.id = membership.user_id
+    WHERE membership.organization_id = ?
+      AND membership.authority_role = 'owner'
+      AND membership.status = 'active'
+      AND membership.invitation_status = 'accepted'
+      AND user.status = 'active'
+    ORDER BY user.created_at ASC
+  `),
+  claimSubscriptionNotification: db.prepare(`
+    INSERT OR IGNORE INTO subscription_notifications (
+      subscription_id, event_key, recipient_email, status, created_at, sent_at
+    ) VALUES (?, ?, ?, 'sending', ?, NULL)
+  `),
+  markSubscriptionNotificationSent: db.prepare(`
+    UPDATE subscription_notifications
+    SET status = 'sent', sent_at = ?
+    WHERE subscription_id = ? AND event_key = ? AND recipient_email = ?
+  `),
+  releaseSubscriptionNotification: db.prepare(`
+    DELETE FROM subscription_notifications
+    WHERE subscription_id = ? AND event_key = ? AND recipient_email = ? AND status = 'sending'
+  `),
+  releaseStaleSubscriptionNotifications: db.prepare(`
+    DELETE FROM subscription_notifications
+    WHERE status = 'sending' AND created_at <= ?
   `),
   findRouterAccessPolicy: db.prepare(`
     SELECT organization_id, router_id, policy_json, revision,
@@ -901,6 +1019,65 @@ const statements = {
     SET policy_json = ?, revision = revision + 1,
       updated_by_user_id = ?, updated_at = ?
     WHERE organization_id = ? AND router_id = ? AND revision = ?
+  `),
+  insertRouterAccessPolicyHistory: db.prepare(`
+    INSERT INTO router_access_policy_history (
+      organization_id, router_id, revision, policy_json,
+      changed_by_user_id, changed_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `),
+  listRouterAccessPolicyHistory: db.prepare(`
+    SELECT organization_id, router_id, revision, policy_json,
+      changed_by_user_id, changed_at
+    FROM router_access_policy_history
+    WHERE organization_id = ? AND router_id = ?
+    ORDER BY revision DESC
+    LIMIT 100
+  `),
+  findOrganizationRouterById: db.prepare(`
+    SELECT * FROM organization_routers
+    WHERE organization_id = ? AND id = ? AND deleted_at IS NULL
+  `),
+  findOrganizationRouterByStableIdentity: db.prepare(`
+    SELECT * FROM organization_routers
+    WHERE organization_id = ? AND stable_identity = ? AND deleted_at IS NULL
+  `),
+  findAnyOrganizationRouterById: db.prepare(`
+    SELECT * FROM organization_routers
+    WHERE organization_id = ? AND id = ?
+  `),
+  findAnyOrganizationRouterByStableIdentity: db.prepare(`
+    SELECT * FROM organization_routers
+    WHERE organization_id = ? AND stable_identity = ?
+  `),
+  listOrganizationRouters: db.prepare(`
+    SELECT * FROM organization_routers
+    WHERE organization_id = ? AND deleted_at IS NULL
+    ORDER BY created_at ASC
+  `),
+  insertOrganizationRouter: db.prepare(`
+    INSERT INTO organization_routers (
+      id, organization_id, stable_identity, name, label, model, board_name,
+      serial_number, routeros_version, local_ip, hotspot_address, notes,
+      api_port, api_ssl_port, username, credential_ciphertext, connection_mode,
+      connections_json, plans_json, vpn_json, status, last_seen_at,
+      created_by_user_id, updated_by_user_id, created_at, updated_at, deleted_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+  `),
+  updateOrganizationRouter: db.prepare(`
+    UPDATE organization_routers SET
+      stable_identity = ?, name = ?, label = ?, model = ?, board_name = ?,
+      serial_number = ?, routeros_version = ?, local_ip = ?, hotspot_address = ?,
+      notes = ?, api_port = ?, api_ssl_port = ?, username = ?,
+      credential_ciphertext = ?, connection_mode = ?, connections_json = ?,
+      plans_json = ?, vpn_json = ?, status = ?, last_seen_at = ?,
+      updated_by_user_id = ?, updated_at = ?, deleted_at = NULL
+    WHERE organization_id = ? AND id = ?
+  `),
+  softDeleteOrganizationRouter: db.prepare(`
+    UPDATE organization_routers
+    SET deleted_at = ?, updated_at = ?, updated_by_user_id = ?
+    WHERE organization_id = ? AND id = ? AND deleted_at IS NULL
   `),
   linkPaymentOrderOrganization: db.prepare(`
     UPDATE payment_orders SET organization_id = ?, organization_user_id = ?, updated_at = ?
@@ -1456,10 +1633,49 @@ function createOrganizationSession(request, userId, membershipId = null, duratio
 
 function currentOrganizationSubscription(organizationId) {
   const timestamp = nowIso();
-  statements.expireOrganizationSubscriptions.run(timestamp, organizationId, timestamp);
-  return statements.findActiveOrganizationSubscription.get(organizationId, timestamp)
+  statements.releaseStaleSubscriptionNotifications.run(
+    new Date(Date.now() - 60 * 60_000).toISOString()
+  );
+  const paidExpirationThreshold = new Date(Date.now() - SAAS_PAID_GRACE_DAYS * DAY_MS).toISOString();
+  statements.expireOrganizationSubscriptions.run(
+    timestamp,
+    organizationId,
+    SAAS_TRIAL_PLAN_ID,
+    timestamp,
+    SAAS_TRIAL_PLAN_ID,
+    paidExpirationThreshold
+  );
+  return statements.findActiveOrganizationSubscription.get(organizationId)
     ?? statements.findLatestOrganizationSubscription.get(organizationId)
     ?? null;
+}
+
+function organizationSubscriptionLifecycle(subscription, nowMs = Date.now()) {
+  if (!subscription) {
+    return {
+      accessEndsAt: null,
+      graceEndsAt: null,
+      inGrace: false,
+      isActive: false,
+      isTrial: false
+    };
+  }
+  const periodEndMs = Date.parse(subscription.current_period_end);
+  const isTrial = subscription.plan_id === SAAS_TRIAL_PLAN_ID
+    || subscription.plan_code === SAAS_TRIAL_PLAN_CODE;
+  const graceEndsMs = isTrial
+    ? periodEndMs
+    : periodEndMs + SAAS_PAID_GRACE_DAYS * DAY_MS;
+  const persistedActive = subscription.status === "active";
+  return {
+    accessEndsAt: Number.isFinite(graceEndsMs) ? new Date(graceEndsMs).toISOString() : null,
+    graceEndsAt: !isTrial && Number.isFinite(graceEndsMs)
+      ? new Date(graceEndsMs).toISOString()
+      : null,
+    inGrace: persistedActive && !isTrial && periodEndMs <= nowMs && nowMs < graceEndsMs,
+    isActive: persistedActive && nowMs < graceEndsMs,
+    isTrial
+  };
 }
 
 function organizationSubscriptionResponse(subscription) {
@@ -1470,18 +1686,32 @@ function organizationSubscriptionResponse(subscription) {
       router_limit: 0,
       current_period_start: null,
       current_period_end: null,
+      access_ends_at: null,
+      grace_period_end: null,
+      grace_days_remaining: 0,
+      is_trial: false,
       plan: null
     };
   }
-  const isActive = subscription.status === "active"
-    && Date.parse(subscription.current_period_end) > Date.now();
+  const lifecycle = organizationSubscriptionLifecycle(subscription);
+  const graceDaysRemaining = lifecycle.inGrace && lifecycle.graceEndsAt
+    ? Math.max(1, Math.ceil((Date.parse(lifecycle.graceEndsAt) - Date.now()) / DAY_MS))
+    : 0;
   return {
     id: subscription.id,
-    status: isActive ? "active" : subscription.status === "cancelled" ? "cancelled" : "expired",
-    is_active: isActive,
+    status: lifecycle.inGrace
+      ? "grace_period"
+      : lifecycle.isActive
+        ? lifecycle.isTrial ? "trial" : "active"
+        : subscription.status === "cancelled" ? "cancelled" : "expired",
+    is_active: lifecycle.isActive,
     router_limit: Number(subscription.router_limit),
     current_period_start: subscription.current_period_start,
     current_period_end: subscription.current_period_end,
+    access_ends_at: lifecycle.accessEndsAt,
+    grace_period_end: lifecycle.graceEndsAt,
+    grace_days_remaining: graceDaysRemaining,
+    is_trial: lifecycle.isTrial,
     plan: {
       id: subscription.plan_id,
       code: subscription.plan_code,
@@ -1586,9 +1816,7 @@ function organizationAuthResponse(user, session = null, selectedMembership = nul
     access: {
       can_manage_billing: membership.authority_role === "owner",
       can_manage_team: membership.authority_role === "owner" || membership.app_role === "admin",
-      can_manage_routers: Boolean(subscription
-        && subscription.status === "active"
-        && Date.parse(subscription.current_period_end) > Date.now())
+      can_manage_routers: organizationSubscriptionLifecycle(subscription).isActive
     }
   };
 }
@@ -1611,9 +1839,7 @@ function requireOrganizationUser(request, { requireActiveSubscription = false } 
     throw new HttpError(403, "Cette organisation est suspendue.");
   }
   const subscription = currentOrganizationSubscription(membership.organization_id);
-  const active = Boolean(subscription
-    && subscription.status === "active"
-    && Date.parse(subscription.current_period_end) > Date.now());
+  const active = organizationSubscriptionLifecycle(subscription).isActive;
   if (requireActiveSubscription && !active) {
     throw new HttpError(402, "Votre abonnement a expiré. Renouvelez-le pour utiliser les services TicketPro.", {
       code: "SUBSCRIPTION_REQUIRED",
@@ -1736,6 +1962,241 @@ function routerAccessPolicyResponse(record) {
     revision: Number(record.revision),
     updated_at: record.updated_at
   };
+}
+
+function routerAccessPolicyHistoryResponse(record) {
+  return {
+    organization_id: record.organization_id,
+    router_id: record.router_id,
+    policy: JSON.parse(record.policy_json),
+    revision: Number(record.revision),
+    changed_by_user_id: record.changed_by_user_id,
+    changed_at: record.changed_at
+  };
+}
+
+function decodeRouterVaultKey(value) {
+  let decoded;
+  try {
+    decoded = Buffer.from(String(value), "base64");
+  } catch {
+    decoded = Buffer.alloc(0);
+  }
+  if (decoded.length !== 32) {
+    throw new Error("ROUTER_VAULT_KEY doit être une clé aléatoire de 32 octets encodée en base64.");
+  }
+  return decoded;
+}
+
+function encryptRouterCredential(organizationId, routerId, credential) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", routerVaultKey, iv);
+  cipher.setAAD(Buffer.from(`ticketpro-router-v1:${organizationId}:${routerId}`, "utf8"));
+  const ciphertext = Buffer.concat([
+    cipher.update(String(credential), "utf8"),
+    cipher.final()
+  ]);
+  const tag = cipher.getAuthTag();
+  return ["v1", iv.toString("base64"), tag.toString("base64"), ciphertext.toString("base64")].join(".");
+}
+
+function decryptRouterCredential(record) {
+  const [version, ivValue, tagValue, ciphertextValue] = String(record.credential_ciphertext).split(".");
+  if (version !== "v1" || !ivValue || !tagValue || !ciphertextValue) {
+    throw new HttpError(500, "Le coffre RouterOS contient une donnée illisible.");
+  }
+  try {
+    const decipher = crypto.createDecipheriv(
+      "aes-256-gcm",
+      routerVaultKey,
+      Buffer.from(ivValue, "base64")
+    );
+    decipher.setAAD(Buffer.from(
+      `ticketpro-router-v1:${record.organization_id}:${record.id}`,
+      "utf8"
+    ));
+    decipher.setAuthTag(Buffer.from(tagValue, "base64"));
+    return Buffer.concat([
+      decipher.update(Buffer.from(ciphertextValue, "base64")),
+      decipher.final()
+    ]).toString("utf8");
+  } catch {
+    throw new HttpError(500, "Le coffre RouterOS n'a pas pu ouvrir les identifiants de ce routeur.");
+  }
+}
+
+function normalizeOrganizationRouterSnapshot(value, { requireCredential = true } = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new HttpError(400, "Sauvegarde routeur invalide.");
+  }
+  const id = requireSnapshotText(value, "id", 200);
+  const stableIdentity = requireSnapshotText(value, "stable_identity", 200).toLowerCase();
+  const connectionMode = String(value.connection_mode ?? "");
+  if (!["local", "vpn", "distant_ip", "agent_future"].includes(connectionMode)) {
+    throw new HttpError(400, "Mode de connexion routeur invalide.");
+  }
+  const status = String(value.status ?? "warning");
+  if (!["active", "offline", "warning"].includes(status)) {
+    throw new HttpError(400, "Statut routeur invalide.");
+  }
+  const connections = normalizeRouterConnections(value.connections);
+  const plans = normalizeRouterPlans(value.plans);
+  const credential = typeof value.credential === "string" ? value.credential : "";
+  if (requireCredential && (!credential || credential.length > 512)) {
+    throw new HttpError(400, "Identifiant secret RouterOS manquant ou invalide.");
+  }
+  return {
+    api_port: normalizePort(value.api_port, 8728),
+    api_ssl_port: normalizePort(value.api_ssl_port, 8729),
+    board_name: optionalSnapshotText(value.board_name, 200),
+    connection_mode: connectionMode,
+    connections,
+    credential,
+    hotspot_address: optionalSnapshotText(value.hotspot_address, 255),
+    id,
+    label: requireSnapshotText(value, "label", 200),
+    last_seen_at: normalizeOptionalIsoDate(value.last_seen_at),
+    local_ip: requireSnapshotText(value, "local_ip", 255),
+    model: optionalSnapshotText(value.model, 200),
+    name: requireSnapshotText(value, "name", 200),
+    notes: optionalSnapshotText(value.notes, 2_000),
+    plans,
+    routeros_version: optionalSnapshotText(value.routeros_version, 100),
+    serial_number: optionalSnapshotText(value.serial_number, 200),
+    stable_identity: stableIdentity,
+    status,
+    username: requireSnapshotText(value, "username", 200),
+    vpn: normalizeRouterVpn(value.vpn)
+  };
+}
+
+function normalizeRouterConnections(value) {
+  if (!Array.isArray(value) || value.length > 8) {
+    throw new HttpError(400, "Connexions routeur invalides.");
+  }
+  return value.map((connection) => {
+    if (!connection || typeof connection !== "object" || Array.isArray(connection)) {
+      throw new HttpError(400, "Connexion routeur invalide.");
+    }
+    const mode = String(connection.mode ?? "");
+    if (!["local", "vpn", "distant_ip", "agent_future"].includes(mode)) {
+      throw new HttpError(400, "Mode de connexion sauvegardé invalide.");
+    }
+    return {
+      host: requireSnapshotText(connection, "host", 255),
+      mode,
+      port: normalizePort(connection.port, mode === "vpn" ? 8728 : 8728),
+      status: String(connection.status ?? "inactive") === "active" ? "active" : "inactive",
+      use_ssl: connection.use_ssl === true || connection.use_ssl === 1
+    };
+  });
+}
+
+function normalizeRouterPlans(value) {
+  if (!Array.isArray(value) || value.length > 250) {
+    throw new HttpError(400, "Liste des plans Hotspot invalide.");
+  }
+  return value.map((plan) => {
+    if (!plan || typeof plan !== "object" || Array.isArray(plan)) {
+      throw new HttpError(400, "Plan Hotspot invalide.");
+    }
+    return {
+      data_limit_mb: normalizeOptionalNonNegativeInteger(plan.data_limit_mb),
+      download_limit: optionalSnapshotText(plan.download_limit, 100),
+      duration_minutes: normalizeNonNegativeInteger(plan.duration_minutes),
+      id: requireSnapshotText(plan, "id", 200),
+      mikrotik_profile_name: optionalSnapshotText(plan.mikrotik_profile_name, 200),
+      name: requireSnapshotText(plan, "name", 200),
+      price_hint: normalizeOptionalNonNegativeInteger(plan.price_hint),
+      shared_users: Math.max(1, normalizeNonNegativeInteger(plan.shared_users ?? 1)),
+      status: optionalSnapshotText(plan.status, 50) ?? "active",
+      upload_limit: optionalSnapshotText(plan.upload_limit, 100),
+      validity_minutes: normalizeOptionalNonNegativeInteger(plan.validity_minutes)
+    };
+  });
+}
+
+function normalizeRouterVpn(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new HttpError(400, "État VPN routeur invalide.");
+  }
+  return {
+    assigned_address: requireSnapshotText(value, "assigned_address", 100),
+    public_key: requireSnapshotText(value, "public_key", 128),
+    status: ["active", "draft", "revoked"].includes(String(value.status))
+      ? String(value.status)
+      : "draft"
+  };
+}
+
+function organizationRouterRecoveryResponse(record) {
+  return {
+    api_port: Number(record.api_port),
+    api_ssl_port: Number(record.api_ssl_port),
+    board_name: record.board_name,
+    connection_mode: record.connection_mode,
+    connections: JSON.parse(record.connections_json),
+    credential: decryptRouterCredential(record),
+    hotspot_address: record.hotspot_address,
+    id: record.id,
+    label: record.label,
+    last_seen_at: record.last_seen_at,
+    local_ip: record.local_ip,
+    model: record.model,
+    name: record.name,
+    notes: record.notes,
+    plans: JSON.parse(record.plans_json),
+    routeros_version: record.routeros_version,
+    serial_number: record.serial_number,
+    stable_identity: record.stable_identity,
+    status: record.status,
+    updated_at: record.updated_at,
+    username: record.username,
+    vpn: record.vpn_json ? JSON.parse(record.vpn_json) : null
+  };
+}
+
+function requireSnapshotText(value, field, maxLength) {
+  const result = String(value?.[field] ?? "").trim();
+  if (!result || result.length > maxLength) {
+    throw new HttpError(400, `Champ routeur ${field} invalide.`);
+  }
+  return result;
+}
+
+function optionalSnapshotText(value, maxLength) {
+  if (value === null || value === undefined || String(value).trim() === "") return null;
+  return String(value).trim().slice(0, maxLength);
+}
+
+function normalizePort(value, fallback) {
+  const port = Number(value ?? fallback);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new HttpError(400, "Port routeur invalide.");
+  }
+  return port;
+}
+
+function normalizeNonNegativeInteger(value) {
+  const result = Number(value ?? 0);
+  if (!Number.isInteger(result) || result < 0 || result > Number.MAX_SAFE_INTEGER) {
+    throw new HttpError(400, "Valeur numérique routeur invalide.");
+  }
+  return result;
+}
+
+function normalizeOptionalNonNegativeInteger(value) {
+  return value === null || value === undefined || value === ""
+    ? null
+    : normalizeNonNegativeInteger(value);
+}
+
+function normalizeOptionalIsoDate(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const date = new Date(String(value));
+  if (Number.isNaN(date.getTime())) throw new HttpError(400, "Date routeur invalide.");
+  return date.toISOString();
 }
 
 function requireOrganizationMember(context, body) {
@@ -1991,18 +2452,17 @@ function processVerifiedPayment(request, order, payment) {
     if (current.purchaser_type === "organization") {
       if (current.organization_id) {
         const existing = statements.findActiveOrganizationSubscription.get(
-          current.organization_id,
-          checkedAt
+          current.organization_id
         );
         const replacingTrial = existing?.plan_code === SAAS_TRIAL_PLAN_CODE;
-        if (replacingTrial) {
-          statements.expireOrganizationSubscriptionById.run(checkedAt, checkedAt, existing.id);
-        }
         const startsAtMs = existing
           && !replacingTrial
           && Date.parse(existing.current_period_end) > Date.now()
             ? Date.parse(existing.current_period_end)
             : Date.now();
+        if (existing) {
+          statements.expireOrganizationSubscriptionById.run(checkedAt, existing.id);
+        }
         const startsAt = new Date(startsAtMs).toISOString();
         const endsAt = new Date(
           startsAtMs + Number(current.duration_days) * 86_400_000
@@ -2427,6 +2887,170 @@ async function deliverOrganizationInvitation(user, organization, invitationToken
     disableUrlAccess: true
   });
   return true;
+}
+
+async function processSubscriptionNotifications() {
+  const transporter = getSmtpTransporter();
+  if (!transporter) return { sent: 0, skipped: "smtp_not_configured" };
+
+  const timestamp = nowIso();
+  const paidExpirationThreshold = new Date(Date.now() - SAAS_PAID_GRACE_DAYS * DAY_MS).toISOString();
+  statements.expireDueOrganizationSubscriptions.run(
+    timestamp,
+    SAAS_TRIAL_PLAN_ID,
+    timestamp,
+    SAAS_TRIAL_PLAN_ID,
+    paidExpirationThreshold
+  );
+
+  let sent = 0;
+  for (const subscription of statements.listActiveOrganizationSubscriptions.all(
+    SAAS_TRIAL_PLAN_ID
+  )) {
+    const event = subscriptionNotificationEvent({
+      graceDays: SAAS_PAID_GRACE_DAYS,
+      hasPaidSubscription: Boolean(
+        statements.hasPaidOrganizationSubscription.get(
+          subscription.organization_id,
+          SAAS_TRIAL_PLAN_ID
+        )
+      ),
+      nowMs: Date.now(),
+      subscription,
+      trialPlanCode: SAAS_TRIAL_PLAN_CODE,
+      trialPlanId: SAAS_TRIAL_PLAN_ID
+    });
+    if (!event) continue;
+    const recipients = statements.listOrganizationOwnerRecipients.all(
+      subscription.organization_id
+    );
+    for (const recipient of recipients) {
+      const claimed = statements.claimSubscriptionNotification.run(
+        subscription.id,
+        event.eventKey,
+        recipient.email,
+        timestamp
+      );
+      if (Number(claimed.changes) !== 1) continue;
+      try {
+        await deliverSubscriptionNotification(
+          transporter,
+          recipient,
+          subscription,
+          event
+        );
+        statements.markSubscriptionNotificationSent.run(
+          nowIso(),
+          subscription.id,
+          event.eventKey,
+          recipient.email
+        );
+        sent += 1;
+      } catch (error) {
+        statements.releaseSubscriptionNotification.run(
+          subscription.id,
+          event.eventKey,
+          recipient.email
+        );
+        console.error(
+          `Impossible d'envoyer la relance ${event.eventKey} à ${recipient.email}:`,
+          error instanceof Error ? error.message : error
+        );
+      }
+    }
+  }
+  return { sent };
+}
+
+async function deliverSubscriptionNotification(
+  transporter,
+  recipient,
+  subscription,
+  event
+) {
+  const isGrace = event.kind === "paid_grace";
+  const isTrialEnded = event.kind === "trial_ended";
+  const endLabel = formatEmailDate(subscription.current_period_end);
+  const graceEnd = new Date(
+    Date.parse(subscription.current_period_end) + SAAS_PAID_GRACE_DAYS * DAY_MS
+  ).toISOString();
+  const graceEndLabel = formatEmailDate(graceEnd);
+  const title = isGrace
+    ? event.remainingDays === 1
+      ? "Dernier jour avant la suspension de vos services"
+      : `${event.remainingDays} jours avant la suspension de vos services`
+    : isTrialEnded
+      ? "Votre essai TicketPro est terminé"
+      : event.remainingDays === 1
+        ? "Votre essai se termine demain"
+        : "Plus que 3 jours pour profiter de TicketPro";
+  const subject = isGrace
+    ? `[Action requise] ${title}`
+    : title;
+  const message = isGrace
+    ? `Votre abonnement ${subscription.plan_name} a pris fin le ${endLabel}. TicketPro maintient exceptionnellement vos services jusqu'au ${graceEndLabel}.`
+    : isTrialEnded
+      ? "Votre période d'essai est terminée depuis deux jours. Choisissez un forfait pour réactiver vos routeurs et vos services TicketPro."
+      : `Votre essai gratuit se termine le ${endLabel}. Vos données restent conservées, mais les services seront suspendus à cette date sans abonnement.`;
+  const safeUrl = escapeHtml(SAAS_SUBSCRIPTION_URL);
+  const safeName = escapeHtml(recipient.name);
+  const safeOrganization = escapeHtml(subscription.organization_name);
+  const safeTitle = escapeHtml(title);
+  const safeMessage = escapeHtml(message);
+
+  await transporter.sendMail({
+    from: { name: SMTP_FROM_NAME, address: SMTP_FROM_EMAIL },
+    to: recipient.email,
+    subject,
+    text: [
+      `Bonjour ${recipient.name},`,
+      "",
+      message,
+      `Organisation : ${subscription.organization_name}`,
+      `Forfait : ${subscription.plan_name}`,
+      "",
+      `Choisir ou renouveler un forfait : ${SAAS_SUBSCRIPTION_URL}`,
+      "",
+      "L'équipe TicketPro"
+    ].join("\n"),
+    html: `
+      <div style="margin:0;background:#f3f6fa;padding:32px 12px;font-family:Arial,sans-serif;color:#172033">
+        <div style="max-width:620px;margin:auto;background:#ffffff;border-radius:18px;overflow:hidden;box-shadow:0 12px 36px rgba(23,32,51,.10)">
+          <div style="background:linear-gradient(135deg,#075985,#0ea5e9);padding:28px 32px;color:#ffffff">
+            <div style="font-size:14px;font-weight:700;letter-spacing:.08em;text-transform:uppercase">TicketPro</div>
+            <h1 style="font-size:26px;line-height:1.25;margin:12px 0 0">${safeTitle}</h1>
+          </div>
+          <div style="padding:30px 32px">
+            <p style="font-size:16px;margin-top:0">Bonjour ${safeName},</p>
+            <p style="font-size:16px;line-height:1.65">${safeMessage}</p>
+            <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:12px;padding:16px 18px;margin:24px 0">
+              <div style="color:#475569;font-size:13px">Organisation</div>
+              <strong>${safeOrganization}</strong>
+              <div style="color:#475569;font-size:13px;margin-top:10px">Forfait</div>
+              <strong>${escapeHtml(subscription.plan_name)}</strong>
+            </div>
+            <p style="margin:28px 0">
+              <a href="${safeUrl}" style="display:inline-block;background:#0284c7;color:#ffffff;padding:13px 22px;border-radius:10px;text-decoration:none;font-weight:700">
+                ${isGrace ? "Renouveler mon abonnement" : "Choisir mon forfait"}
+              </a>
+            </p>
+            <p style="color:#64748b;font-size:13px;line-height:1.5">
+              Ce message est envoyé uniquement au propriétaire de l'organisation. Aucun mot de passe ne vous sera demandé par email.
+            </p>
+          </div>
+        </div>
+      </div>
+    `,
+    disableFileAccess: true,
+    disableUrlAccess: true
+  });
+}
+
+function formatEmailDate(value) {
+  return new Intl.DateTimeFormat("fr-FR", {
+    dateStyle: "long",
+    timeZone: "Africa/Niamey"
+  }).format(new Date(value));
 }
 
 function smtpConfigured() {
@@ -3300,6 +3924,146 @@ const handlers = [
     };
   }),
 
+  route("GET", "/v1/saas/routers/recovery", async (request) => {
+    const context = requireOrganizationPermission(request, "global.routers.select", {
+      requireActiveSubscription: true
+    });
+    const access = organizationUserRouterAccess(context.membership);
+    const routers = statements.listOrganizationRouters
+      .all(context.organization.id)
+      .filter((router) => access.mode === "all" || access.router_ids.includes(router.id))
+      .map(organizationRouterRecoveryResponse);
+    logEvent(request, null, "organization_router_recovery_downloaded", context.organization.id, null, {
+      organization_user_id: context.user.id,
+      router_count: routers.length
+    });
+    return { routers };
+  }),
+
+  route("POST", "/v1/saas/routers/snapshot", async (request, body) => {
+    const context = requireOrganizationPermission(request, "global.routers.manage", {
+      requireActiveSubscription: true
+    });
+    const snapshot = normalizeOrganizationRouterSnapshot(body.router);
+    const byId = statements.findAnyOrganizationRouterById.get(
+      context.organization.id,
+      snapshot.id
+    );
+    const byStableIdentity = statements.findAnyOrganizationRouterByStableIdentity.get(
+      context.organization.id,
+      snapshot.stable_identity
+    );
+    if (byId && byStableIdentity && byId.id !== byStableIdentity.id) {
+      throw new HttpError(409, "L'identité physique de ce routeur appartient déjà à un autre enregistrement.");
+    }
+    const existing = byStableIdentity ?? byId ?? null;
+    if (!existing) {
+      const routerCount = statements.listOrganizationRouters.all(context.organization.id).length;
+      if (routerCount >= Number(context.subscription.router_limit)) {
+        throw new HttpError(409, "La limite de routeurs de l'abonnement est atteinte.");
+      }
+    }
+    const routerId = existing?.id ?? snapshot.id;
+    const encryptedCredential = encryptRouterCredential(
+      context.organization.id,
+      routerId,
+      snapshot.credential
+    );
+    const updatedAt = nowIso();
+    if (existing) {
+      statements.updateOrganizationRouter.run(
+        snapshot.stable_identity,
+        snapshot.name,
+        snapshot.label,
+        snapshot.model,
+        snapshot.board_name,
+        snapshot.serial_number,
+        snapshot.routeros_version,
+        snapshot.local_ip,
+        snapshot.hotspot_address,
+        snapshot.notes,
+        snapshot.api_port,
+        snapshot.api_ssl_port,
+        snapshot.username,
+        encryptedCredential,
+        snapshot.connection_mode,
+        JSON.stringify(snapshot.connections),
+        JSON.stringify(snapshot.plans),
+        snapshot.vpn ? JSON.stringify(snapshot.vpn) : null,
+        snapshot.status,
+        snapshot.last_seen_at,
+        context.user.id,
+        updatedAt,
+        context.organization.id,
+        routerId
+      );
+    } else {
+      statements.insertOrganizationRouter.run(
+        routerId,
+        context.organization.id,
+        snapshot.stable_identity,
+        snapshot.name,
+        snapshot.label,
+        snapshot.model,
+        snapshot.board_name,
+        snapshot.serial_number,
+        snapshot.routeros_version,
+        snapshot.local_ip,
+        snapshot.hotspot_address,
+        snapshot.notes,
+        snapshot.api_port,
+        snapshot.api_ssl_port,
+        snapshot.username,
+        encryptedCredential,
+        snapshot.connection_mode,
+        JSON.stringify(snapshot.connections),
+        JSON.stringify(snapshot.plans),
+        snapshot.vpn ? JSON.stringify(snapshot.vpn) : null,
+        snapshot.status,
+        snapshot.last_seen_at,
+        context.user.id,
+        context.user.id,
+        updatedAt,
+        updatedAt
+      );
+    }
+    const saved = statements.findOrganizationRouterById.get(
+      context.organization.id,
+      routerId
+    );
+    logEvent(request, null, "organization_router_snapshot_saved", context.organization.id, null, {
+      organization_user_id: context.user.id,
+      router_id: routerId,
+      stable_identity_hash: hash(snapshot.stable_identity),
+      plan_count: snapshot.plans.length,
+      vpn_configured: Boolean(snapshot.vpn)
+    });
+    return { router: organizationRouterRecoveryResponse(saved) };
+  }),
+
+  route("POST", "/v1/saas/routers/remove", async (request, body) => {
+    const context = requireOrganizationPermission(request, "global.routers.delete", {
+      requireActiveSubscription: true
+    });
+    const routerId = requireText(body, "router_id", 200);
+    const removedAt = nowIso();
+    const result = statements.softDeleteOrganizationRouter.run(
+      removedAt,
+      removedAt,
+      context.user.id,
+      context.organization.id,
+      routerId
+    );
+    if (Number(result.changes) !== 1) {
+      throw new HttpError(404, "Routeur cloud introuvable.");
+    }
+    logEvent(request, null, "organization_router_snapshot_removed", context.organization.id, null, {
+      organization_user_id: context.user.id,
+      router_id: routerId
+    });
+    return { ok: true, router_id: routerId };
+  }),
+
   route("GET", "/v1/saas/router-access-policy", async (request) => {
     const routerId = String(
       new URL(request.url, "http://ticketpro.local").searchParams.get("router_id") ?? ""
@@ -3319,6 +4083,25 @@ const handlers = [
     };
   }),
 
+  route("GET", "/v1/saas/router-access-policy/history", async (request) => {
+    const routerId = String(
+      new URL(request.url, "http://ticketpro.local").searchParams.get("router_id") ?? ""
+    ).trim();
+    if (!routerId || routerId.length > 200) {
+      throw new HttpError(400, "Identifiant de routeur invalide.");
+    }
+    const context = requireOrganizationRouterPermission(
+      request,
+      "router.settings",
+      routerId
+    );
+    return {
+      history: statements.listRouterAccessPolicyHistory
+        .all(context.organization.id, routerId)
+        .map(routerAccessPolicyHistoryResponse)
+    };
+  }),
+
   route("POST", "/v1/saas/router-access-policy", async (request, body) => {
     const routerId = requireText(body, "router_id", 200);
     const context = requireOrganizationRouterPermission(
@@ -3331,53 +4114,77 @@ const handlers = [
     if (!Number.isInteger(baseRevision) || baseRevision < 0) {
       throw new HttpError(400, "Révision de synchronisation invalide.");
     }
-    const existing = statements.findRouterAccessPolicy.get(
-      context.organization.id,
-      routerId
-    );
-    if (Number(existing?.revision ?? 0) !== baseRevision) {
-      throw new HttpError(409, "La politique réseau a été modifiée depuis un autre appareil.", {
-        code: "ROUTER_ACCESS_POLICY_CONFLICT",
-        remote_policy: routerAccessPolicyResponse(existing)
-      });
-    }
     const updatedAt = nowIso();
-    if (existing) {
-      const result = statements.updateRouterAccessPolicy.run(
-        JSON.stringify(policy),
-        context.user.id,
-        updatedAt,
+    const serializedPolicy = JSON.stringify(policy);
+    let saved;
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = statements.findRouterAccessPolicy.get(
         context.organization.id,
-        routerId,
-        baseRevision
+        routerId
       );
-      if (Number(result.changes) !== 1) {
-        const latest = statements.findRouterAccessPolicy.get(
-          context.organization.id,
-          routerId
-        );
+      if (Number(existing?.revision ?? 0) !== baseRevision) {
         throw new HttpError(409, "La politique réseau a été modifiée depuis un autre appareil.", {
           code: "ROUTER_ACCESS_POLICY_CONFLICT",
-          remote_policy: routerAccessPolicyResponse(latest)
+          remote_policy: routerAccessPolicyResponse(existing)
         });
       }
-    } else {
-      statements.insertRouterAccessPolicy.run(
+      if (existing) {
+        const result = statements.updateRouterAccessPolicy.run(
+          serializedPolicy,
+          context.user.id,
+          updatedAt,
+          context.organization.id,
+          routerId,
+          baseRevision
+        );
+        if (Number(result.changes) !== 1) {
+          const latest = statements.findRouterAccessPolicy.get(
+            context.organization.id,
+            routerId
+          );
+          throw new HttpError(409, "La politique réseau a été modifiée depuis un autre appareil.", {
+            code: "ROUTER_ACCESS_POLICY_CONFLICT",
+            remote_policy: routerAccessPolicyResponse(latest)
+          });
+        }
+      } else {
+        statements.insertRouterAccessPolicy.run(
+          context.organization.id,
+          routerId,
+          serializedPolicy,
+          context.user.id,
+          updatedAt,
+          updatedAt
+        );
+      }
+      saved = statements.findRouterAccessPolicy.get(
+        context.organization.id,
+        routerId
+      );
+      statements.insertRouterAccessPolicyHistory.run(
         context.organization.id,
         routerId,
-        JSON.stringify(policy),
+        Number(saved.revision),
+        serializedPolicy,
         context.user.id,
-        updatedAt,
         updatedAt
       );
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // La transaction a déjà été terminée.
+      }
+      throw error;
     }
-    const saved = statements.findRouterAccessPolicy.get(
-      context.organization.id,
-      routerId
-    );
     logEvent(request, null, "router_access_policy_synced", context.organization.id, null, {
       router_id: routerId,
       revision: Number(saved.revision),
+      anti_sharing_mode: policy.antiSharingMode,
+      ipv4_ttl_enabled: policy.monitorIpv4Ttl,
+      ipv6_block_enabled: policy.monitorIpv6HopLimit,
       infrastructure_device_count: policy.infrastructureDevices.length
     });
     return { policy: routerAccessPolicyResponse(saved) };
@@ -4010,6 +4817,32 @@ const handlers = [
     };
   }),
 
+  route("GET", "/v1/saas/vpn/peers", async (request) => {
+    if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. RÃ©essayez plus tard.");
+    const { organization, user } = requireOrganizationPermission(request, "global.vpn", {
+      requireActiveSubscription: true
+    });
+    const result = await vpnHubRequest("/v1/peers/list", {
+      account_id: organization.id
+    });
+    logEvent(request, null, "saas_vpn_peers_listed", organization.id, null, {
+      organization_user_id: user.id
+    });
+    return {
+      peers: Array.isArray(result.peers)
+        ? result.peers
+          .filter((peer) => peer.peer_type === "operator")
+          .map((peer) => ({
+            assigned_address: peer.assigned_address ?? null,
+            name: peer.name ?? "",
+            peer_type: "operator",
+            public_key: peer.public_key,
+            status: peer.status === "revoked" ? "revoked" : "active"
+          }))
+        : []
+    };
+  }),
+
   route("POST", "/v1/vpn/peers", async (request, body) => {
     if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. Réessayez plus tard.");
     const { activation, license } = requireLicensedDevice(body);
@@ -4063,6 +4896,11 @@ const handlers = [
       message_id_hash: hash(result.messageId ?? "")
     });
     return { ok: true, recipient };
+  }),
+
+  route("POST", "/v1/admin/subscription-notifications/run", async (request) => {
+    requireAdmin(request, ["owner", "admin"]);
+    return processSubscriptionNotifications();
   }),
 
   route("POST", "/v1/admin/plans", async (request, body) => {
@@ -4503,4 +5341,16 @@ const server = http.createServer(async (request, response) => {
   sendJson(response, 404, { error: "Route introuvable." }, request);
 });
 
-server.listen(PORT, HOST, () => console.log(`TicketPro License API écoute sur ${HOST}:${PORT}`));
+server.listen(PORT, HOST, () => {
+  console.log(`TicketPro License API écoute sur ${HOST}:${PORT}`);
+  void processSubscriptionNotifications().catch((error) =>
+    console.error("Traitement initial des relances d'abonnement impossible:", error)
+  );
+});
+
+const subscriptionNotificationTimer = setInterval(() => {
+  void processSubscriptionNotifications().catch((error) =>
+    console.error("Traitement planifié des relances d'abonnement impossible:", error)
+  );
+}, SUBSCRIPTION_NOTIFICATION_INTERVAL_MS);
+subscriptionNotificationTimer.unref();

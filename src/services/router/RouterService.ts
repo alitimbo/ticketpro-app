@@ -215,11 +215,25 @@ export class RouterService {
     );
   }
 
+  getHotspotAntiTetheringState() {
+    return this.run(
+      "getHotspotAntiTetheringState",
+      () => this.adapter.getHotspotAntiTetheringState()
+    );
+  }
+
   upsertHotspotBypass(binding: import("../../domain/router").HotspotBypassBinding) {
     return this.run(
       "upsertHotspotBypass",
       () => this.adapter.upsertHotspotBypass(binding),
       "router.settings.manage"
+    );
+  }
+
+  listManagedHotspotBypasses() {
+    return this.run(
+      "listManagedHotspotBypasses",
+      () => this.adapter.listManagedHotspotBypasses()
     );
   }
 
@@ -249,6 +263,10 @@ export class RouterService {
 
   getRouterDateTime() {
     return this.run("getRouterDateTime", () => this.adapter.getRouterDateTime());
+  }
+
+  getWireGuardInstallation(interfaceName: string) {
+    return this.run("getWireGuardInstallation", () => this.adapter.getWireGuardInstallation(interfaceName));
   }
 
   provisionWireGuard(config: import("../../domain/router").RouterWireGuardConfig) {

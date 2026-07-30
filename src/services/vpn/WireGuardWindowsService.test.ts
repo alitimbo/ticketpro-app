@@ -15,4 +15,7 @@ describe("WireGuard Windows tunnel names", () => {
     expect(buildWireGuardTunnelName("PC Ali / Test 2")).toMatch(/^tp-[a-zA-Z0-9_=+.-]+$/);
     expect(buildWireGuardTunnelName("")).toBe("tp-tunnel");
   });
+  it("conserve le nom d'un tunnel TicketPro deja installe", () => {
+    expect(buildWireGuardTunnelName("tp-existing-tunnel")).toBe("tp-existing-tunnel");
+  });
 });

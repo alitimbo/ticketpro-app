@@ -1,0 +1,281 @@
+import type { AuthSession } from "../../domain/auth";
+import type { HotspotUser } from "../../domain/router";
+import type { RouterRecord } from "../../domain/database";
+import type { RouterService } from "../router";
+import {
+  HotspotPlanRepository,
+  RouterConnectionRepository,
+  RouterRepository,
+  TicketBatchRepository,
+  TicketRepository,
+  type DatabaseClient
+} from "../database";
+import {
+  normalizeMacAddress,
+  routerAccessPolicyCloudId,
+  RouterAccessPolicySyncService
+} from "../access";
+import { RouterCloudRecoveryService } from "./RouterCloudRecoveryService";
+
+export type RouterStateReconciliationResult = {
+  bypassCount: number;
+  planCount: number;
+  recoveredTicketCount: number;
+  ttlIpv4Enabled: boolean;
+  ttlIpv6Enabled: boolean;
+};
+
+type RouterStateReconciliationDependencies = {
+  backupRouter?: (routerId: string) => Promise<unknown>;
+  policies?: Pick<RouterAccessPolicySyncService, "load">;
+};
+
+export class RouterStateReconciliationService {
+  private readonly connections: RouterConnectionRepository;
+  private readonly plans: HotspotPlanRepository;
+  private readonly policies: Pick<RouterAccessPolicySyncService, "load">;
+  private readonly routers: RouterRepository;
+  private readonly ticketBatches: TicketBatchRepository;
+  private readonly tickets: TicketRepository;
+  private readonly backupRouter: (routerId: string) => Promise<unknown>;
+
+  constructor(
+    private readonly database: DatabaseClient,
+    private readonly session: AuthSession,
+    dependencies: RouterStateReconciliationDependencies = {}
+  ) {
+    this.connections = new RouterConnectionRepository(database);
+    this.plans = new HotspotPlanRepository(database);
+    this.policies = dependencies.policies ?? new RouterAccessPolicySyncService(database);
+    this.routers = new RouterRepository(database);
+    this.ticketBatches = new TicketBatchRepository(database);
+    this.tickets = new TicketRepository(database);
+    this.backupRouter = dependencies.backupRouter ?? ((routerId) =>
+      new RouterCloudRecoveryService(
+        this.database,
+        this.session.account_id,
+        this.session.internal_profile_id
+      ).backupRouter(routerId)
+    );
+  }
+
+  async reconcile(
+    router: RouterRecord,
+    service: RouterService
+  ): Promise<RouterStateReconciliationResult> {
+    const connections = await this.connections.listByRouter(router.id);
+    const cloudRouterId = routerAccessPolicyCloudId(router, connections);
+    const [systemInfo, actualPlans, routerUsers, policyResult] = await Promise.all([
+      service.getSystemInfo(),
+      service.getHotspotPlans(),
+      service.listHotspotUsers(),
+      this.policies.load(router.account_id, router.id, cloudRouterId)
+    ]);
+    const policy = policyResult.policy;
+    const strict = policy.antiSharingMode === "strict";
+
+    await service.configureHotspotAntiTethering({
+      blockIpv4Ttl: strict && policy.monitorIpv4Ttl,
+      blockIpv6: strict && policy.monitorIpv6HopLimit,
+      enabled: strict
+    });
+
+    const desiredBypasses = policy.infrastructureDevices.filter(
+      (device) => device.internetBypass
+    );
+    const actualBypasses = await service.listManagedHotspotBypasses();
+    const desiredIds = new Set(desiredBypasses.map((device) => device.id));
+    for (const actual of actualBypasses) {
+      if (!desiredIds.has(actual.id)) {
+        await service.removeHotspotBypass(actual.id, actual.macAddress);
+      }
+    }
+    for (const desired of desiredBypasses) {
+      await service.upsertHotspotBypass({
+        address: desired.ipAddress,
+        comment: `${desired.name} (${desired.type})`,
+        id: desired.id,
+        macAddress: desired.macAddress
+      });
+    }
+
+    await this.reconcilePlans(router.id, actualPlans);
+    const recoveredTicketCount = await this.reconcileTickets(router, routerUsers);
+    const [verifiedTtl, verifiedBypasses] = await Promise.all([
+      service.getHotspotAntiTetheringState(),
+      service.listManagedHotspotBypasses()
+    ]);
+    const expectedIpv4 = strict && policy.monitorIpv4Ttl;
+    const expectedIpv6 = strict && policy.monitorIpv6HopLimit;
+    if (
+      verifiedTtl.blockIpv4Ttl !== expectedIpv4
+      || verifiedTtl.blockIpv6 !== expectedIpv6
+    ) {
+      throw new Error("RouterOS n'a pas confirmé l'état réel des protections TTL/IPv6.");
+    }
+    for (const desired of desiredBypasses) {
+      const actual = verifiedBypasses.find((binding) => binding.id === desired.id);
+      if (
+        !actual
+        || actual.address !== desired.ipAddress
+        || normalizeMacAddress(actual.macAddress) !== normalizeMacAddress(desired.macAddress)
+      ) {
+        throw new Error(`RouterOS n'a pas confirmé le bypass de ${desired.name}.`);
+      }
+    }
+
+    const updatedRouter = await this.routers.update({
+      ...router,
+      board_name: systemInfo.boardName,
+      last_seen_at: new Date().toISOString(),
+      model: systemInfo.model,
+      routeros_version: systemInfo.routerOsVersion,
+      serial_number: systemInfo.serialNumber,
+      status: "active",
+      sync_status: "synced",
+      updated_at: new Date().toISOString()
+    });
+    try {
+      await this.backupRouter(updatedRouter.id);
+    } catch {
+      // RouterOS a déjà été confirmé. Une panne Internet ne doit pas remettre
+      // le routeur en brouillon ; la sauvegarde globale la retentera ensuite.
+    }
+
+    return {
+      bypassCount: desiredBypasses.length,
+      planCount: actualPlans.length,
+      recoveredTicketCount,
+      ttlIpv4Enabled: verifiedTtl.blockIpv4Ttl,
+      ttlIpv6Enabled: verifiedTtl.blockIpv6
+    };
+  }
+
+  private async reconcileTickets(
+    router: RouterRecord,
+    routerUsers: HotspotUser[]
+  ): Promise<number> {
+    const [localTickets, localPlans] = await Promise.all([
+      this.tickets.listByRouter(router.id),
+      this.plans.listByRouter(router.id)
+    ]);
+    const existingUsernames = new Set(localTickets.map((ticket) => ticket.username));
+    const missingUsers = routerUsers.filter((user) => !existingUsernames.has(user.username));
+    const usersByPlan = new Map<string, HotspotUser[]>();
+
+    for (const user of missingUsers) {
+      const plan = localPlans.find((candidate) =>
+        candidate.mikrotik_profile_name === user.profileName
+        || candidate.mikrotik_profile_name === user.planId
+        || candidate.name === user.profileName
+      );
+      if (!plan) continue;
+      const grouped = usersByPlan.get(plan.id) ?? [];
+      grouped.push(user);
+      usersByPlan.set(plan.id, grouped);
+    }
+
+    let recovered = 0;
+    for (const [planId, users] of usersByPlan) {
+      const batchId = `batch-recovered-${crypto.randomUUID()}`;
+      await this.ticketBatches.createWithTickets({
+        account_id: router.account_id,
+        code_length: Math.max(...users.map((user) => user.username.length)),
+        created_by_profile: this.session.internal_profile_role,
+        created_by_profile_id: this.session.internal_profile_id,
+        generated_file_id: null,
+        id: batchId,
+        operator_profile: this.session.internal_profile_role,
+        plan_id: planId,
+        prefix: null,
+        quantity: users.length,
+        router_id: router.id,
+        status: "recovered",
+        sync_status: "synced"
+      }, users.map((user) => ({
+        account_id: router.account_id,
+        activated_at: user.uptime && user.uptime !== "0s" ? new Date().toISOString() : null,
+        batch_id: batchId,
+        completed_at: user.status === "expired" ? new Date().toISOString() : null,
+        created_by_profile: this.session.internal_profile_role,
+        created_by_profile_id: this.session.internal_profile_id,
+        deleted_at: null,
+        downloaded_bytes: user.downloadedBytes ?? 0,
+        expires_at: null,
+        id: `ticket-recovered-${crypto.randomUUID()}`,
+        ip_address: null,
+        mac_address: user.macAddress ?? null,
+        mikrotik_id: user.id,
+        password_encrypted: user.passwordSecretRef,
+        plan_id: planId,
+        printed_count: 0,
+        router_id: router.id,
+        status:
+          user.status === "expired"
+            ? "complété"
+            : user.status === "disabled"
+              ? "désactivé"
+              : "disponible",
+        sync_status: "synced",
+        uploaded_bytes: user.uploadedBytes ?? 0,
+        username: user.username
+      })));
+      recovered += users.length;
+    }
+    return recovered;
+  }
+
+  private async reconcilePlans(
+    routerId: string,
+    actualPlans: Awaited<ReturnType<RouterService["getHotspotPlans"]>>
+  ): Promise<void> {
+    const localPlans = await this.plans.listByRouter(routerId);
+    const actualProfileNames = new Set(actualPlans.map((plan) => plan.profileName));
+
+    for (const actual of actualPlans) {
+      const local = localPlans.find((plan) =>
+        plan.mikrotik_profile_name === actual.profileName
+        || plan.name === actual.name
+      );
+      if (local) {
+        await this.plans.update({
+          ...local,
+          data_limit_mb: actual.dataLimitMb,
+          download_limit: actual.downloadLimit,
+          duration_minutes: actual.durationMinutes,
+          mikrotik_profile_name: actual.profileName,
+          name: actual.name,
+          price_hint: actual.priceHint ?? local.price_hint,
+          shared_users: actual.sharedUsers,
+          status: actual.status,
+          sync_status: "synced",
+          upload_limit: actual.uploadLimit,
+          validity_minutes: actual.validityMinutes ?? local.validity_minutes
+        });
+      } else {
+        await this.plans.create({
+          data_limit_mb: actual.dataLimitMb,
+          download_limit: actual.downloadLimit,
+          duration_minutes: actual.durationMinutes,
+          id: `plan-recovered-${crypto.randomUUID()}`,
+          mikrotik_profile_name: actual.profileName,
+          name: actual.name,
+          price_hint: actual.priceHint,
+          router_id: routerId,
+          shared_users: actual.sharedUsers,
+          status: actual.status,
+          sync_status: "synced",
+          upload_limit: actual.uploadLimit,
+          validity_minutes: actual.validityMinutes
+        });
+      }
+    }
+
+    for (const local of localPlans) {
+      const profileName = local.mikrotik_profile_name ?? local.name;
+      if (!actualProfileNames.has(profileName)) {
+        await this.plans.update({ ...local, sync_status: "conflict" });
+      }
+    }
+  }
+}

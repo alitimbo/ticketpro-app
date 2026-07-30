@@ -27,6 +27,8 @@ export function SubscriptionPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const subscription = saasAccount?.subscription ?? null;
+  const isGracePeriod = subscription?.status === "grace_period";
+  const isTrial = subscription?.status === "trial";
   const selectedPlan = plans.find((plan) => plan.id === selectedPlanId) ?? plans[0] ?? null;
   const canPay = Boolean(saasAccount?.access.can_manage_billing);
 
@@ -125,13 +127,27 @@ export function SubscriptionPage() {
       />
 
       {message ? <p className="form-error">{message}</p> : null}
+      {isGracePeriod ? (
+        <div className="notice notice--warning">
+          Votre abonnement est expiré, mais vos services restent actifs pendant encore{" "}
+          {subscription.grace_days_remaining} jour(s). Renouvelez avant le{" "}
+          {subscription.grace_period_end ? formatDate(subscription.grace_period_end) : "délai indiqué"}.
+        </div>
+      ) : null}
+      {isTrial ? (
+        <div className="notice">
+          Essai gratuit actif jusqu’au{" "}
+          {subscription?.current_period_end ? formatDate(subscription.current_period_end) : "—"}.
+          L’essai ne bénéficie pas du délai supplémentaire de 7 jours.
+        </div>
+      ) : null}
 
       <div className="stats-grid">
         <StatCard
           icon={Package}
           label="Pack actuel"
           value={subscription?.plan?.name ?? "Aucun pack actif"}
-          hint={subscription?.is_active ? "Abonnement actif" : "Renouvellement requis"}
+          hint={isGracePeriod ? "Délai de grâce actif" : isTrial ? "Essai gratuit" : subscription?.is_active ? "Abonnement actif" : "Renouvellement requis"}
         />
         <StatCard
           icon={Router}
@@ -148,8 +164,12 @@ export function SubscriptionPage() {
         <StatCard
           icon={CalendarDays}
           label="Échéance"
-          value={subscription?.current_period_end ? formatDate(subscription.current_period_end) : "—"}
-          hint="Expiration commune à l'organisation"
+          value={
+            isGracePeriod && subscription?.grace_period_end
+              ? formatDate(subscription.grace_period_end)
+              : subscription?.current_period_end ? formatDate(subscription.current_period_end) : "—"
+          }
+          hint={isGracePeriod ? "Suspension définitive des services" : "Expiration commune à l'organisation"}
         />
       </div>
 
@@ -160,7 +180,7 @@ export function SubscriptionPage() {
             icon={Package}
             meta={
               <Badge status={subscription?.is_active ? "success" : "warning"}>
-                {subscription?.is_active ? "Actif" : "Expiré"}
+                {isGracePeriod ? "Grâce active" : isTrial ? "Essai" : subscription?.is_active ? "Actif" : "Expiré"}
               </Badge>
             }
             title="Forfait"

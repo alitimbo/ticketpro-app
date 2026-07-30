@@ -104,28 +104,35 @@ export class InMemoryDatabaseClient implements DatabaseClient {
 
     const assignments = match[2].split(",").map((part) => part.trim());
     const conditions = match[3];
-    const idCondition = conditions.match(/id\s*=\s*\?(\d+)/i);
+    const idCondition = conditions.match(/\b(id|router_id)\s*=\s*\?(\d+)/i);
     const accountCondition = conditions.match(/account_id\s*=\s*\?(\d+)/i);
 
     if (!idCondition) {
       throw new Error("Mise à jour sans identifiant refusée.");
     }
 
-    const id = params[Number(idCondition[1]) - 1];
+    const idColumn = idCondition[1].toLowerCase();
+    const id = params[Number(idCondition[2]) - 1];
     const accountId = accountCondition ? params[Number(accountCondition[1]) - 1] : undefined;
     const rows = this.tables[match[1]].filter(
-      (row) => row.id === id && (accountId === undefined || row.account_id === accountId)
+      (row) => row[idColumn] === id && (accountId === undefined || row.account_id === accountId)
     );
 
     assignments.forEach((assignment) => {
       const assignmentMatch = assignment.match(/^([a-z_]+)\s*=\s*\?(\d+)$/i);
+      const literalMatch = assignment.match(/^([a-z_]+)\s*=\s*'([^']*)'$/i);
+      const numericMatch = assignment.match(/^([a-z_]+)\s*=\s*(-?\d+(?:\.\d+)?)$/i);
 
-      if (!assignmentMatch) {
+      if (!assignmentMatch && !literalMatch && !numericMatch) {
         throw new Error("Affectation de mise à jour inconnue.");
       }
 
-      const column = assignmentMatch[1];
-      const value = params[Number(assignmentMatch[2]) - 1] ?? null;
+      const column = (assignmentMatch?.[1] ?? literalMatch?.[1] ?? numericMatch?.[1]) as string;
+      const value = assignmentMatch
+        ? params[Number(assignmentMatch[2]) - 1] ?? null
+        : literalMatch
+          ? literalMatch[2]
+          : Number(numericMatch?.[2]);
       rows.forEach((row) => {
         row[column] = value;
       });

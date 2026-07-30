@@ -17,7 +17,10 @@ import type {
   RouterSystemInfo
 } from "../../domain/router";
 import { TicketCodeGenerator } from "../tickets";
-import { resolveTicketPasswordValue } from "../tickets/TicketPasswordService";
+import {
+  protectTicketPassword,
+  resolveTicketPasswordValue
+} from "../tickets/TicketPasswordService";
 import type { RouterAdapter } from "./RouterAdapter";
 import { RouterAdapterError } from "./RouterAdapterError";
 import {
@@ -142,7 +145,7 @@ export class MikroTikRouterAdapter implements RouterAdapter {
 
   async listHotspotUsers(): Promise<HotspotUser[]> {
     const rows = await this.call("/ip/hotspot/user/print");
-    return rows.map((row) => userRowToHotspotUser(row));
+    return Promise.all(rows.map((row) => userRowToHotspotUser(row)));
   }
 
   async createHotspotUser(user: HotspotUserDraft): Promise<HotspotUser> {
@@ -161,11 +164,36 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     return this.findUserByName(user.username);
   }
 
+  async getWireGuardInstallation(
+    interfaceName: string
+  ): Promise<import("../../domain/router").RouterWireGuardInstallation | null> {
+    const interfaces = await this.query("/interface/wireguard/print", { name: interfaceName });
+    const wireGuardInterface = firstRow(interfaces);
+    const interfaceId = pick(wireGuardInterface, ".id");
+    const publicKey = pick(wireGuardInterface, "public-key");
+    if (!interfaceId || !publicKey) return null;
+
+    const [addresses, peers] = await Promise.all([
+      this.query("/ip/address/print", { interface: interfaceName }),
+      this.query("/interface/wireguard/peers/print", { interface: interfaceName })
+    ]);
+
+    return {
+      assignedAddress: addresses.map((row) => pick(row, "address")).find(Boolean) ?? null,
+      interfaceName,
+      publicKey,
+      serverPublicKeys: peers.map((row) => pick(row, "public-key")).filter((key): key is string => Boolean(key))
+    };
+  }
+
   async provisionWireGuard(config: import("../../domain/router").RouterWireGuardConfig): Promise<void> {
     const interfaces = await this.query("/interface/wireguard/print", { name: config.interfaceName });
     const existingInterfaceId = pick(firstRow(interfaces), ".id");
 
     if (!existingInterfaceId) {
+      if (!config.privateKey) {
+        throw new Error("La clé privée WireGuard est requise pour créer une nouvelle interface.");
+      }
       await this.call("/interface/wireguard/add", {
         "listen-port": 13231,
         name: config.interfaceName,
@@ -175,7 +203,7 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       await this.call("/interface/wireguard/set", {
         "listen-port": 13231,
         numbers: existingInterfaceId,
-        "private-key": config.privateKey
+        ...(config.privateKey ? { "private-key": config.privateKey } : {})
       });
     }
 
@@ -442,6 +470,52 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     }
   }
 
+  async getHotspotAntiTetheringState(): Promise<import("../../domain/router").HotspotAntiTetheringState> {
+    const [ipv4Rows, ipv6Rows] = await Promise.all([
+      this.call("/ip/firewall/filter/print"),
+      this.call("/ipv6/firewall/filter/print").catch(() => [])
+    ]);
+    const managedPrefix = "TicketPro anti-tethering:";
+    const managedIpv4 = ipv4Rows.filter((row) =>
+      pick(row, "comment")?.startsWith(managedPrefix)
+      && !isTruthy(pick(row, "disabled"))
+    );
+    const managedIpv6 = ipv6Rows.filter((row) =>
+      pick(row, "comment")?.startsWith(managedPrefix)
+      && !isTruthy(pick(row, "disabled"))
+    );
+    return {
+      blockIpv4Ttl: managedIpv4.some((row) =>
+        pick(row, "comment")?.startsWith(`${managedPrefix}IPv4 TTL `)
+      ),
+      blockIpv6: managedIpv6.some((row) =>
+        pick(row, "comment")?.startsWith(`${managedPrefix}IPv6 `)
+      ),
+      managedRuleCount: managedIpv4.length + managedIpv6.length
+    };
+  }
+
+  async listManagedHotspotBypasses(): Promise<import("../../domain/router").HotspotBypassBinding[]> {
+    const rows = await this.call("/ip/hotspot/ip-binding/print");
+    const prefix = "TicketPro infrastructure:";
+    return rows.flatMap((row) => {
+      const comment = pick(row, "comment") ?? "";
+      if (!comment.startsWith(prefix)) return [];
+      const payload = comment.slice(prefix.length);
+      const separatorIndex = payload.indexOf(" ");
+      const id = (separatorIndex >= 0 ? payload.slice(0, separatorIndex) : payload).trim();
+      const description = separatorIndex >= 0 ? payload.slice(separatorIndex + 1).trim() : "";
+      const macAddress = normalizeOptionalMacAddress(pick(row, "mac-address"));
+      if (!id || !macAddress) return [];
+      return [{
+        address: pick(row, "address") ?? "",
+        comment: description,
+        id,
+        macAddress
+      }];
+    });
+  }
+
   async upsertHotspotBypass(
     binding: import("../../domain/router").HotspotBypassBinding
   ): Promise<void> {
@@ -634,6 +708,7 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       pick(row, "comment")?.startsWith(managedPrefix)
     );
     const desiredComments = new Set(desiredRules.map((rule) => rule.comment));
+    const removedRuleIds = new Set<string>();
     const firstForwardRuleId = pick(
       rows.find((row) =>
         pick(row, "chain") === "forward" &&
@@ -665,6 +740,7 @@ export class MikroTikRouterAdapter implements RouterAdapter {
         const duplicateId = pick(duplicate, ".id", "id");
         if (duplicateId) {
           await this.call(`${menu}/remove`, { numbers: duplicateId });
+          removedRuleIds.add(duplicateId);
         }
       }
     }
@@ -675,6 +751,23 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       const ruleId = pick(row, ".id", "id");
       if (ruleId) {
         await this.call(`${menu}/remove`, { numbers: ruleId });
+        removedRuleIds.add(ruleId);
+      }
+    }
+
+    if (removedRuleIds.size > 0) {
+      const remainingRows = await this.call(`${menu}/print`);
+      const remainingRemovedRule = remainingRows.find((row) => {
+        const ruleId = pick(row, ".id", "id");
+        const comment = pick(row, "comment") ?? "";
+        return (ruleId ? removedRuleIds.has(ruleId) : false)
+          || (comment.startsWith(managedPrefix) && !desiredComments.has(comment));
+      });
+      if (remainingRemovedRule) {
+        throw new RouterAdapterError(
+          "router_rejected",
+          "RouterOS kept a TicketPro anti-tethering rule after removal"
+        );
       }
     }
   }
@@ -776,8 +869,9 @@ function profileRowToPlan(row: RouterOsApiRow): HotspotPlan {
   };
 }
 
-function userRowToHotspotUser(row: RouterOsApiRow): HotspotUser {
+async function userRowToHotspotUser(row: RouterOsApiRow): Promise<HotspotUser> {
   const username = pick(row, "name", "user") || "";
+  const password = pick(row, "password");
   const downloadedBytes = parseInteger(pick(row, "bytes-out"));
   const uploadedBytes = parseInteger(pick(row, "bytes-in"));
   const limitBytesTotal = parseInteger(pick(row, "limit-bytes-total"));
@@ -792,7 +886,12 @@ function userRowToHotspotUser(row: RouterOsApiRow): HotspotUser {
     comment: pick(row, "comment") || null,
     createdAt: new Date().toISOString(),
     id: pick(row, ".id") || pick(row, "id") || username,
-    passwordSecretRef: `secret://mikrotik/${username}/password`,
+    passwordSecretRef:
+      password === username
+        ? `secret://mikrotik/${username}/password`
+        : password
+          ? await protectTicketPassword(password)
+          : `unavailable://mikrotik/${username}/password`,
     planId: pick(row, "profile") || "default",
     profileName: pick(row, "profile") || "default",
     status: limitReached ? "expired" : isTruthy(pick(row, "disabled")) ? "disabled" : "available",
@@ -900,9 +999,14 @@ function routerOsDurationToMinutes(value: string | undefined): number {
   }
 
   let minutes = 0;
+  const weeks = value.match(/(\d+)w/);
   const days = value.match(/(\d+)d/);
   const hours = value.match(/(\d+)h/);
   const mins = value.match(/(\d+)m/);
+
+  if (weeks) {
+    minutes += Number(weeks[1]) * 7 * 1440;
+  }
 
   if (days) {
     minutes += Number(days[1]) * 1440;

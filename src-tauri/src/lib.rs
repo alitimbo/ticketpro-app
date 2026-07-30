@@ -38,6 +38,7 @@ pub fn run() {
             printing::print_list_printers,
             wireguard::wireguard_available,
             wireguard::wireguard_install,
+            wireguard::wireguard_list_ticketpro_tunnels,
             wireguard::wireguard_tunnel_down,
             wireguard::wireguard_tunnel_up
         ])

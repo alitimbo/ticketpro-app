@@ -62,6 +62,31 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === "POST" && request.url === "/v1/peers/list") {
+    try {
+      const body = await readJson(request);
+      const accountId = requireAccountId(body);
+      const tenant = tenants[accountId];
+      if (!tenant) throw new HubError(404, "tenant_not_found");
+      requireTenantOrMaster(request, accountId);
+      json(response, 200, {
+        account_id: accountId,
+        peers: tenant.peers.map((peer) => ({
+          assigned_address: peer.assigned_address,
+          created_at: peer.created_at,
+          name: peer.name ?? "",
+          peer_type: peer.peer_type,
+          public_key: peer.public_key,
+          revoked_at: peer.revoked_at ?? null,
+          status: peer.status
+        }))
+      });
+    } catch (error) {
+      jsonError(response, error);
+    }
+    return;
+  }
+
   if (request.method === "POST" && request.url === "/v1/peers") {
     try {
       const body = await readJson(request);

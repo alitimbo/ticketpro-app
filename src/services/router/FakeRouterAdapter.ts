@@ -29,7 +29,16 @@ type FakeRouterAdapterOptions = {
 
 export class FakeRouterAdapter implements RouterAdapter {
   private hotspotBypasses = new Map<string, import("../../domain/router").HotspotBypassBinding>();
+  private hotspotAntiTetheringState: import("../../domain/router").HotspotAntiTetheringState = {
+    blockIpv4Ttl: false,
+    blockIpv6: false,
+    managedRuleCount: 0
+  };
   private hotspotDnsName = "";
+  async getWireGuardInstallation(): Promise<null> {
+    return null;
+  }
+
   async provisionWireGuard(): Promise<void> {
     return undefined;
   }
@@ -349,9 +358,21 @@ export class FakeRouterAdapter implements RouterAdapter {
   }
 
   async configureHotspotAntiTethering(
-    _config: import("../../domain/router").HotspotAntiTetheringConfig
+    config: import("../../domain/router").HotspotAntiTetheringConfig
   ): Promise<void> {
     await this.guard("configureHotspotAntiTethering");
+    this.hotspotAntiTetheringState = {
+      blockIpv4Ttl: config.enabled && config.blockIpv4Ttl,
+      blockIpv6: config.enabled && config.blockIpv6,
+      managedRuleCount:
+        Number(config.enabled && config.blockIpv4Ttl)
+        + Number(config.enabled && config.blockIpv6)
+    };
+  }
+
+  async getHotspotAntiTetheringState() {
+    await this.guard("getHotspotAntiTetheringState");
+    return { ...this.hotspotAntiTetheringState };
   }
 
   async upsertHotspotBypass(
@@ -359,6 +380,11 @@ export class FakeRouterAdapter implements RouterAdapter {
   ): Promise<void> {
     await this.guard("upsertHotspotBypass");
     this.hotspotBypasses.set(binding.id, { ...binding });
+  }
+
+  async listManagedHotspotBypasses() {
+    await this.guard("listManagedHotspotBypasses");
+    return Array.from(this.hotspotBypasses.values());
   }
 
   async removeHotspotBypass(id: string, _macAddress: string): Promise<void> {

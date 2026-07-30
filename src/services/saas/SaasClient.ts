@@ -15,11 +15,15 @@ const sessionStorageKey = "ticketpro:saas_session";
 
 export type SaasSubscription = {
   id?: string;
-  status: "active" | "expired" | "cancelled" | "none";
+  status: "active" | "trial" | "grace_period" | "expired" | "cancelled" | "none";
   is_active: boolean;
+  is_trial: boolean;
   router_limit: number;
   current_period_start: string | null;
   current_period_end: string | null;
+  access_ends_at: string | null;
+  grace_period_end: string | null;
+  grace_days_remaining: number;
   plan: {
     id: string;
     code: string;
@@ -83,6 +87,62 @@ export type SaasRouterAccessPolicy = {
   revision: number;
   router_id: string;
   updated_at: string;
+};
+
+export type SaasRouterAccessPolicyHistoryEntry = {
+  organization_id: string;
+  policy: RouterAccessPolicy;
+  revision: number;
+  router_id: string;
+  changed_by_user_id: string;
+  changed_at: string;
+};
+
+export type SaasRouterRecoverySnapshot = {
+  api_port: number;
+  api_ssl_port: number;
+  board_name: string | null;
+  connection_mode: "agent_future" | "distant_ip" | "local" | "vpn";
+  connections: Array<{
+    host: string;
+    mode: "agent_future" | "distant_ip" | "local" | "vpn";
+    port: number;
+    status: "active" | "inactive";
+    use_ssl: boolean;
+  }>;
+  credential: string;
+  hotspot_address: string | null;
+  id: string;
+  label: string;
+  last_seen_at: string | null;
+  local_ip: string;
+  model: string | null;
+  name: string;
+  notes: string | null;
+  plans: Array<{
+    data_limit_mb: number | null;
+    download_limit: string | null;
+    duration_minutes: number;
+    id: string;
+    mikrotik_profile_name: string | null;
+    name: string;
+    price_hint: number | null;
+    shared_users: number;
+    status: string;
+    upload_limit: string | null;
+    validity_minutes: number | null;
+  }>;
+  routeros_version: string | null;
+  serial_number: string | null;
+  stable_identity: string;
+  status: "active" | "offline" | "warning";
+  updated_at?: string;
+  username: string;
+  vpn: {
+    assigned_address: string;
+    public_key: string;
+    status: "active" | "draft" | "revoked";
+  } | null;
 };
 
 export class SaasRequestError extends Error {
@@ -362,6 +422,25 @@ export async function revokeSaasVpnPeer(input: {
   );
 }
 
+export type SaasVpnPeer = {
+  assigned_address: string | null;
+  name: string;
+  peer_type: "operator";
+  public_key: string;
+  status: "active" | "revoked";
+};
+
+export async function listSaasVpnOperatorPeers(): Promise<SaasVpnPeer[]> {
+  const token = await requireSessionToken();
+  const result = await request<{ peers: SaasVpnPeer[] }>(
+    "/v1/saas/vpn/peers",
+    undefined,
+    token,
+    "GET"
+  );
+  return result.peers;
+}
+
 export async function getSaasRouterAccessPolicy(
   routerId: string
 ): Promise<SaasRouterAccessPolicy | null> {
@@ -373,6 +452,51 @@ export async function getSaasRouterAccessPolicy(
     "GET"
   );
   return result.policy;
+}
+
+export async function getSaasRouterAccessPolicyHistory(
+  routerId: string
+): Promise<SaasRouterAccessPolicyHistoryEntry[]> {
+  const token = await requireSessionToken();
+  const result = await request<{ history: SaasRouterAccessPolicyHistoryEntry[] }>(
+    `/v1/saas/router-access-policy/history?router_id=${encodeURIComponent(routerId)}`,
+    undefined,
+    token,
+    "GET"
+  );
+  return result.history;
+}
+
+export async function getSaasRouterRecoverySnapshots(): Promise<SaasRouterRecoverySnapshot[]> {
+  const token = await requireSessionToken();
+  const result = await request<{ routers: SaasRouterRecoverySnapshot[] }>(
+    "/v1/saas/routers/recovery",
+    undefined,
+    token,
+    "GET"
+  );
+  return result.routers;
+}
+
+export async function saveSaasRouterRecoverySnapshot(
+  router: SaasRouterRecoverySnapshot
+): Promise<SaasRouterRecoverySnapshot> {
+  const token = await requireSessionToken();
+  const result = await request<{ router: SaasRouterRecoverySnapshot }>(
+    "/v1/saas/routers/snapshot",
+    { router },
+    token
+  );
+  return result.router;
+}
+
+export async function removeSaasRouterRecoverySnapshot(routerId: string): Promise<void> {
+  const token = await requireSessionToken();
+  await request(
+    "/v1/saas/routers/remove",
+    { router_id: routerId },
+    token
+  );
 }
 
 export async function syncSaasRouterAccessPolicy(input: {
