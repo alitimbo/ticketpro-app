@@ -122,6 +122,11 @@ export type HotspotUserDraft = {
   limitUptime?: string | null;
   /** RouterOS limit-bytes-total value in bytes. */
   limitBytesTotal?: number | null;
+  /**
+   * Wall-clock validity after the first successful login. TicketPro stores
+   * this value in managed RouterOS metadata so expiry remains autonomous.
+   */
+  validityMinutes?: number | null;
 };
 
 export type HotspotUserLimits = {
@@ -137,6 +142,14 @@ export type HotspotUsersBatchDraft = {
   createdByProfile?: string;
   limitUptime?: string | null;
   limitBytesTotal?: number | null;
+  validityMinutes?: number | null;
+};
+
+export type VoucherLifecycleEngineState = {
+  clockReady: boolean;
+  engineVersion: number;
+  managedProfileCount: number;
+  schedulerEnabled: boolean;
 };
 
 export type ActiveHotspotUser = {

@@ -23,11 +23,13 @@ export interface RouterAdapter {
   getHotspotServers(): Promise<HotspotServer[]>;
   upsertHotspotDns(dnsName: string): Promise<HotspotDnsConfigurationResult>;
   getHotspotPlans(): Promise<HotspotPlan[]>;
+  ensureVoucherLifecycleEngine(): Promise<import("../../domain/router").VoucherLifecycleEngineState>;
   createHotspotPlan(plan: HotspotPlanDraft): Promise<HotspotPlan>;
   updateHotspotPlan(planId: string, updates: Partial<HotspotPlanDraft>): Promise<HotspotPlan>;
   deleteHotspotPlan(planId: string): Promise<void>;
   listHotspotUsers(): Promise<HotspotUser[]>;
   updateHotspotUser(username: string, planId: string, limits?: HotspotUserLimits): Promise<HotspotUser>;
+  configureHotspotUserLifecycle(username: string, validityMinutes: number | null): Promise<HotspotUser>;
   createHotspotUser(user: HotspotUserDraft): Promise<HotspotUser>;
   createHotspotUsersBatch(batch: HotspotUsersBatchDraft): Promise<HotspotUser[]>;
   disableHotspotUser(username: string): Promise<HotspotUser>;

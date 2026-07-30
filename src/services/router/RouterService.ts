@@ -131,6 +131,13 @@ export class RouterService {
     return this.run("getHotspotPlans", () => this.adapter.getHotspotPlans());
   }
 
+  ensureVoucherLifecycleEngine() {
+    return this.run(
+      "ensureVoucherLifecycleEngine",
+      () => this.adapter.ensureVoucherLifecycleEngine()
+    );
+  }
+
   createHotspotPlan(plan: HotspotPlanDraft) {
     return this.run("createHotspotPlan", () => this.adapter.createHotspotPlan(plan), "router.plans.write");
   }
@@ -202,6 +209,13 @@ export class RouterService {
       "clearHotspotUserMac",
       () => this.adapter.clearHotspotUserMac(username),
       "router.tickets.sync"
+    );
+  }
+
+  configureHotspotUserLifecycle(username: string, validityMinutes: number | null) {
+    return this.run(
+      "configureHotspotUserLifecycle",
+      () => this.adapter.configureHotspotUserLifecycle(username, validityMinutes)
     );
   }
 

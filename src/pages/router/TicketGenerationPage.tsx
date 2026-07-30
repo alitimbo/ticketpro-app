@@ -354,6 +354,7 @@ export function TicketGenerationPage() {
 
     try {
       const generationService = persistedRouterService ?? service;
+      await generationService.ensureVoucherLifecycleEngine();
       const [existingUsers, existingLocalTickets, remotePlans] = await Promise.all([
         generationService.listHotspotUsers(),
         isPersistent

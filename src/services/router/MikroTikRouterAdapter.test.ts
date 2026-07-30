@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { protectTicketPassword, resolveTicketPasswordValue } from "../tickets";
-import { MikroTikRouterAdapter, normalizeMikroTikError } from "./MikroTikRouterAdapter";
+import {
+  buildVoucherExpirationScript,
+  buildVoucherLifecycleComment,
+  mergeVoucherLifecycleOnLogin,
+  MikroTikRouterAdapter,
+  normalizeMikroTikError
+} from "./MikroTikRouterAdapter";
 import type { RouterOsApiRequest, RouterOsApiRow, RouterOsApiTransport } from "./RouterOsApiTransport";
 
 class MockRouterOsTransport implements RouterOsApiTransport {
@@ -44,6 +50,68 @@ function createAdapter(transport: RouterOsApiTransport) {
 }
 
 describe("MikroTikRouterAdapter", () => {
+  it("installe et repare le moteur autonome des vouchers", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/user/profile/print": [{
+        ".id": "*P1",
+        name: "forfait-1h",
+        "on-login": ":log info \"script-existant\";"
+      }],
+      "/system/clock/print": [{
+        date: "2026-07-30",
+        time: "12:00:00",
+        "time-zone-name": "Africa/Niamey"
+      }],
+      "/system/ntp/client/print": [{ enabled: "true", status: "synchronized" }],
+      "/system/ntp/client/servers/print": [{ address: "time.cloudflare.com" }],
+      "/system/resource/print": [{ version: "7.20.1" }],
+      "/system/scheduler/print": [],
+      "/system/script/print": []
+    });
+    const adapter = createAdapter(transport);
+
+    await expect(adapter.ensureVoucherLifecycleEngine()).resolves.toEqual({
+      clockReady: true,
+      engineVersion: 1,
+      managedProfileCount: 1,
+      schedulerEnabled: true
+    });
+    expect(
+      transport.calls.find((call) => call.command === "/system/script/add")?.params
+    ).toMatchObject({
+      name: "ticketpro-voucher-expiration-v1",
+      policy: "read,write,policy,test"
+    });
+    expect(
+      transport.calls.find((call) => call.command === "/system/scheduler/add")?.params
+    ).toMatchObject({
+      interval: "1m",
+      name: "ticketpro-voucher-expiration-v1",
+      "on-event": "ticketpro-voucher-expiration-v1"
+    });
+    const profileSource = String(
+      transport.calls.find((call) => call.command === "/ip/hotspot/user/profile/set")
+        ?.params?.["on-login"]
+    );
+    expect(profileSource).toContain("script-existant");
+    expect(profileSource.match(/TICKETPRO-LIFECYCLE-BEGIN/g)).toHaveLength(1);
+  });
+
+  it("encode la validite et remplace seulement le bloc TicketPro", () => {
+    expect(buildVoucherLifecycleComment(300, "Lot local")).toBe(
+      "TicketPro:v1;validity=300;expires=0;state=new;"
+    );
+    expect(buildVoucherLifecycleComment(null, "Lot local")).toBe("Lot local");
+    const first = mergeVoucherLifecycleOnLogin(':log info "avant";');
+    const upgraded = mergeVoucherLifecycleOnLogin(first);
+    expect(upgraded).toContain(':log info "avant";');
+    expect(upgraded.match(/TICKETPRO-LIFECYCLE-BEGIN/g)).toHaveLength(1);
+    expect(
+      mergeVoucherLifecycleOnLogin("ancien-script", new Set(["ancien-script"]))
+    ).toContain('/system script run "ancien-script";');
+    expect(buildVoucherExpirationScript()).toContain("state=expired");
+  });
+
   it("met à jour le DNS du profil utilisé par le Hotspot existant", async () => {
     const transport = new MockRouterOsTransport({
       "/ip/hotspot/print": [{
@@ -199,12 +267,14 @@ describe("MikroTikRouterAdapter", () => {
         limitUptime: "3h",
         passwordSecretRef: "secret://routeur-demo/123456/password",
         planId: "*P1",
-        username: "123456"
+        username: "123456",
+        validityMinutes: 300
       })
     ).resolves.toMatchObject({ id: "*U1", username: "123456" });
 
     const addCall = transport.calls.find((call) => call.command === "/ip/hotspot/user/add");
     expect(addCall?.params).toMatchObject({
+      comment: "TicketPro:v1;validity=300;expires=0;state=new;",
       "limit-bytes-total": 2147483648,
       "limit-uptime": "3h",
       name: "123456",
@@ -310,6 +380,22 @@ describe("MikroTikRouterAdapter", () => {
         uploadedBytes: 1000,
         username: "654321"
       })
+    ]);
+  });
+
+  it("reconnait un voucher expire par le moteur TicketPro", async () => {
+    const adapter = createAdapter(new MockRouterOsTransport({
+      "/ip/hotspot/user/print": [{
+        ".id": "*U9",
+        comment: "TicketPro:v1;validity=60;expires=123;state=expired;",
+        disabled: "true",
+        name: "999999",
+        profile: "plan-1h"
+      }]
+    }));
+
+    await expect(adapter.listHotspotUsers()).resolves.toEqual([
+      expect.objectContaining({ status: "expired", username: "999999" })
     ]);
   });
 

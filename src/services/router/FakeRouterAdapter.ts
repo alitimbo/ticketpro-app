@@ -35,6 +35,7 @@ export class FakeRouterAdapter implements RouterAdapter {
     managedRuleCount: 0
   };
   private hotspotDnsName = "";
+  private lifecycleEngineInstalled = false;
   async getWireGuardInstallation(): Promise<null> {
     return null;
   }
@@ -355,6 +356,25 @@ export class FakeRouterAdapter implements RouterAdapter {
     const updated = { ...user, macAddress: null };
     this.users = this.users.map((item) => item.username === username ? updated : item);
     return { ...updated };
+  }
+
+  async configureHotspotUserLifecycle(
+    username: string,
+    _validityMinutes: number | null
+  ): Promise<HotspotUser> {
+    await this.guard("configureHotspotUserLifecycle");
+    return { ...this.findUser(username) };
+  }
+
+  async ensureVoucherLifecycleEngine() {
+    await this.guard("ensureVoucherLifecycleEngine");
+    this.lifecycleEngineInstalled = true;
+    return {
+      clockReady: true,
+      engineVersion: 1,
+      managedProfileCount: this.plans.length,
+      schedulerEnabled: true
+    };
   }
 
   async configureHotspotAntiTethering(

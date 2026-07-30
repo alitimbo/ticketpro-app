@@ -447,7 +447,11 @@ export function RoutersPage() {
       resolvedPassword,
       state.router?.status
     );
-    return service.upsertHotspotDns(normalizeHotspotDnsName(state.values.hotspotAddress));
+    const hotspotDns = await service.upsertHotspotDns(
+      normalizeHotspotDnsName(state.values.hotspotAddress)
+    );
+    await service.ensureVoucherLifecycleEngine();
+    return hotspotDns;
   };
 
   const createFormRouterService = (

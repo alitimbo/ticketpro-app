@@ -14,7 +14,8 @@ import type {
   RouterDateTime,
   RouterErrorCode,
   RouterHealth,
-  RouterSystemInfo
+  RouterSystemInfo,
+  VoucherLifecycleEngineState
 } from "../../domain/router";
 import { TicketCodeGenerator } from "../tickets";
 import {
@@ -35,6 +36,13 @@ export type MikroTikRouterAdapterOptions = RouterOsApiConfig & {
   connectionMode?: RouterConnectionMode;
   transport?: RouterOsApiTransport;
 };
+
+const VOUCHER_LIFECYCLE_ENGINE_VERSION = 1;
+const VOUCHER_EXPIRATION_SCRIPT = "ticketpro-voucher-expiration-v1";
+const VOUCHER_EXPIRATION_SCHEDULER = "ticketpro-voucher-expiration-v1";
+const VOUCHER_LIFECYCLE_COMMENT_PREFIX = "TicketPro:v1;";
+const VOUCHER_PROFILE_HANDLER_BEGIN = "# TICKETPRO-LIFECYCLE-BEGIN v1";
+const VOUCHER_PROFILE_HANDLER_END = "# TICKETPRO-LIFECYCLE-END v1";
 
 export class MikroTikRouterAdapter implements RouterAdapter {
   private readonly config: RouterOsApiConfig;
@@ -104,11 +112,61 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     return rows.map((row) => profileRowToPlan(row));
   }
 
+  async ensureVoucherLifecycleEngine(): Promise<VoucherLifecycleEngineState> {
+    const resource = firstRow(await this.call("/system/resource/print"));
+    const routerOsVersion = pick(resource, "version") ?? "";
+    const majorVersion = Number.parseInt(routerOsVersion, 10);
+    if (!Number.isFinite(majorVersion) || majorVersion < 7) {
+      throw new RouterAdapterError(
+        "router_rejected",
+        "TicketPro voucher lifecycle requires RouterOS 7 or newer"
+      );
+    }
+
+    await this.ensureRouterClock();
+    await this.upsertSystemScript(
+      VOUCHER_EXPIRATION_SCRIPT,
+      buildVoucherExpirationScript()
+    );
+    await this.upsertLifecycleScheduler();
+
+    const [profiles, systemScripts] = await Promise.all([
+      this.call("/ip/hotspot/user/profile/print"),
+      this.call("/system/script/print")
+    ]);
+    const systemScriptNames = new Set(
+      systemScripts.map((script) => pick(script, "name")).filter((name): name is string => Boolean(name))
+    );
+    let managedProfileCount = 0;
+    for (const profile of profiles) {
+      const profileId = pick(profile, ".id", "id");
+      if (!profileId) continue;
+      const currentOnLogin = pick(profile, "on-login") ?? "";
+      const nextOnLogin = mergeVoucherLifecycleOnLogin(currentOnLogin, systemScriptNames);
+      if (nextOnLogin !== currentOnLogin) {
+        await this.call("/ip/hotspot/user/profile/set", {
+          numbers: profileId,
+          "on-login": nextOnLogin
+        });
+      }
+      managedProfileCount += 1;
+    }
+
+    const clock = firstRow(await this.call("/system/clock/print"));
+    return {
+      clockReady: isPlausibleRouterDate(pick(clock, "date")),
+      engineVersion: VOUCHER_LIFECYCLE_ENGINE_VERSION,
+      managedProfileCount,
+      schedulerEnabled: true
+    };
+  }
+
   async createHotspotPlan(plan: HotspotPlanDraft): Promise<HotspotPlan> {
     const profileName = plan.profileName || slugify(plan.name);
 
     await this.call("/ip/hotspot/user/profile/add", {
       name: profileName,
+      "on-login": mergeVoucherLifecycleOnLogin(""),
       "rate-limit": buildRateLimit(plan),
       "session-timeout": minutesToRouterOsDuration(plan.durationMinutes),
       "shared-users": String(plan.sharedUsers)
@@ -126,10 +184,24 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       id: current.id,
       uploadLimit: updates.uploadLimit === undefined ? current.uploadLimit : updates.uploadLimit
     };
+    const [currentProfiles, systemScripts] = await Promise.all([
+      this.call("/ip/hotspot/user/profile/print"),
+      this.call("/system/script/print")
+    ]);
+    const currentProfile = currentProfiles.find((profile) =>
+      pick(profile, ".id", "id") === current.id
+      || pick(profile, "name") === current.profileName
+    );
 
     await this.call("/ip/hotspot/user/profile/set", {
       name: next.profileName,
       numbers: current.id,
+      "on-login": mergeVoucherLifecycleOnLogin(
+        pick(currentProfile ?? {}, "on-login") ?? "",
+        new Set(
+          systemScripts.map((script) => pick(script, "name")).filter((name): name is string => Boolean(name))
+        )
+      ),
       "rate-limit": buildRateLimit(next),
       "session-timeout": minutesToRouterOsDuration(next.durationMinutes),
       "shared-users": String(next.sharedUsers)
@@ -153,7 +225,7 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     const password = await resolveTicketPassword(user);
 
     await this.call("/ip/hotspot/user/add", {
-      comment: user.comment ?? "",
+      comment: buildVoucherLifecycleComment(user.validityMinutes, user.comment),
       "limit-bytes-total": user.limitBytesTotal ?? null,
       "limit-uptime": user.limitUptime ?? null,
       name: user.username,
@@ -314,6 +386,7 @@ export class MikroTikRouterAdapter implements RouterAdapter {
           comment: `Lot créé par ${batch.createdByProfile ?? "operateur"}`,
           limitBytesTotal: batch.limitBytesTotal,
           limitUptime: batch.limitUptime,
+          validityMinutes: batch.validityMinutes,
           passwordSecretRef: generatedCode.passwordSecretRef,
           planId: batch.planId,
           username: generatedCode.username
@@ -354,6 +427,20 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     const user = await this.findUserByName(username);
     await this.call("/ip/hotspot/user/set", {
       "mac-address": "00:00:00:00:00:00",
+      numbers: user.id
+    });
+    return this.findUserByName(username);
+  }
+
+  async configureHotspotUserLifecycle(
+    username: string,
+    validityMinutes: number | null
+  ): Promise<HotspotUser> {
+    const user = await this.findUserByName(username);
+    const comment = reconcileVoucherLifecycleComment(user.comment, validityMinutes);
+    if (comment === (user.comment ?? "")) return user;
+    await this.call("/ip/hotspot/user/set", {
+      comment,
       numbers: user.id
     });
     return this.findUserByName(username);
@@ -795,6 +882,100 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     }
   }
 
+  private async ensureRouterClock(): Promise<void> {
+    const ntpClients = await this.call("/system/ntp/client/print");
+    const ntpClient = firstRow(ntpClients);
+    if (!isTruthy(pick(ntpClient, "enabled"))) {
+      await this.call("/system/ntp/client/set", { enabled: "yes" });
+    }
+
+    const ntpServers = await this.call("/system/ntp/client/servers/print");
+    if (ntpServers.length === 0) {
+      await this.call("/system/ntp/client/servers/add", {
+        address: "time.cloudflare.com"
+      });
+      await this.call("/system/ntp/client/servers/add", {
+        address: "time.google.com"
+      });
+    }
+
+    const clock = firstRow(await this.call("/system/clock/print"));
+    if (!isPlausibleRouterDate(pick(clock, "date"))) {
+      throw new RouterAdapterError(
+        "router_rejected",
+        "RouterOS clock is invalid; NTP was enabled, wait for synchronization and retry"
+      );
+    }
+  }
+
+  private async upsertSystemScript(name: string, source: string): Promise<void> {
+    const scripts = await this.call("/system/script/print");
+    const matches = scripts.filter((script) => pick(script, "name") === name);
+    const existingId = pick(matches[0] ?? {}, ".id", "id");
+    const params = {
+      comment: `TicketPro managed voucher lifecycle v${VOUCHER_LIFECYCLE_ENGINE_VERSION}`,
+      name,
+      policy: "read,write,policy,test",
+      source
+    };
+    if (existingId) {
+      const existing = matches[0];
+      if (
+        pick(existing, "source") !== source
+        || pick(existing, "comment") !== params.comment
+        || pick(existing, "policy") !== params.policy
+      ) {
+        await this.call("/system/script/set", { ...params, numbers: existingId });
+      }
+    } else {
+      await this.call("/system/script/add", params);
+    }
+    for (const duplicate of matches.slice(1)) {
+      const duplicateId = pick(duplicate, ".id", "id");
+      if (duplicateId) {
+        await this.call("/system/script/remove", { numbers: duplicateId });
+      }
+    }
+  }
+
+  private async upsertLifecycleScheduler(): Promise<void> {
+    const schedulers = await this.call("/system/scheduler/print");
+    const matches = schedulers.filter((scheduler) =>
+      pick(scheduler, "name") === VOUCHER_EXPIRATION_SCHEDULER
+    );
+    const existingId = pick(matches[0] ?? {}, ".id", "id");
+    const params = {
+      comment: `TicketPro managed voucher lifecycle v${VOUCHER_LIFECYCLE_ENGINE_VERSION}`,
+      disabled: "no",
+      interval: "1m",
+      name: VOUCHER_EXPIRATION_SCHEDULER,
+      "on-event": VOUCHER_EXPIRATION_SCRIPT,
+      policy: "read,write,policy,test",
+      "start-time": "startup"
+    };
+    if (existingId) {
+      const existing = matches[0];
+      if (
+        isTruthy(pick(existing, "disabled"))
+        || pick(existing, "interval") !== params.interval
+        || pick(existing, "on-event") !== params["on-event"]
+        || pick(existing, "comment") !== params.comment
+        || pick(existing, "policy") !== params.policy
+        || pick(existing, "start-time") !== params["start-time"]
+      ) {
+        await this.call("/system/scheduler/set", { ...params, numbers: existingId });
+      }
+    } else {
+      await this.call("/system/scheduler/add", params);
+    }
+    for (const duplicate of matches.slice(1)) {
+      const duplicateId = pick(duplicate, ".id", "id");
+      if (duplicateId) {
+        await this.call("/system/scheduler/remove", { numbers: duplicateId });
+      }
+    }
+  }
+
   private async call(command: string, params: RouterOsApiRequest["params"] = {}): Promise<RouterOsApiRow[]> {
     try {
       return await this.transport.call({ ...this.config, command, params });
@@ -881,6 +1062,7 @@ async function userRowToHotspotUser(row: RouterOsApiRow): Promise<HotspotUser> {
     (limitBytesTotal > 0 && downloadedBytes + uploadedBytes >= limitBytesTotal) ||
     (routerOsDurationToSeconds(limitUptime) > 0 &&
       routerOsDurationToSeconds(uptime) >= routerOsDurationToSeconds(limitUptime));
+  const lifecycleExpired = pick(row, "comment")?.includes(";state=expired;") ?? false;
 
   return {
     comment: pick(row, "comment") || null,
@@ -894,7 +1076,11 @@ async function userRowToHotspotUser(row: RouterOsApiRow): Promise<HotspotUser> {
           : `unavailable://mikrotik/${username}/password`,
     planId: pick(row, "profile") || "default",
     profileName: pick(row, "profile") || "default",
-    status: limitReached ? "expired" : isTruthy(pick(row, "disabled")) ? "disabled" : "available",
+    status: lifecycleExpired || limitReached
+      ? "expired"
+      : isTruthy(pick(row, "disabled"))
+        ? "disabled"
+        : "available",
     username,
     downloadedBytes,
     uploadedBytes,
@@ -1049,4 +1235,131 @@ function slugify(value: string): string {
 
 function sanitizeRouterMessage(message: string): string {
   return message.replace(/[\r\n]+/g, " ").slice(0, 240);
+}
+
+export function buildVoucherLifecycleComment(
+  validityMinutes: number | null | undefined,
+  originalComment?: string | null
+): string {
+  if (!validityMinutes || validityMinutes <= 0) {
+    return originalComment?.trim().slice(0, 120) ?? "";
+  }
+
+  const normalizedValidity = Math.max(1, Math.floor(validityMinutes));
+  return `${VOUCHER_LIFECYCLE_COMMENT_PREFIX}validity=${normalizedValidity};expires=0;state=new;`;
+}
+
+export function reconcileVoucherLifecycleComment(
+  currentComment: string | null | undefined,
+  validityMinutes: number | null
+): string {
+  if (!validityMinutes || validityMinutes <= 0) {
+    return currentComment?.startsWith(VOUCHER_LIFECYCLE_COMMENT_PREFIX)
+      ? ""
+      : currentComment?.trim().slice(0, 120) ?? "";
+  }
+  if (!currentComment?.startsWith(VOUCHER_LIFECYCLE_COMMENT_PREFIX)) {
+    return buildVoucherLifecycleComment(validityMinutes, currentComment);
+  }
+
+  const expires = currentComment.match(/;expires=(\d+);/)?.[1] ?? "0";
+  const state = currentComment.match(/;state=([a-z]+);/)?.[1] ?? "new";
+  return `${VOUCHER_LIFECYCLE_COMMENT_PREFIX}validity=${Math.floor(validityMinutes)};expires=${expires};state=${state};`;
+}
+
+export function mergeVoucherLifecycleOnLogin(
+  currentSource: string,
+  knownScriptNames: ReadonlySet<string> = new Set()
+): string {
+  const withoutManagedBlock = currentSource
+    .replace(
+      new RegExp(
+        `${escapeRegExp(VOUCHER_PROFILE_HANDLER_BEGIN)}[\\s\\S]*?${escapeRegExp(VOUCHER_PROFILE_HANDLER_END)}`,
+        "g"
+      ),
+      ""
+    )
+    .trim();
+  const preservedSource = knownScriptNames.has(withoutManagedBlock)
+    ? `/system script run ${quoteRouterOsValue(withoutManagedBlock)};`
+    : withoutManagedBlock;
+  return [
+    preservedSource,
+    VOUCHER_PROFILE_HANDLER_BEGIN,
+    buildVoucherOnLoginScript(),
+    VOUCHER_PROFILE_HANDLER_END
+  ].filter(Boolean).join("\r\n");
+}
+
+export function buildVoucherOnLoginScript(): string {
+  return [
+    ':local tpId [/ip hotspot user find where name=$user];',
+    ':if ([:len $tpId] = 0) do={ :return };',
+    ':local tpComment [/ip hotspot user get $tpId comment];',
+    ':local tpMarker "TicketPro:v1;";',
+    ':if ([:typeof [:find $tpComment $tpMarker]] = "nil") do={ :return };',
+    ':local tpValidityKey "validity=";',
+    ':local tpValidityStart [:find $tpComment $tpValidityKey];',
+    ':if ([:typeof $tpValidityStart] = "nil") do={ :return };',
+    ':set tpValidityStart ($tpValidityStart + [:len $tpValidityKey]);',
+    ':local tpValidityEnd [:find $tpComment ";" $tpValidityStart];',
+    ':if ([:typeof $tpValidityEnd] = "nil") do={ :return };',
+    ':local tpValidity [:tonum [:pick $tpComment $tpValidityStart $tpValidityEnd]];',
+    ':local tpExpiresKey "expires=";',
+    ':local tpExpiresStart [:find $tpComment $tpExpiresKey];',
+    ':if ([:typeof $tpExpiresStart] = "nil") do={ :return };',
+    ':set tpExpiresStart ($tpExpiresStart + [:len $tpExpiresKey]);',
+    ':local tpExpiresEnd [:find $tpComment ";" $tpExpiresStart];',
+    ':if ([:typeof $tpExpiresEnd] = "nil") do={ :return };',
+    ':local tpExpires [:tonum [:pick $tpComment $tpExpiresStart $tpExpiresEnd]];',
+    ':if (($tpValidity > 0) && ($tpExpires = 0)) do={',
+    '  :local tpNow [:tonsec [:timestamp]];',
+    '  :local tpDeadline ($tpNow + ($tpValidity * 60000000000));',
+    '  /ip hotspot user set $tpId comment=("TicketPro:v1;validity=" . $tpValidity . ";expires=" . $tpDeadline . ";state=active;");',
+    '};'
+  ].join("\r\n");
+}
+
+export function buildVoucherExpirationScript(): string {
+  return [
+    ':local tpNow [:tonsec [:timestamp]];',
+    ':foreach tpId in=[/ip hotspot user find where comment~"TicketPro:v1;"] do={',
+    '  :local tpComment [/ip hotspot user get $tpId comment];',
+    '  :local tpValidityKey "validity=";',
+    '  :local tpValidityStart [:find $tpComment $tpValidityKey];',
+    '  :local tpExpiresKey "expires=";',
+    '  :local tpExpiresStart [:find $tpComment $tpExpiresKey];',
+    '  :if (([:typeof $tpValidityStart] != "nil") && ([:typeof $tpExpiresStart] != "nil")) do={',
+    '    :set tpValidityStart ($tpValidityStart + [:len $tpValidityKey]);',
+    '    :local tpValidityEnd [:find $tpComment ";" $tpValidityStart];',
+    '    :set tpExpiresStart ($tpExpiresStart + [:len $tpExpiresKey]);',
+    '    :local tpExpiresEnd [:find $tpComment ";" $tpExpiresStart];',
+    '    :if (([:typeof $tpValidityEnd] != "nil") && ([:typeof $tpExpiresEnd] != "nil")) do={',
+    '      :local tpValidity [:tonum [:pick $tpComment $tpValidityStart $tpValidityEnd]];',
+    '      :local tpExpires [:tonum [:pick $tpComment $tpExpiresStart $tpExpiresEnd]];',
+    '      :if (($tpExpires > 0) && ($tpNow >= $tpExpires)) do={',
+    '        :local tpUser [/ip hotspot user get $tpId name];',
+    '        :foreach tpActiveId in=[/ip hotspot active find where user=$tpUser] do={ /ip hotspot active remove $tpActiveId };',
+    '        :foreach tpCookieId in=[/ip hotspot cookie find where user=$tpUser] do={ /ip hotspot cookie remove $tpCookieId };',
+    '        /ip hotspot user set $tpId disabled=yes comment=("TicketPro:v1;validity=" . $tpValidity . ";expires=" . $tpExpires . ";state=expired;");',
+    '        :log info ("TicketPro voucher expired: " . $tpUser);',
+    '      };',
+    '    };',
+    '  };',
+    '};'
+  ].join("\r\n");
+}
+
+function isPlausibleRouterDate(value: string | undefined): boolean {
+  if (!value) return false;
+  const years = value.match(/\b(20\d{2})\b/g) ?? [];
+  return years.some((year) => Number(year) >= 2024);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function quoteRouterOsValue(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }

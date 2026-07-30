@@ -39,6 +39,10 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
     return this.delegate.getHotspotPlans();
   }
 
+  ensureVoucherLifecycleEngine() {
+    return this.delegate.ensureVoucherLifecycleEngine();
+  }
+
   createHotspotPlan(plan: HotspotPlanDraft) {
     return this.delegate.createHotspotPlan(plan);
   }
@@ -77,6 +81,7 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
       ...batch,
       limitBytesTotal: batch.limitBytesTotal ?? dataLimitMbToBytes(plan?.data_limit_mb),
       limitUptime: batch.limitUptime ?? durationMinutesToRouterOs(plan?.duration_minutes),
+      validityMinutes: batch.validityMinutes ?? effectiveValidityMinutes(plan),
       planId: this.resolveProfileReference(batch.planId)
     });
   }
@@ -99,6 +104,10 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
 
   clearHotspotUserMac(username: string) {
     return this.delegate.clearHotspotUserMac(username);
+  }
+
+  configureHotspotUserLifecycle(username: string, validityMinutes: number | null) {
+    return this.delegate.configureHotspotUserLifecycle(username, validityMinutes);
   }
 
   configureHotspotAntiTethering(
@@ -161,6 +170,7 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
       ...user,
       limitBytesTotal: user.limitBytesTotal ?? dataLimitMbToBytes(plan?.data_limit_mb),
       limitUptime: user.limitUptime ?? durationMinutesToRouterOs(plan?.duration_minutes),
+      validityMinutes: user.validityMinutes ?? effectiveValidityMinutes(plan),
       planId: this.resolveProfileReference(user.planId)
     };
   }
@@ -178,6 +188,13 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
         plan.name === reference
     );
   }
+}
+
+function effectiveValidityMinutes(
+  plan: HotspotPlanRecord | undefined
+): number | null {
+  const value = plan?.validity_minutes ?? plan?.duration_minutes;
+  return value && value > 0 ? value : null;
 }
 
 function dataLimitMbToBytes(value: number | null | undefined): number | null {

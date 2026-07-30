@@ -71,6 +71,7 @@ export class RouterStateReconciliationService {
       service.listHotspotUsers(),
       this.policies.load(router.account_id, router.id, cloudRouterId)
     ]);
+    await service.ensureVoucherLifecycleEngine();
     const policy = policyResult.policy;
     const strict = policy.antiSharingMode === "strict";
 
@@ -100,6 +101,7 @@ export class RouterStateReconciliationService {
     }
 
     await this.reconcilePlans(router.id, actualPlans);
+    await this.reconcileVoucherLifecycle(router.id, routerUsers, service);
     const recoveredTicketCount = await this.reconcileTickets(router, routerUsers);
     const [verifiedTtl, verifiedBypasses] = await Promise.all([
       service.getHotspotAntiTetheringState(),
@@ -223,6 +225,27 @@ export class RouterStateReconciliationService {
       recovered += users.length;
     }
     return recovered;
+  }
+
+  private async reconcileVoucherLifecycle(
+    routerId: string,
+    routerUsers: HotspotUser[],
+    service: RouterService
+  ): Promise<void> {
+    const localPlans = await this.plans.listByRouter(routerId);
+    for (const user of routerUsers) {
+      const plan = localPlans.find((candidate) =>
+        candidate.mikrotik_profile_name === user.profileName
+        || candidate.mikrotik_profile_name === user.planId
+        || candidate.name === user.profileName
+      );
+      if (!plan) continue;
+      const validityMinutes = plan.validity_minutes ?? plan.duration_minutes;
+      await service.configureHotspotUserLifecycle(
+        user.username,
+        validityMinutes && validityMinutes > 0 ? validityMinutes : null
+      );
+    }
   }
 
   private async reconcilePlans(
