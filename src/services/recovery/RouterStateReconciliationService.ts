@@ -18,6 +18,7 @@ import {
 import { RouterCloudRecoveryService } from "./RouterCloudRecoveryService";
 
 export type RouterStateReconciliationResult = {
+  blockedDeviceCount: number;
   bypassCount: number;
   planCount: number;
   recoveredTicketCount: number;
@@ -100,12 +101,30 @@ export class RouterStateReconciliationService {
       });
     }
 
+    const desiredBlockedDevices = policy.blockedDevices;
+    const actualBlockedDevices = await service.listManagedHotspotBlockedDevices();
+    const desiredBlockedIds = new Set(desiredBlockedDevices.map((device) => device.id));
+    for (const actual of actualBlockedDevices) {
+      if (!desiredBlockedIds.has(actual.id)) {
+        await service.removeHotspotBlockedDevice(actual.id, actual.macAddress);
+      }
+    }
+    for (const desired of desiredBlockedDevices) {
+      await service.upsertHotspotBlockedDevice({
+        address: desired.ipAddress,
+        comment: desired.name,
+        id: desired.id,
+        macAddress: desired.macAddress
+      });
+    }
+
     await this.reconcilePlans(router.id, actualPlans);
     await this.reconcileVoucherLifecycle(router.id, routerUsers, service);
     const recoveredTicketCount = await this.reconcileTickets(router, routerUsers);
-    const [verifiedTtl, verifiedBypasses] = await Promise.all([
+    const [verifiedTtl, verifiedBypasses, verifiedBlockedDevices] = await Promise.all([
       service.getHotspotAntiTetheringState(),
-      service.listManagedHotspotBypasses()
+      service.listManagedHotspotBypasses(),
+      service.listManagedHotspotBlockedDevices()
     ]);
     const expectedIpv4 = strict && policy.monitorIpv4Ttl;
     const expectedIpv6 = strict && policy.monitorIpv6HopLimit;
@@ -123,6 +142,16 @@ export class RouterStateReconciliationService {
         || normalizeMacAddress(actual.macAddress) !== normalizeMacAddress(desired.macAddress)
       ) {
         throw new Error(`RouterOS n'a pas confirmé le bypass de ${desired.name}.`);
+      }
+    }
+    for (const desired of desiredBlockedDevices) {
+      const actual = verifiedBlockedDevices.find((binding) => binding.id === desired.id);
+      if (
+        !actual
+        || actual.address !== desired.ipAddress
+        || normalizeMacAddress(actual.macAddress) !== normalizeMacAddress(desired.macAddress)
+      ) {
+        throw new Error(`RouterOS n'a pas confirmé le blocage de ${desired.name}.`);
       }
     }
 
@@ -145,6 +174,7 @@ export class RouterStateReconciliationService {
     }
 
     return {
+      blockedDeviceCount: desiredBlockedDevices.length,
       bypassCount: desiredBypasses.length,
       planCount: actualPlans.length,
       recoveredTicketCount,

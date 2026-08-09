@@ -32,6 +32,10 @@ const plans = [
     validityMinutes: 180
   }
 ];
+const servers = [
+  { addressPool: "pool-1", id: "*1", interfaceName: "bridge-1", isEnabled: true, name: "hotspot1", profileName: "default" },
+  { addressPool: "pool-2", id: "*2", interfaceName: "bridge-2", isEnabled: true, name: "hotspot2", profileName: "default" }
+];
 
 describe("ticketGenerationModel", () => {
   it("désactive le QR code par défaut", () => {
@@ -93,5 +97,15 @@ describe("ticketGenerationModel", () => {
       totalValue: 10000
     });
     expect(JSON.stringify(batch)).not.toContain("password");
+  });
+
+  it("oblige à choisir un serveur ou All lorsque plusieurs Hotspots existent", () => {
+    const state = {
+      ...createInitialTicketGenerationState("routeur-demo"),
+      selectedPlanId: "plan-3h"
+    };
+    expect(validateTicketGeneration(state, routers, plans, servers)).toContain("Choisissez un serveur");
+    expect(validateTicketGeneration({ ...state, selectedServerName: "all" }, routers, plans, servers)).toBeNull();
+    expect(validateTicketGeneration({ ...state, selectedServerName: "hotspot2" }, routers, plans, servers)).toBeNull();
   });
 });

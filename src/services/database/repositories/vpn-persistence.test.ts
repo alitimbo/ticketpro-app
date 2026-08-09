@@ -39,6 +39,7 @@ describe("VPN persistence", () => {
       account_id: "account-a",
       network_id: "network-a",
       router_id: "router-a",
+      resource_id: "router-a",
       peer_type: "router",
       name: "Routeur A",
       public_key: "public-a",
@@ -86,13 +87,14 @@ describe("VPN persistence", () => {
     }));
 
     expect(replacement.id).toBe("new-peer");
-    expect(await peers.listByAccount("account-a")).toEqual([
+    expect(await peers.listByAccount("account-a")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "old-peer", status: "revoked" }),
       expect.objectContaining({
         id: "new-peer",
         assigned_address: "10.250.0.2/32",
         public_key: "new-public-key"
       })
-    ]);
+    ]));
   });
 
   it("retourne le pair existant lors d'une répétition strictement identique", async () => {
@@ -104,6 +106,16 @@ describe("VPN persistence", () => {
 
     expect(repeated.id).toBe(existing.id);
     expect(await peers.listByAccount("account-a")).toHaveLength(1);
+  });
+
+  it("refuse de réactiver une clé déjà révoquée", async () => {
+    const database = new InMemoryDatabaseClient();
+    await database.initialize();
+    const peers = new VpnPeerRepository(database);
+    await peers.create(peerInput({ id: "revoked-peer", status: "revoked" }));
+
+    await expect(peers.create(peerInput({ id: "reused-peer", status: "active" })))
+      .rejects.toThrow("ne peut pas être réactivée");
   });
 });
 
@@ -125,6 +137,7 @@ function peerInput(
     endpoint_port: 51820,
     status: "active",
     last_handshake_at: null,
-    ...overrides
+    ...overrides,
+    resource_id: overrides.resource_id ?? "operator:test-pc"
   };
 }

@@ -10,8 +10,9 @@ export class TicketBatchRepository {
     await this.database.execute(
       `INSERT INTO ticket_batches (
         id, account_id, router_id, plan_id, operator_profile, quantity, prefix, code_length,
-        status, generated_file_id, created_by_profile, created_by_profile_id, sync_status
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)`,
+        status, generated_file_id, created_by_profile, created_by_profile_id, sync_status,
+        hotspot_server_name
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`,
       [
         input.id,
         input.account_id,
@@ -25,7 +26,8 @@ export class TicketBatchRepository {
         input.generated_file_id,
         input.created_by_profile,
         input.created_by_profile_id,
-        input.sync_status ?? "local"
+        input.sync_status ?? "local",
+        input.hotspot_server_name ?? "all"
       ]
     );
 
@@ -116,12 +118,14 @@ export class TicketBatchRepository {
         input.generated_file_id,
         input.created_by_profile,
         input.created_by_profile_id,
-        input.sync_status ?? "local"
+        input.sync_status ?? "local",
+        input.hotspot_server_name ?? "all"
       ],
       sql: `INSERT INTO ticket_batches (
         id, account_id, router_id, plan_id, operator_profile, quantity, prefix, code_length,
-        status, generated_file_id, created_by_profile, created_by_profile_id, sync_status
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)`
+        status, generated_file_id, created_by_profile, created_by_profile_id, sync_status,
+        hotspot_server_name
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`
     };
   }
 
@@ -148,14 +152,25 @@ export class TicketBatchRepository {
         input.mikrotik_id,
         input.created_by_profile,
         input.created_by_profile_id,
-        input.sync_status ?? "local"
+        input.sync_status ?? "local",
+        input.hotspot_server_name ?? "all",
+        input.mikrotik_profile_name ?? null,
+        input.exported_at ?? null,
+        input.archived_at ?? null,
+        input.router_deleted_at ?? null,
+        input.last_router_sync_at ?? null,
+        input.uptime_seconds ?? 0,
+        input.remaining_seconds ?? null,
+        input.data_remaining_bytes ?? null
       ],
       sql: `INSERT INTO tickets (
         id, account_id, batch_id, router_id, plan_id, username, password_encrypted, status,
         mac_address, ip_address, activated_at, completed_at, expires_at, deleted_at,
         printed_count, downloaded_bytes, uploaded_bytes, mikrotik_id, created_by_profile,
-        created_by_profile_id, sync_status
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)`
+        created_by_profile_id, sync_status, hotspot_server_name, mikrotik_profile_name,
+        exported_at, archived_at, router_deleted_at, last_router_sync_at,
+        uptime_seconds, remaining_seconds, data_remaining_bytes
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)`
     };
   }
 }

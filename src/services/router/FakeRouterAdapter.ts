@@ -29,6 +29,7 @@ type FakeRouterAdapterOptions = {
 
 export class FakeRouterAdapter implements RouterAdapter {
   private hotspotBypasses = new Map<string, import("../../domain/router").HotspotBypassBinding>();
+  private hotspotBlockedDevices = new Map<string, import("../../domain/router").HotspotBypassBinding>();
   private hotspotAntiTetheringState: import("../../domain/router").HotspotAntiTetheringState = {
     blockIpv4Ttl: false,
     blockIpv6: false,
@@ -264,6 +265,7 @@ export class FakeRouterAdapter implements RouterAdapter {
       passwordSecretRef: user.passwordSecretRef,
       planId: user.planId,
       profileName: plan.profileName,
+      serverName: user.serverName ?? "all",
       status: "available",
       username: user.username
     };
@@ -308,6 +310,7 @@ export class FakeRouterAdapter implements RouterAdapter {
         passwordSecretRef: generatedCode.passwordSecretRef,
         planId: batch.planId,
         profileName: plan.profileName,
+        serverName: batch.serverName ?? "all",
         status: "available",
         username: generatedCode.username
       });
@@ -397,9 +400,11 @@ export class FakeRouterAdapter implements RouterAdapter {
 
   async upsertHotspotBypass(
     binding: import("../../domain/router").HotspotBypassBinding
-  ): Promise<void> {
+  ): Promise<import("../../domain/router").HotspotIpBindingMutationResult> {
     await this.guard("upsertHotspotBypass");
+    const existing = this.hotspotBypasses.get(binding.id);
     this.hotspotBypasses.set(binding.id, { ...binding });
+    return { outcome: existing ? "already_present" : "created" };
   }
 
   async listManagedHotspotBypasses() {
@@ -407,9 +412,28 @@ export class FakeRouterAdapter implements RouterAdapter {
     return Array.from(this.hotspotBypasses.values());
   }
 
-  async removeHotspotBypass(id: string, _macAddress: string): Promise<void> {
+  async removeHotspotBypass(id: string, _macAddress: string): Promise<import("../../domain/router").HotspotIpBindingMutationResult> {
     await this.guard("removeHotspotBypass");
-    this.hotspotBypasses.delete(id);
+    return { outcome: this.hotspotBypasses.delete(id) ? "removed" : "not_found" };
+  }
+
+  async upsertHotspotBlockedDevice(
+    binding: import("../../domain/router").HotspotBypassBinding
+  ): Promise<import("../../domain/router").HotspotIpBindingMutationResult> {
+    await this.guard("upsertHotspotBlockedDevice");
+    const existing = this.hotspotBlockedDevices.get(binding.id);
+    this.hotspotBlockedDevices.set(binding.id, { ...binding });
+    return { outcome: existing ? "already_present" : "created" };
+  }
+
+  async listManagedHotspotBlockedDevices() {
+    await this.guard("listManagedHotspotBlockedDevices");
+    return Array.from(this.hotspotBlockedDevices.values());
+  }
+
+  async removeHotspotBlockedDevice(id: string, _macAddress: string): Promise<import("../../domain/router").HotspotIpBindingMutationResult> {
+    await this.guard("removeHotspotBlockedDevice");
+    return { outcome: this.hotspotBlockedDevices.delete(id) ? "removed" : "not_found" };
   }
 
   async listActiveUsers(): Promise<ActiveHotspotUser[]> {

@@ -66,6 +66,41 @@ describe("TicketPdfService", () => {
     expect(text).toContain("(847295)");
     expect(filledModules.length).toBeGreaterThan(80);
   });
+
+  it.each(["thermal58", "thermal80"] as const)(
+    "adapte dynamiquement la longueur du ticket %s sans masquer le mot de passe distinct",
+    (format) => {
+      const input = buildPdfInput(1);
+      input.format = format;
+      input.hotspotAddress = "portail-zone-wifi-tres-longue.ticketpro.local";
+      input.tickets[0].password = "847295";
+      const text = new TextDecoder().decode(generateTicketPdf(input));
+      const expectedWidth = format === "thermal58" ? "164.41" : "226.77";
+      const mediaBox = text.match(new RegExp(`/MediaBox \\[0 0 ${expectedWidth} ([0-9.]+)\\]`));
+
+      expect(mediaBox).not.toBeNull();
+      expect(Number(mediaBox?.[1])).toBeGreaterThan(format === "thermal58" ? 122 : 132);
+      expect(text).toContain("(MOT DE PASSE)");
+      expect(text).toContain("(847295)");
+      expect(text).not.toContain("(Lot ");
+    }
+  );
+
+  it("réduit la longueur thermique lorsque le login sert aussi de mot de passe", () => {
+    const singleCodeInput = buildPdfInput(1);
+    singleCodeInput.format = "thermal58";
+    const distinctPasswordInput = buildPdfInput(1);
+    distinctPasswordInput.format = "thermal58";
+    distinctPasswordInput.tickets[0].password = "847295";
+    const singleText = new TextDecoder().decode(generateTicketPdf(singleCodeInput));
+    const distinctText = new TextDecoder().decode(generateTicketPdf(distinctPasswordInput));
+    const singleHeight = Number(singleText.match(/\/MediaBox \[0 0 164\.41 ([0-9.]+)\]/)?.[1]);
+    const distinctHeight = Number(distinctText.match(/\/MediaBox \[0 0 164\.41 ([0-9.]+)\]/)?.[1]);
+
+    expect(singleHeight).toBeGreaterThan(0);
+    expect(distinctHeight).toBeGreaterThan(singleHeight);
+    expect(singleText).not.toContain("(MOT DE PASSE)");
+  });
 });
 
 function buildPdfInput(quantity: number): TicketPdfInput {

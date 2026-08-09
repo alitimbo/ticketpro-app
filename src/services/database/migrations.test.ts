@@ -34,6 +34,14 @@ const generatedFileMetadataMigrationPath = resolve(
   process.cwd(),
   "src-tauri/migrations/021_generated_file_metadata.sql"
 );
+const vpnPeerLifecycleMigrationPath = resolve(
+  process.cwd(),
+  "src-tauri/migrations/022_vpn_peer_lifecycle.sql"
+);
+const ticketRuntimeTrackingMigrationPath = resolve(
+  process.cwd(),
+  "src-tauri/migrations/023_ticket_runtime_tracking.sql"
+);
 
 describe("migration comptes et abonnements", () => {
   const migration = readFileSync(migrationPath, "utf8");
@@ -47,6 +55,8 @@ describe("migration comptes et abonnements", () => {
   const ticketRouterUsernameUniquenessMigration = readFileSync(ticketRouterUsernameUniquenessMigrationPath, "utf8");
   const routerHotspotAddressMigration = readFileSync(routerHotspotAddressMigrationPath, "utf8");
   const generatedFileMetadataMigration = readFileSync(generatedFileMetadataMigrationPath, "utf8");
+  const vpnPeerLifecycleMigration = readFileSync(vpnPeerLifecycleMigrationPath, "utf8");
+  const ticketRuntimeTrackingMigration = readFileSync(ticketRuntimeTrackingMigrationPath, "utf8");
 
   it("ajoute la grille tarifaire evolutive des abonnements logiciel", () => {
     expect(migration).toContain("price_per_router_cfa");
@@ -138,5 +148,23 @@ describe("migration comptes et abonnements", () => {
   it("conserve les paramètres nécessaires à la régénération exacte des fichiers", () => {
     expect(generatedFileMetadataMigration).toContain("ALTER TABLE generated_files ADD COLUMN metadata_json TEXT");
     expect(generatedFileMetadataMigration).not.toContain("DROP TABLE");
+  });
+
+  it("conserve l'historique WireGuard et interdit plusieurs clés actives par ressource", () => {
+    expect(vpnPeerLifecycleMigration).toContain("resource_id TEXT NOT NULL");
+    expect(vpnPeerLifecycleMigration).toContain("ROW_NUMBER() OVER");
+    expect(vpnPeerLifecycleMigration).toContain("uq_vpn_peer_active_resource");
+    expect(vpnPeerLifecycleMigration).toContain("WHERE status <> 'revoked'");
+    expect(vpnPeerLifecycleMigration).toContain("uq_vpn_peer_public_key");
+    expect(vpnPeerLifecycleMigration).not.toContain("DELETE FROM vpn_peers");
+  });
+
+  it("persiste le serveur Hotspot, l'état temps réel et l'historique des vouchers", () => {
+    expect(ticketRuntimeTrackingMigration).toContain("hotspot_server_name");
+    expect(ticketRuntimeTrackingMigration).toContain("mikrotik_profile_name");
+    expect(ticketRuntimeTrackingMigration).toContain("remaining_seconds");
+    expect(ticketRuntimeTrackingMigration).toContain("data_remaining_bytes");
+    expect(ticketRuntimeTrackingMigration).toContain("CREATE TABLE IF NOT EXISTS ticket_state_history");
+    expect(ticketRuntimeTrackingMigration).not.toContain("DROP TABLE");
   });
 });

@@ -1,5 +1,6 @@
 import type { CreateGeneratedFileInput } from "../../domain/database";
 import QRCode from "qrcode";
+import type { TicketDisplaySettings } from "../tickets/TicketDisplaySettingsService";
 
 export type TicketPdfFormat = "a4" | "a5" | "thermal58" | "thermal80";
 
@@ -30,6 +31,7 @@ export type TicketPdfInput = {
   template: TicketPdfTemplate;
   tickets: TicketPdfTicket[];
   zoneName: string;
+  displaySettings?: TicketDisplaySettings;
 };
 
 export type TicketPdfArchiveMetadata = Pick<
@@ -44,6 +46,7 @@ export type TicketPdfArchiveMetadata = Pick<
   | "qrCodeEnabled"
   | "template"
   | "zoneName"
+  | "displaySettings"
 >;
 
 type PageSize = {
@@ -82,7 +85,8 @@ export function buildGeneratedTicketPdfRecord(input: TicketPdfInput): CreateGene
     priceLabel: input.priceLabel ?? null,
     qrCodeEnabled: input.qrCodeEnabled,
     template: input.template,
-    zoneName: input.zoneName
+    zoneName: input.zoneName,
+    displaySettings: input.displaySettings
   };
 
   return {
@@ -130,7 +134,8 @@ export function parseTicketPdfArchiveMetadata(value: string | null | undefined):
       priceLabel: typeof parsed.priceLabel === "string" ? parsed.priceLabel : null,
       qrCodeEnabled: parsed.qrCodeEnabled === true,
       template: parsed.template as TicketPdfTemplate,
-      zoneName: parsed.zoneName
+      zoneName: parsed.zoneName,
+      displaySettings: parsed.displaySettings
     };
   } catch {
     return null;
@@ -139,12 +144,14 @@ export function parseTicketPdfArchiveMetadata(value: string | null | undefined):
 
 export function generateTicketPdf(input: TicketPdfInput): Uint8Array {
   const writer = new PdfWriter();
-  const pageSize = pageSizes[input.format];
   const grid = grids[input.format];
   const perPage = grid.columns * grid.rows;
   const chunks = chunk(input.tickets, perPage);
 
   chunks.forEach((tickets, pageIndex) => {
+    const pageSize = isThermalFormat(input.format)
+      ? getThermalPageSize(input, tickets[0])
+      : pageSizes[input.format];
     const page = new PdfPage(pageSize);
     drawTicketPage(page, input, tickets, pageIndex * perPage, grid);
     writer.addPage(page);
@@ -216,12 +223,20 @@ function drawTicket(
     y: number;
   }
 ) {
+  if (isThermal) {
+    drawThermalTicket(page, { cellHeight, cellWidth, index, input, ticket, x, y });
+    return;
+  }
+
   const padding = isThermal ? 8 : 6;
   const centerX = x + cellWidth / 2;
   const top = y + cellHeight - padding;
   const password = resolveTicketPdfPassword(ticket);
-  const isSingleCode = password === ticket.username;
-  const showQr = input.qrCodeEnabled || input.template === "qr";
+  const settings = input.displaySettings;
+  const showUsername = settings?.showUsername !== false;
+  const showPassword = settings?.showPassword !== false;
+  const isSingleCode = password === ticket.username || !showPassword;
+  const showQr = (settings?.showQrCode ?? input.qrCodeEnabled) || input.template === "qr";
   const isPremium = input.template === "premium";
 
   page.rect(x, y, cellWidth, cellHeight);
@@ -232,7 +247,12 @@ function drawTicket(
 
   const contentWidth = cellWidth - padding * 2;
   const titleSize = fitTextSize(input.zoneName, contentWidth, isThermal ? 11 : 8.4, isThermal ? 8 : 6);
-  page.text(input.zoneName, centerX, top - 8, { align: "center", font: "bold", size: titleSize });
+  if (settings?.showZoneName !== false || settings?.showLogo) {
+    const header = [settings?.showLogo ? "TICKETPRO" : null, settings?.showZoneName !== false ? input.zoneName : null]
+      .filter(Boolean)
+      .join(" · ");
+    page.text(header, centerX, top - 8, { align: "center", font: "bold", size: fitTextSize(header, contentWidth, titleSize, isThermal ? 7 : 5.2) });
+  }
   page.text(`TICKET ${index}`, centerX, top - (isThermal ? 20 : 17), {
     align: "center",
     size: isThermal ? 6.4 : 4.2
@@ -251,7 +271,7 @@ function drawTicket(
       font: "bold",
       size: credentialLabelSize
     });
-    page.text(ticket.username, centerX, credentialTop - (isThermal ? 27 : 21), {
+    page.text(showUsername ? ticket.username : "", centerX, credentialTop - (isThermal ? 27 : 21), {
       align: "center",
       font: "bold",
       size: fitTextSize(ticket.username, contentWidth - 8, isThermal ? 15 : 11, isThermal ? 9 : 7)
@@ -264,7 +284,7 @@ function drawTicket(
       font: "bold",
       size: credentialLabelSize
     });
-    page.text(ticket.username, centerX, credentialTop - (isThermal ? 21 : 16), {
+    page.text(showUsername ? ticket.username : "", centerX, credentialTop - (isThermal ? 21 : 16), {
       align: "center",
       font: "bold",
       size: fitTextSize(ticket.username, contentWidth - 8, isThermal ? 12 : 8.5, isThermal ? 8 : 5.8)
@@ -290,15 +310,23 @@ function drawTicket(
     size: fitTextSize(input.planName, contentWidth, isThermal ? 10 : 6.6, isThermal ? 7 : 4.5)
   });
   lineY -= lineGap;
-  const allowanceLabel = [`Duree ${input.durationLabel}`, input.dataLimitLabel].filter(Boolean).join(" - ");
+  const allowanceLabel = [settings?.showDuration === false ? null : `Duree ${input.durationLabel}`, settings?.showDataLimit === false ? null : input.dataLimitLabel].filter(Boolean).join(" - ");
   page.text(allowanceLabel, centerX, lineY, {
     align: "center",
     size: fitTextSize(allowanceLabel, contentWidth, smallSize, isThermal ? 5.2 : 3.5)
   });
 
-  if (input.priceLabel) {
+  if (input.priceLabel && settings?.showPrice !== false) {
     lineY -= lineGap;
     page.text(input.priceLabel, centerX, lineY, { align: "center", font: "bold", size: smallSize });
+  }
+  if (settings?.showCreatedAt) {
+    lineY -= lineGap;
+    page.text(`Cree le ${input.generatedAt.slice(0, 10)}`, centerX, lineY, { align: "center", size: smallSize });
+  }
+  if (settings?.showExpiresAt) {
+    lineY -= lineGap;
+    page.text("Expiration apres activation", centerX, lineY, { align: "center", size: smallSize });
   }
 
   const qrSize = isThermal ? 42 : 28;
@@ -317,17 +345,226 @@ function drawTicket(
     ? x + padding + (cellWidth - padding * 3 - qrSize) / 2
     : centerX;
   const footerWidth = showQr ? cellWidth - padding * 3 - qrSize : cellWidth - padding * 2;
-  const hotspotLabel = `Portail ${input.hotspotAddress}`;
-  page.text(hotspotLabel, footerCenterX, y + padding + 8, {
+  if (settings?.showInstructions !== false) {
+    const hotspotLabel = `Portail ${input.hotspotAddress}`;
+    page.text(hotspotLabel, footerCenterX, y + padding + 8, {
+      align: "center",
+      font: "bold",
+      size: fitTextSize(hotspotLabel, footerWidth, isThermal ? 7 : 4.6, isThermal ? 4.8 : 3.2)
+    });
+  }
+  if (settings?.showContact !== false) {
+    const ownerPhoneLabel = `Contact ${input.ownerPhone}`;
+    page.text(ownerPhoneLabel, footerCenterX, y + padding + 2, {
+      align: "center",
+      size: fitTextSize(ownerPhoneLabel, footerWidth, footerSize, isThermal ? 4.8 : 3.1)
+    });
+  }
+}
+
+function drawThermalTicket(
+  page: PdfPage,
+  {
+    cellHeight,
+    cellWidth,
+    input,
+    ticket,
+    x,
+    y
+  }: {
+    cellHeight: number;
+    cellWidth: number;
+    index: number;
+    input: TicketPdfInput;
+    ticket: TicketPdfTicket;
+    x: number;
+    y: number;
+  }
+) {
+  const is58 = input.format === "thermal58";
+  const padding = is58 ? 8 : 10;
+  const contentWidth = cellWidth - padding * 2;
+  const centerX = x + cellWidth / 2;
+  const password = resolveTicketPdfPassword(ticket);
+  const settings = input.displaySettings;
+  const showUsername = settings?.showUsername !== false;
+  const showPassword = settings?.showPassword !== false;
+  const isSingleCode = password === ticket.username || !showPassword;
+  const showQr = (settings?.showQrCode ?? input.qrCodeEnabled) || input.template === "qr";
+  const header = [settings?.showLogo ? "TICKETPRO" : null, settings?.showZoneName !== false ? input.zoneName : null]
+    .filter(Boolean)
+    .join(" - ") || "ACCES WIFI";
+  const headerLines = wrapPdfText(header, contentWidth, is58 ? 9 : 10, true, 2);
+  const portalLines = settings?.showInstructions === false
+    ? []
+    : wrapPdfText(`Portail : ${input.hotspotAddress}`, contentWidth, is58 ? 6.6 : 7.2, true, 3);
+  const contactLines = settings?.showContact === false
+    ? []
+    : wrapPdfText(`Contact : ${input.ownerPhone}`, contentWidth, is58 ? 6.2 : 6.8, false, 2);
+  const allowanceLabel = [
+    settings?.showDuration === false ? null : `Duree ${input.durationLabel}`,
+    settings?.showDataLimit === false ? null : input.dataLimitLabel
+  ].filter(Boolean).join(" - ");
+  const detailLines = [
+    allowanceLabel || null,
+    input.priceLabel && settings?.showPrice !== false ? input.priceLabel : null,
+    settings?.showCreatedAt ? `Cree le ${input.generatedAt.slice(0, 10)}` : null,
+    settings?.showExpiresAt ? "Expiration apres activation" : null
+  ].filter((line): line is string => Boolean(line));
+
+  page.rect(x, y, cellWidth, cellHeight);
+  if (input.template === "premium") {
+    page.fillRect(x, y + cellHeight - 3, cellWidth, 3, 0.72);
+  }
+
+  let cursor = y + cellHeight - padding;
+  headerLines.forEach((line) => {
+    cursor -= is58 ? 9 : 10;
+    page.text(line, centerX, cursor, { align: "center", font: "bold", size: is58 ? 9 : 10 });
+  });
+  cursor -= 5;
+
+  const credentialHeight = isSingleCode ? (is58 ? 34 : 38) : (is58 ? 50 : 54);
+  const credentialBottom = cursor - credentialHeight;
+  page.rect(x + padding, credentialBottom, contentWidth, credentialHeight);
+  if (isSingleCode) {
+    page.text("LOGIN", centerX, cursor - 10, { align: "center", font: "bold", size: is58 ? 6.2 : 6.8 });
+    page.text(showUsername ? ticket.username : "", centerX, cursor - 27, {
+      align: "center",
+      font: "bold",
+      size: fitTextSize(ticket.username, contentWidth - 10, is58 ? 14 : 16, is58 ? 9 : 10)
+    });
+  } else {
+    const dividerY = credentialBottom + credentialHeight / 2;
+    page.line(x + padding, dividerY, x + padding + contentWidth, dividerY);
+    page.text("LOGIN", centerX, cursor - 8, { align: "center", font: "bold", size: is58 ? 5.8 : 6.4 });
+    page.text(showUsername ? ticket.username : "", centerX, cursor - 20, {
+      align: "center",
+      font: "bold",
+      size: fitTextSize(ticket.username, contentWidth - 10, is58 ? 11 : 13, is58 ? 8 : 9)
+    });
+    page.text("MOT DE PASSE", centerX, dividerY - 9, { align: "center", font: "bold", size: is58 ? 5.8 : 6.4 });
+    page.text(password, centerX, dividerY - 21, {
+      align: "center",
+      font: "bold",
+      size: fitTextSize(password, contentWidth - 10, is58 ? 11 : 13, is58 ? 8 : 9)
+    });
+  }
+  cursor = credentialBottom - 7;
+
+  page.text(input.planName, centerX, cursor, {
     align: "center",
     font: "bold",
-    size: fitTextSize(hotspotLabel, footerWidth, isThermal ? 7 : 4.6, isThermal ? 4.8 : 3.2)
+    size: fitTextSize(input.planName, contentWidth, is58 ? 8.5 : 9.5, is58 ? 6.5 : 7)
   });
-  const ownerPhoneLabel = `Contact ${input.ownerPhone}`;
-  page.text(ownerPhoneLabel, footerCenterX, y + padding + 2, {
-    align: "center",
-    size: fitTextSize(ownerPhoneLabel, footerWidth, footerSize, isThermal ? 4.8 : 3.1)
+  detailLines.forEach((line) => {
+    cursor -= is58 ? 8.5 : 9;
+    page.text(line, centerX, cursor, {
+      align: "center",
+      font: line === input.priceLabel ? "bold" : "regular",
+      size: fitTextSize(line, contentWidth, is58 ? 6.5 : 7.2, is58 ? 5.4 : 5.8)
+    });
   });
+
+  if (showQr) {
+    const qrSize = is58 ? 48 : 58;
+    cursor -= qrSize + 7;
+    drawQrPattern(page, centerX - qrSize / 2, cursor, qrSize, `${ticket.username}:${password}`);
+  }
+
+  cursor -= 7;
+  page.line(x + padding, cursor, x + cellWidth - padding, cursor);
+  portalLines.forEach((line) => {
+    cursor -= is58 ? 8 : 8.5;
+    page.text(line, centerX, cursor, { align: "center", font: "bold", size: is58 ? 6.6 : 7.2 });
+  });
+  contactLines.forEach((line) => {
+    cursor -= is58 ? 7.5 : 8;
+    page.text(line, centerX, cursor, { align: "center", size: is58 ? 6.2 : 6.8 });
+  });
+}
+
+function isThermalFormat(format: TicketPdfFormat): boolean {
+  return format === "thermal58" || format === "thermal80";
+}
+
+function getThermalPageSize(input: TicketPdfInput, ticket?: TicketPdfTicket): PageSize {
+  const width = pageSizes[input.format].width;
+  if (!ticket) return { height: input.format === "thermal58" ? 120 : 128, width };
+  const is58 = input.format === "thermal58";
+  const settings = input.displaySettings;
+  const contentWidth = width - grids[input.format].margin * 2 - (is58 ? 16 : 20);
+  const password = resolveTicketPdfPassword(ticket);
+  const header = [settings?.showLogo ? "TICKETPRO" : null, settings?.showZoneName !== false ? input.zoneName : null]
+    .filter(Boolean)
+    .join(" - ") || "ACCES WIFI";
+  const headerCount = wrapPdfText(header, contentWidth, is58 ? 9 : 10, true, 2).length;
+  const portalCount = settings?.showInstructions === false
+    ? 0
+    : wrapPdfText(`Portail : ${input.hotspotAddress}`, contentWidth, is58 ? 6.6 : 7.2, true, 3).length;
+  const contactCount = settings?.showContact === false
+    ? 0
+    : wrapPdfText(`Contact : ${input.ownerPhone}`, contentWidth, is58 ? 6.2 : 6.8, false, 2).length;
+  const detailCount = [
+    settings?.showDuration === false && settings?.showDataLimit === false ? null : "allowance",
+    input.priceLabel && settings?.showPrice !== false ? "price" : null,
+    settings?.showCreatedAt ? "created" : null,
+    settings?.showExpiresAt ? "expires" : null
+  ].filter(Boolean).length;
+  const singleCode = password === ticket.username || settings?.showPassword === false;
+  const showQr = (settings?.showQrCode ?? input.qrCodeEnabled) || input.template === "qr";
+  const height = (is58 ? 16 : 20)
+    + headerCount * (is58 ? 9 : 10)
+    + 5
+    + (singleCode ? (is58 ? 34 : 38) : (is58 ? 50 : 54))
+    + 7
+    + (is58 ? 9 : 10)
+    + detailCount * (is58 ? 8.5 : 9)
+    + (showQr ? (is58 ? 55 : 65) : 0)
+    + 7
+    + portalCount * (is58 ? 8 : 8.5)
+    + contactCount * (is58 ? 7.5 : 8)
+    + 5;
+  return { height: Math.max(is58 ? 122 : 132, Math.ceil(height)), width };
+}
+
+function wrapPdfText(value: string, maxWidth: number, size: number, bold: boolean, maxLines: number): string[] {
+  const normalized = normalizePdfText(value);
+  if (!normalized) return [];
+  const lines: string[] = [];
+  let remaining = normalized;
+
+  while (remaining && estimateTextWidth(remaining, size, bold) > maxWidth) {
+    let fittingLength = 1;
+    while (
+      fittingLength < remaining.length
+      && estimateTextWidth(remaining.slice(0, fittingLength + 1), size, bold) <= maxWidth
+    ) {
+      fittingLength += 1;
+    }
+    const fittingSlice = remaining.slice(0, fittingLength);
+    const preferredBreak = Math.max(
+      fittingSlice.lastIndexOf(" "),
+      fittingSlice.lastIndexOf("-"),
+      fittingSlice.lastIndexOf("/"),
+      fittingSlice.lastIndexOf(".")
+    );
+    const breakAt = preferredBreak >= Math.floor(fittingLength * 0.45)
+      ? preferredBreak + 1
+      : fittingLength;
+    lines.push(remaining.slice(0, breakAt).trim());
+    remaining = remaining.slice(breakAt).trim();
+  }
+  if (remaining) lines.push(remaining);
+  if (lines.length <= maxLines) return lines;
+
+  const visible = lines.slice(0, maxLines);
+  let last = `${visible[maxLines - 1]}...`;
+  while (last.length > 3 && estimateTextWidth(last, size, bold) > maxWidth) {
+    last = `${last.slice(0, -4)}...`;
+  }
+  visible[maxLines - 1] = last;
+  return visible;
 }
 
 function drawQrPattern(page: PdfPage, x: number, y: number, size: number, value: string) {

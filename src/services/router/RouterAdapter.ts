@@ -39,9 +39,12 @@ export interface RouterAdapter {
   clearHotspotUserMac(username: string): Promise<HotspotUser>;
   configureHotspotAntiTethering(config: HotspotAntiTetheringConfig): Promise<void>;
   getHotspotAntiTetheringState(): Promise<import("../../domain/router").HotspotAntiTetheringState>;
-  upsertHotspotBypass(binding: HotspotBypassBinding): Promise<void>;
+  upsertHotspotBypass(binding: HotspotBypassBinding): Promise<import("../../domain/router").HotspotIpBindingMutationResult>;
   listManagedHotspotBypasses(): Promise<HotspotBypassBinding[]>;
-  removeHotspotBypass(id: string, macAddress: string): Promise<void>;
+  removeHotspotBypass(id: string, macAddress: string): Promise<import("../../domain/router").HotspotIpBindingMutationResult>;
+  upsertHotspotBlockedDevice(binding: HotspotBypassBinding): Promise<import("../../domain/router").HotspotIpBindingMutationResult>;
+  listManagedHotspotBlockedDevices(): Promise<HotspotBypassBinding[]>;
+  removeHotspotBlockedDevice(id: string, macAddress: string): Promise<import("../../domain/router").HotspotIpBindingMutationResult>;
   listActiveUsers(): Promise<ActiveHotspotUser[]>;
   disconnectActiveUser(username: string): Promise<void>;
   getRouterHealth(): Promise<RouterHealth>;

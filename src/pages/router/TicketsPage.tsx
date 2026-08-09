@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   Ban,
@@ -19,15 +19,17 @@ import {
   RefreshCw,
   Router,
   Search,
+  Settings,
   ShieldCheck,
   Smartphone,
   Ticket,
   Trash2,
   Upload,
-  UserRound
+  UserRound,
+  Wifi
 } from "lucide-react";
 import { useAuth } from "../../app/auth/AuthProvider";
-import type { CreateTicketInput } from "../../domain/database";
+import type { CreateTicketInput, TicketStateHistoryRecord } from "../../domain/database";
 import type { UserRole } from "../../domain/auth";
 import { resolveTicketPdfPassword } from "../../services/pdf";
 import {
@@ -38,7 +40,13 @@ import {
   type PrintSettings
 } from "../../services/printing";
 import { createPersistedRouterService, FakeRouterAdapter, RouterService } from "../../services/router";
-import { resolveTicketPasswordValue, VoucherActionService } from "../../services/tickets";
+import {
+  defaultTicketDisplaySettings,
+  resolveTicketPasswordValue,
+  TicketDisplaySettingsService,
+  VoucherActionService,
+  type TicketDisplaySettings
+} from "../../services/tickets";
 import {
   GeneratedFileRepository,
   HotspotPlanRepository,
@@ -46,6 +54,7 @@ import {
   RouterRepository,
   TicketBatchRepository,
   TicketRepository,
+  TicketStateHistoryRepository,
   useAppDatabase
 } from "../../services/database";
 import {
@@ -69,6 +78,7 @@ import {
   formatDataLimit,
   formatDateTime,
   formatDuration,
+  formatSeconds,
   getPageCount,
   paginateTickets,
   scopeTicketsForSession,
@@ -96,11 +106,14 @@ export function TicketsPage() {
   const [tickets, setTickets] = useState<TicketListItem[]>(() => (isPersistent ? [] : createDemoTickets()));
   const [filters, setFilters] = useState<TicketFilters>(emptyTicketFilters);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [displaySettings, setDisplaySettings] = useState<TicketDisplaySettings>(defaultTicketDisplaySettings);
   const [page, setPage] = useState(1);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [logs, setLogs] = useState<TicketLog[]>([]);
   const [selectedTicket, setSelectedTicket] = useState<TicketListItem | null>(null);
+  const [selectedTicketHistory, setSelectedTicketHistory] = useState<TicketStateHistoryRecord[]>([]);
   const [ticketToDelete, setTicketToDelete] = useState<TicketListItem | null>(null);
   const [busyTicketId, setBusyTicketId] = useState<string | null>(null);
   const [isBulkBusy, setIsBulkBusy] = useState(false);
@@ -114,6 +127,8 @@ export function TicketsPage() {
   const [syncSummary, setSyncSummary] = useState<TicketSyncSummary | null>(null);
   const [remoteOnlyTickets, setRemoteOnlyTickets] = useState<RouterOnlyTicket[]>([]);
   const ticketRepository = useMemo(() => new TicketRepository(database), [database]);
+  const ticketHistoryRepository = useMemo(() => new TicketStateHistoryRepository(database), [database]);
+  const displaySettingsService = useMemo(() => new TicketDisplaySettingsService(database), [database]);
   const batchRepository = useMemo(() => new TicketBatchRepository(database), [database]);
   const planRepository = useMemo(() => new HotspotPlanRepository(database), [database]);
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
@@ -125,36 +140,80 @@ export function TicketsPage() {
     [session]
   );
   const [persistedRouterService, setPersistedRouterService] = useState<RouterService | null>(null);
+  const persistedRouterServiceIdRef = useRef<string | null>(null);
+  const routerServicePreparationRef = useRef<{ promise: Promise<RouterService>; routerId: string } | null>(null);
   const effectiveRouterService = isPersistent ? persistedRouterService : fakeRouterService;
   const syncService = useMemo(
     () => new RouterTicketSyncService(effectiveRouterService ?? fakeRouterService),
     [effectiveRouterService, fakeRouterService]
   );
-  const voucherActions = useMemo(
-    () => effectiveRouterService ? new VoucherActionService(effectiveRouterService) : null,
-    [effectiveRouterService]
-  );
+
+  const loadPersistedRouterService = async (): Promise<RouterService> => {
+    if (persistedRouterService && persistedRouterServiceIdRef.current === routerId) {
+      return persistedRouterService;
+    }
+    if (routerServicePreparationRef.current?.routerId === routerId) {
+      return routerServicePreparationRef.current.promise;
+    }
+    if (!isInitialized || !session) {
+      throw new Error("La base locale ou la session n'est pas encore prête.");
+    }
+
+    const preparation = (async () => {
+      const router = await routerRepository.findById(routerId);
+      if (!router || router.account_id !== session.account_id) {
+        throw new Error("Routeur introuvable pour ce compte.");
+      }
+      return createPersistedRouterService({
+        authSession: session,
+        connections: await connectionRepository.listByRouter(routerId),
+        database,
+        logger: {
+          write: (log) => setLogs((current) => [{
+            createdAt: new Date().toISOString(),
+            message: log.userMessage,
+            ticketCode: "-",
+            type: "sync"
+          }, ...current])
+        },
+        router
+      });
+    })();
+
+    routerServicePreparationRef.current = { promise: preparation, routerId };
+    try {
+      return await preparation;
+    } finally {
+      if (routerServicePreparationRef.current?.promise === preparation) {
+        routerServicePreparationRef.current = null;
+      }
+    }
+  };
+
+  const getRouterServiceForAction = async (): Promise<RouterService> => {
+    if (!isPersistent) return fakeRouterService;
+    const service = await loadPersistedRouterService();
+    persistedRouterServiceIdRef.current = routerId;
+    setPersistedRouterService(service);
+    return service;
+  };
 
   useEffect(() => {
     if (!isPersistent || !isInitialized || !session) {
+      persistedRouterServiceIdRef.current = null;
+      routerServicePreparationRef.current = null;
       setPersistedRouterService(null);
       return undefined;
     }
 
     let mounted = true;
-    const accountId = session.account_id;
 
     async function prepareRouterService() {
-      const router = await routerRepository.findById(routerId);
-      if (!router || router.account_id !== accountId) throw new Error("Routeur introuvable pour ce compte.");
-      const service = await createPersistedRouterService({
-        authSession: session,
-        connections: await connectionRepository.listByRouter(routerId),
-        database,
-        logger: { write: (log) => writeLog({ message: log.userMessage, ticketCode: "-", type: "sync" }) },
-        router
-      });
-      if (mounted) setPersistedRouterService(service);
+      const service = await loadPersistedRouterService();
+      if (mounted) {
+        persistedRouterServiceIdRef.current = routerId;
+        setPersistedRouterService(service);
+      }
     }
 
     void prepareRouterService().catch((preparationError) => {
@@ -194,6 +253,15 @@ export function TicketsPage() {
   }, [generatedFileRepository, isInitialized, isPersistent, planRepository, routerId, routerRepository, session, ticketRepository]);
 
   useEffect(() => {
+    if (!isInitialized || !session) return undefined;
+    let mounted = true;
+    void displaySettingsService.get(session.account_id, routerId).then((value) => {
+      if (mounted) setDisplaySettings(value);
+    });
+    return () => { mounted = false; };
+  }, [displaySettingsService, isInitialized, routerId, session]);
+
+  useEffect(() => {
     let mounted = true;
     void printService.detectPrinters().then((printerList) => {
       if (!mounted) return;
@@ -215,6 +283,25 @@ export function TicketsPage() {
   const currentPage = Math.min(page, pageCount);
   const visibleTickets = paginateTickets(filteredTickets, currentPage, ticketPageSize);
   const canRevealPasswords = Boolean(session?.permissions.includes("router.tickets.revealPassword"));
+  const ticketsRef = useRef<TicketListItem[]>(tickets);
+  const automaticSyncRunning = useRef(false);
+  useEffect(() => {
+    ticketsRef.current = tickets;
+  }, [tickets]);
+
+  useEffect(() => {
+    if (!isPersistent || !selectedTicket) {
+      setSelectedTicketHistory([]);
+      return undefined;
+    }
+    let mounted = true;
+    void ticketHistoryRepository.listByTicket(selectedTicket.id).then((history) => {
+      if (mounted) setSelectedTicketHistory(history);
+    }).catch(() => {
+      if (mounted) setSelectedTicketHistory([]);
+    });
+    return () => { mounted = false; };
+  }, [isPersistent, selectedTicket?.id, ticketHistoryRepository]);
 
   const writeLog = (log: Omit<TicketLog, "createdAt">) => {
     setLogs((current) => [{ ...log, createdAt: new Date().toISOString() }, ...current]);
@@ -241,11 +328,20 @@ export function TicketsPage() {
       created_by_profile_id: ticket.createdByProfileId,
       deleted_at: ticket.status === "supprimé" ? new Date().toISOString() : null,
       downloaded_bytes: ticket.downloadedBytes,
+      data_remaining_bytes: ticket.dataRemainingBytes,
       expires_at: ticket.expiresAt,
+      exported_at: ticket.exportedAt,
+      archived_at: ticket.archivedAt,
       id: ticket.id,
       ip_address: ticket.ipAddress,
       mac_address: ticket.macAddress,
       mikrotik_id: ticket.mikrotikId,
+      hotspot_server_name: ticket.serverName,
+      mikrotik_profile_name: ticket.profileName,
+      last_router_sync_at: ticket.lastRouterSyncAt,
+      router_deleted_at: ticket.routerDeletedAt,
+      uptime_seconds: ticket.uptimeSeconds,
+      remaining_seconds: ticket.remainingSeconds,
       password_encrypted: ticket.passwordSecretRef,
       plan_id: ticket.planId,
       printed_count: ticket.printedCount,
@@ -259,16 +355,51 @@ export function TicketsPage() {
   };
 
   const commitTicket = async (ticket: TicketListItem) => {
-    if (isPersistent) await persistTicket(ticket);
+    const previous = ticketsRef.current.find((item) => item.id === ticket.id);
+    if (isPersistent) {
+      await persistTicket(ticket);
+      if (session && previous && previous.status !== ticket.status) {
+        const history = await ticketHistoryRepository.record({
+          account_id: ticket.accountId,
+          created_by_profile_id: session.internal_profile_id,
+          message: `${ticketStatusLabel(previous.status)} → ${ticketStatusLabel(ticket.status)}.`,
+          next_status: ticket.status,
+          previous_status: previous.status,
+          router_id: ticket.routerId,
+          source: "user_action",
+          ticket_id: ticket.id
+        });
+        if (selectedTicket?.id === ticket.id) {
+          setSelectedTicketHistory((current) => [...current, history]);
+        }
+      }
+    }
     setTickets((current) => current.map((item) => (item.id === ticket.id ? ticket : item)));
     setSelectedTicket((current) => (current?.id === ticket.id ? ticket : current));
   };
 
   const applySyncReport = async (report: TicketSyncReport) => {
+    const currentTickets = ticketsRef.current;
     const updates = new Map(report.updates.map((update) => [update.id, update]));
-    const nextTickets = tickets.map((ticket) => mergeTicketUpdate(ticket, updates.get(ticket.id)));
+    const nextTickets = currentTickets.map((ticket) => mergeTicketUpdate(ticket, updates.get(ticket.id)));
     if (isPersistent) {
       await Promise.all(nextTickets.filter((ticket) => updates.has(ticket.id)).map((ticket) => persistTicket(ticket)));
+      if (session) {
+        await Promise.all(nextTickets.flatMap((nextTicket) => {
+          const previous = currentTickets.find((ticket) => ticket.id === nextTicket.id);
+          if (!previous || previous.status === nextTicket.status) return [];
+          return [ticketHistoryRepository.record({
+            account_id: nextTicket.accountId,
+            created_by_profile_id: session.internal_profile_id,
+            message: `${ticketStatusLabel(previous.status)} → ${ticketStatusLabel(nextTicket.status)} après lecture RouterOS.`,
+            next_status: nextTicket.status,
+            previous_status: previous.status,
+            router_id: nextTicket.routerId,
+            source: "router_sync",
+            ticket_id: nextTicket.id
+          })];
+        }));
+      }
       const affectedBatchIds = Array.from(
         new Set(nextTickets.filter((ticket) => updates.has(ticket.id)).map((ticket) => ticket.batchId))
       );
@@ -295,14 +426,6 @@ export function TicketsPage() {
     report.logs.slice(0, 8).forEach((log) => writeLog({ message: log.message, ticketCode: log.ticketCode ?? "-", type: "sync" }));
   };
 
-  const requireRouterReady = (): boolean => {
-    if (isPersistent && !persistedRouterService) {
-      setError("Le routeur n'est pas prêt ou son mot de passe doit être ressaisi.");
-      return false;
-    }
-    return true;
-  };
-
   const markPrinted = async (ticket: TicketListItem) => {
     clearFeedback();
     const updated = { ...ticket, printedCount: ticket.printedCount + 1, status: "imprimé" as const };
@@ -320,10 +443,10 @@ export function TicketsPage() {
       setError("Action impossible sur ce voucher.");
       return;
     }
-    if (!requireRouterReady() || !voucherActions) return;
     setBusyTicketId(ticket.id);
     clearFeedback();
     try {
+      const voucherActions = new VoucherActionService(await getRouterServiceForAction());
       const result = await voucherActions.disable(ticket.code);
       const updated: TicketListItem = {
         ...ticket,
@@ -347,10 +470,10 @@ export function TicketsPage() {
       setError("Seul un voucher désactivé manuellement peut être réactivé.");
       return;
     }
-    if (!requireRouterReady() || !voucherActions) return;
     setBusyTicketId(ticket.id);
     clearFeedback();
     try {
+      const voucherActions = new VoucherActionService(await getRouterServiceForAction());
       await voucherActions.enable(ticket.code);
       const updated: TicketListItem = {
         ...ticket,
@@ -375,11 +498,11 @@ export function TicketsPage() {
       setError("Suppression impossible : le voucher est déjà utilisé ou imprimé.");
       return;
     }
-    if (!requireRouterReady()) return;
     setBusyTicketId(ticket.id);
     clearFeedback();
     try {
-      const report = await syncService.removeTicket(ticket);
+      const actionSyncService = new RouterTicketSyncService(await getRouterServiceForAction());
+      const report = await actionSyncService.removeTicket(ticket);
       if (report.summary.error > 0) {
         await applySyncReport(report);
         throw new Error(`${ticket.code} n'a pas été supprimé du routeur.`);
@@ -396,11 +519,11 @@ export function TicketsPage() {
   };
 
   const syncTicket = async (ticket: TicketListItem) => {
-    if (!requireRouterReady()) return;
     setBusyTicketId(ticket.id);
     clearFeedback();
     try {
-      const report = await syncService.resyncTicket(ticket);
+      const actionSyncService = new RouterTicketSyncService(await getRouterServiceForAction());
+      const report = await actionSyncService.resyncTicket(ticket);
       await applySyncReport(report);
       setMessage(`${ticket.code} resynchronisé.`);
     } catch (actionError) {
@@ -411,11 +534,11 @@ export function TicketsPage() {
   };
 
   const syncBatch = async (batchId: string) => {
-    if (!requireRouterReady()) return;
     setIsBulkBusy(true);
     clearFeedback();
     try {
-      const report = await syncService.resyncBatch(scopedTickets, batchId);
+      const actionSyncService = new RouterTicketSyncService(await getRouterServiceForAction());
+      const report = await actionSyncService.resyncBatch(scopedTickets, batchId);
       await applySyncReport(report);
       setMessage(`Lot ${batchId} resynchronisé.`);
     } catch (actionError) {
@@ -426,11 +549,11 @@ export function TicketsPage() {
   };
 
   const resolveTicketConflict = async (ticket: TicketListItem) => {
-    if (!requireRouterReady()) return;
     setBusyTicketId(ticket.id);
     clearFeedback();
     try {
-      const report = await syncService.resolveConflict(ticket);
+      const actionSyncService = new RouterTicketSyncService(await getRouterServiceForAction());
+      const report = await actionSyncService.resolveConflict(ticket);
       await applySyncReport(report);
       setMessage(report.updates.some((update) => update.syncStatus === "router_synced")
         ? `${ticket.code} réaligné sur le plan local.`
@@ -443,11 +566,11 @@ export function TicketsPage() {
   };
 
   const syncAllTickets = async () => {
-    if (!requireRouterReady()) return;
     setIsBulkBusy(true);
     clearFeedback();
     try {
-      const report = await syncService.compareTickets(scopedTickets);
+      const actionSyncService = new RouterTicketSyncService(await getRouterServiceForAction());
+      const report = await actionSyncService.compareTickets(scopedTickets.filter((ticket) => ticket.status !== "supprimé"));
       await applySyncReport(report);
       setMessage(`${report.summary.routerSynced} synchronisé(s), ${report.summary.routerMissing} absent(s) du routeur, ${report.summary.localMissing} absent(s) localement.`);
     } catch (actionError) {
@@ -458,11 +581,11 @@ export function TicketsPage() {
   };
 
   const resyncRouterTickets = async () => {
-    if (!requireRouterReady()) return;
     setIsBulkBusy(true);
     clearFeedback();
     try {
-      const report = await syncService.resyncRouter(scopedTickets);
+      const actionSyncService = new RouterTicketSyncService(await getRouterServiceForAction());
+      const report = await actionSyncService.resyncRouter(scopedTickets);
       await applySyncReport(report);
       setMessage(`Réparation terminée : ${report.summary.routerSynced} synchronisé(s), ${report.summary.error} erreur(s).`);
     } catch (actionError) {
@@ -545,6 +668,8 @@ export function TicketsPage() {
           ip_address: null,
           mac_address: null,
           mikrotik_id: remoteTicket.mikrotikId,
+          hotspot_server_name: remoteTicket.serverName,
+          mikrotik_profile_name: remoteTicket.profileName,
           password_encrypted: remoteTicket.passwordSecretRef,
           plan_id: plan.id,
           printed_count: 0,
@@ -620,6 +745,8 @@ export function TicketsPage() {
   const exportTicket = async (ticket: TicketListItem) => {
     try {
       await downloadTicketsCsv([ticket], `voucher-${slugify(ticket.code)}.csv`, canRevealPasswords);
+      const exported = { ...ticket, exportedAt: new Date().toISOString() };
+      await commitTicket(exported);
       setMessage(`${ticket.code} exporté.`);
       writeLog({ message: "Export CSV effectué.", ticketCode: ticket.code, type: "action" });
     } catch (exportError) {
@@ -634,6 +761,13 @@ export function TicketsPage() {
     }
     try {
       await downloadTicketsCsv(filteredTickets, `vouchers-${routerId}-${new Date().toISOString().slice(0, 10)}.csv`, canRevealPasswords);
+      const exportedAt = new Date().toISOString();
+      const exportedIds = new Set(filteredTickets.map((ticket) => ticket.id));
+      const updated = ticketsRef.current.map((ticket) => exportedIds.has(ticket.id) ? { ...ticket, exportedAt } : ticket);
+      if (isPersistent) {
+        await Promise.all(updated.filter((ticket) => exportedIds.has(ticket.id)).map((ticket) => persistTicket(ticket)));
+      }
+      setTickets(updated);
       setMessage(`${filteredTickets.length} voucher(s) exporté(s).`);
     } catch (exportError) {
       setError(exportError instanceof Error ? exportError.message : "L'export des vouchers a échoué.");
@@ -646,6 +780,34 @@ export function TicketsPage() {
     clearFeedback();
   };
 
+  useEffect(() => {
+    if (!effectiveRouterService || !isPersistent) return undefined;
+    let disposed = false;
+    const synchronize = async () => {
+      if (disposed || automaticSyncRunning.current || ticketsRef.current.length === 0) return;
+      automaticSyncRunning.current = true;
+      try {
+        const report = await syncService.compareTickets(ticketsRef.current.filter((ticket) => ticket.status !== "supprimé"));
+        if (!disposed) await applySyncReport(report);
+      } catch {
+        // The manual feedback remains available; background polling stays silent.
+      } finally {
+        automaticSyncRunning.current = false;
+      }
+    };
+    const onFocus = () => void synchronize();
+    const interval = window.setInterval(() => void synchronize(), 15_000);
+    window.addEventListener("focus", onFocus);
+    void synchronize();
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", onFocus);
+    };
+    // Router identity/service changes intentionally restart the real-time loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveRouterService, isPersistent, routerId]);
+
   return (
     <div className="page-stack">
       <PageHeader
@@ -653,6 +815,7 @@ export function TicketsPage() {
           <div className="button-row">
             <Button icon={Ticket} onClick={() => navigate(`/routeurs/${routerId}/tickets/generation`)} size="large" variant="primary">Créer des tickets</Button>
             <Button icon={Download} onClick={() => void exportVisibleTickets()}>Exporter</Button>
+            <Button icon={Settings} onClick={() => setSettingsOpen(true)}>Paramètres</Button>
             <Button disabled={isBulkBusy || busyTicketId !== null} icon={RefreshCw} onClick={() => void syncAllTickets()}>Synchroniser</Button>
             {session?.internal_profile_role === "admin" ? (
               <Button disabled={isBulkBusy || busyTicketId !== null} icon={ShieldCheck} onClick={() => void resyncRouterTickets()} variant="secondary">Réparer absents</Button>
@@ -715,6 +878,7 @@ export function TicketsPage() {
                 onSync={() => void syncTicket(ticket)}
                 onSyncBatch={() => void syncBatch(ticket.batchId)}
                 role={session?.internal_profile_role ?? "guest"}
+                displaySettings={displaySettings}
                 ticket={ticket}
               />
             ))}
@@ -731,6 +895,8 @@ export function TicketsPage() {
 
       <TicketDetailDialog
         actionLogs={logs}
+        persistedHistory={selectedTicketHistory}
+        displaySettings={displaySettings}
         busy={isBulkBusy || busyTicketId !== null}
         onClose={() => setSelectedTicket(null)}
         onDelete={(ticket) => setTicketToDelete(ticket)}
@@ -748,6 +914,20 @@ export function TicketsPage() {
         onConfirm={() => void executeDeleteTicket()}
         ticket={ticketToDelete}
       />
+      <TicketDisplaySettingsDialog
+        onClose={() => setSettingsOpen(false)}
+        onSave={(next) => {
+          setDisplaySettings(next);
+          if (session) {
+            void displaySettingsService.save(session.account_id, routerId, next)
+              .then(() => setMessage("Paramètres d'affichage et d'impression enregistrés."))
+              .catch(() => setError("Impossible d'enregistrer les paramètres des tickets."));
+          }
+          setSettingsOpen(false);
+        }}
+        open={settingsOpen}
+        value={displaySettings}
+      />
     </div>
   );
 }
@@ -757,14 +937,23 @@ function mergeTicketUpdate(ticket: TicketListItem, update?: SyncedTicketUpdate):
   return {
     ...ticket,
     activatedAt: update.activatedAt === undefined ? ticket.activatedAt : update.activatedAt,
+    archivedAt: update.archivedAt === undefined ? ticket.archivedAt : update.archivedAt,
     completedAt: update.completedAt === undefined ? ticket.completedAt : update.completedAt,
     downloadedBytes: update.downloadedBytes ?? ticket.downloadedBytes,
+    dataRemainingBytes: update.dataRemainingBytes === undefined ? ticket.dataRemainingBytes : update.dataRemainingBytes,
+    expiresAt: update.expiresAt === undefined ? ticket.expiresAt : update.expiresAt,
     ipAddress: update.ipAddress === undefined ? ticket.ipAddress : update.ipAddress,
     macAddress: update.macAddress === undefined ? ticket.macAddress : update.macAddress,
     mikrotikId: update.mikrotikId === undefined ? ticket.mikrotikId : update.mikrotikId,
+    lastRouterSyncAt: update.lastRouterSyncAt === undefined ? ticket.lastRouterSyncAt : update.lastRouterSyncAt,
+    profileName: update.profileName ?? ticket.profileName,
+    remainingSeconds: update.remainingSeconds === undefined ? ticket.remainingSeconds : update.remainingSeconds,
+    routerDeletedAt: update.routerDeletedAt === undefined ? ticket.routerDeletedAt : update.routerDeletedAt,
+    serverName: update.serverName ?? ticket.serverName,
     status: (update.status as TicketListStatus | undefined) ?? ticket.status,
     syncStatus: update.syncStatus,
-    uploadedBytes: update.uploadedBytes ?? ticket.uploadedBytes
+    uploadedBytes: update.uploadedBytes ?? ticket.uploadedBytes,
+    uptimeSeconds: update.uptimeSeconds ?? ticket.uptimeSeconds
   };
 }
 
@@ -777,6 +966,7 @@ function ticketSyncStatusToDatabase(status: RouterTicketSyncStatus): "conflict" 
 
 function TicketRow({
   busy,
+  displaySettings,
   onDelete,
   onDisable,
   onEnable,
@@ -791,6 +981,7 @@ function TicketRow({
   ticket
 }: {
   busy: boolean;
+  displaySettings: TicketDisplaySettings;
   onDelete: () => void;
   onDisable: () => void;
   onEnable: () => void;
@@ -838,14 +1029,14 @@ function TicketRow({
         <span className="ticket-row__icon"><Ticket aria-hidden="true" /></span>
         <div className="ticket-row__body">
           <div className="ticket-row__top">
-            <div className="ticket-row__code"><strong>{ticket.code}</strong>{ticket.hasPdf ? <FileText aria-label="PDF" /> : null}</div>
+            <div className="ticket-row__code"><strong>{displaySettings.showUsername ? ticket.code : "Ticket"}</strong>{ticket.hasPdf ? <FileText aria-label="PDF" /> : null}</div>
             <div className="ticket-row__badges">
               <Badge className="ticket-row__badge" status={ticketStatusToBadge(ticket.status)}>{ticketStatusLabel(ticket.status)}</Badge>
               <Badge className="ticket-row__badge" status={syncStatusToBadge(ticket.syncStatus)}>{syncStatusLabel(ticket.syncStatus)}</Badge>
               {busy ? <Badge status="warning">Action en cours</Badge> : null}
             </div>
           </div>
-          <div className="ticket-row__facts"><span><FileText aria-hidden="true" />{ticket.planName}</span><span><Calendar aria-hidden="true" />{formatDateTime(ticket.createdAt)}</span>{ticket.macAddress ? <span><Smartphone aria-hidden="true" />{ticket.macAddress}</span> : null}</div>
+          <div className="ticket-row__facts"><span><FileText aria-hidden="true" />{ticket.planName}</span>{displaySettings.showCreatedAt ? <span><Calendar aria-hidden="true" />{formatDateTime(ticket.createdAt)}</span> : null}{ticket.macAddress ? <span><Smartphone aria-hidden="true" />{ticket.macAddress}</span> : null}</div>
         </div>
       </div>
       <ActionMenu items={menuItems} />
@@ -856,6 +1047,7 @@ function TicketRow({
 function TicketDetailDialog({
   actionLogs,
   busy,
+  displaySettings,
   onClose,
   onDelete,
   onDisable,
@@ -864,10 +1056,12 @@ function TicketDetailDialog({
   onResolveConflict,
   onSync,
   role,
-  ticket
+  ticket,
+  persistedHistory
 }: {
   actionLogs: TicketLog[];
   busy: boolean;
+  displaySettings: TicketDisplaySettings;
   onClose: () => void;
   onDelete: (ticket: TicketListItem) => void;
   onDisable: (ticket: TicketListItem) => void;
@@ -877,6 +1071,7 @@ function TicketDetailDialog({
   onSync: (ticket: TicketListItem) => void;
   role: UserRole;
   ticket: TicketListItem | null;
+  persistedHistory: TicketStateHistoryRecord[];
 }) {
   const [passwordVisible, setPasswordVisible] = useState(false);
   const [revealedPassword, setRevealedPassword] = useState<string | null>(null);
@@ -888,6 +1083,12 @@ function TicketDetailDialog({
   const permissions = getTicketActionPermissions(role, ticket);
   const logs = [
     ...buildTicketLifecycleLogs(ticket),
+    ...persistedHistory.map((history) => ({
+      createdAt: history.created_at,
+      id: history.id,
+      level: history.next_status === "erreur_sync" ? "error" as const : "info" as const,
+      message: history.message
+    })),
     ...actionLogs.filter((log) => log.ticketCode === ticket.code).map((log, index) => ({
       createdAt: log.createdAt,
       id: `${ticket.id}-action-${index}`,
@@ -923,9 +1124,11 @@ function TicketDetailDialog({
           <section className="ticket-detail-section">
             <h3>Informations principales</h3>
             <dl className="ticket-detail-grid">
-              <DetailLine icon={Ticket} label="Code" value={ticket.code} />
-              <PasswordDetailLine canReveal={permissions.canRevealPassword} isVisible={passwordVisible} onToggle={togglePassword} value={password} />
+              {displaySettings.showUsername ? <DetailLine icon={Ticket} label="Code" value={ticket.code} /> : null}
+              {displaySettings.showPassword ? <PasswordDetailLine canReveal={permissions.canRevealPassword} isVisible={passwordVisible} onToggle={togglePassword} value={password} /> : null}
               <DetailLine icon={FileText} label="Plan" value={ticket.planName} />
+              <DetailLine icon={FileText} label="Profil MikroTik" value={ticket.profileName} />
+              <DetailLine icon={Wifi} label="Serveur Hotspot" value={ticket.serverName === "all" ? "All" : ticket.serverName} />
               <DetailLine icon={Router} label="Routeur" value={ticket.routerName} />
               <DetailLine icon={Layers} label="Lot" value={ticket.batchId} />
               <DetailLine icon={ShieldCheck} label="Statut" value={ticketStatusLabel(ticket.status)} />
@@ -937,13 +1140,16 @@ function TicketDetailDialog({
           <section className="ticket-detail-section">
             <h3>Cycle de vie</h3>
             <dl className="ticket-detail-grid">
-              <DetailLine icon={Calendar} label="Date création" value={formatDateTime(ticket.createdAt)} />
+              {displaySettings.showCreatedAt ? <DetailLine icon={Calendar} label="Date création" value={formatDateTime(ticket.createdAt)} /> : null}
+              <DetailLine icon={Download} label="Date export / téléchargement" value={formatDateTime(ticket.exportedAt)} />
               <DetailLine icon={CheckCircle2} label="Date activation" value={formatDateTime(ticket.activatedAt)} />
               <DetailLine icon={CheckCircle2} label="Date complétion" value={formatDateTime(ticket.completedAt)} />
-              <DetailLine icon={Clock} label="Date expiration" value={formatDateTime(ticket.expiresAt)} />
-              <DetailLine icon={Clock} label="Durée" value={formatDuration(ticket.planDurationMinutes)} />
+              {displaySettings.showExpiresAt ? <DetailLine icon={Clock} label="Date expiration" value={formatDateTime(ticket.expiresAt)} /> : null}
+              {displaySettings.showDuration ? <DetailLine icon={Clock} label="Durée" value={formatDuration(ticket.planDurationMinutes)} /> : null}
               <DetailLine icon={Clock} label="Validité" value={formatDuration(ticket.planValidityMinutes)} />
-              <DetailLine icon={Database} label="Volume prévu" value={formatDataLimit(ticket.dataLimitMb)} />
+              <DetailLine icon={Clock} label="Temps utilisé" value={formatSeconds(ticket.uptimeSeconds)} />
+              <DetailLine icon={Clock} label="Temps restant" value={ticket.remainingSeconds === null ? "Illimité" : formatSeconds(ticket.remainingSeconds)} />
+              {displaySettings.showDataLimit ? <DetailLine icon={Database} label="Volume prévu" value={formatDataLimit(ticket.dataLimitMb)} /> : null}
             </dl>
           </section>
           <section className="ticket-detail-section">
@@ -953,6 +1159,9 @@ function TicketDetailDialog({
               <DetailLine icon={Smartphone} label="IP client" value={ticket.ipAddress ?? "Non disponible"} />
               <DetailLine icon={Upload} label="Upload" value={formatBytes(ticket.uploadedBytes)} />
               <DetailLine icon={Download} label="Download" value={formatBytes(ticket.downloadedBytes)} />
+              <DetailLine icon={Database} label="Volume consommé" value={formatBytes(ticket.downloadedBytes + ticket.uploadedBytes)} />
+              <DetailLine icon={Database} label="Volume restant" value={ticket.dataRemainingBytes === null ? "Illimité" : formatBytes(ticket.dataRemainingBytes)} />
+              <DetailLine icon={RefreshCw} label="Dernière lecture RouterOS" value={formatDateTime(ticket.lastRouterSyncAt)} />
               <DetailLine icon={Printer} label="Impressions" value={`${ticket.printedCount}`} />
               <DetailLine icon={FileText} label="Fichier PDF" value={ticket.generatedFileName ?? "Non disponible"} />
             </dl>
@@ -970,6 +1179,63 @@ function TicketDetailDialog({
           {permissions.canSync && ticket.syncStatus === "conflict" ? <Button disabled={busy} icon={CheckCircle2} onClick={() => onResolveConflict(ticket)} variant="ghost">Conserver le plan local</Button> : null}
           {permissions.canDelete ? <Button disabled={busy} icon={Trash2} onClick={() => onDelete(ticket)} variant="danger">Supprimer</Button> : null}
           <Button onClick={onClose} variant="primary">Fermer</Button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function TicketDisplaySettingsDialog({
+  onClose,
+  onSave,
+  open,
+  value
+}: {
+  onClose: () => void;
+  onSave: (value: TicketDisplaySettings) => void;
+  open: boolean;
+  value: TicketDisplaySettings;
+}) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [open, value]);
+  if (!open) return null;
+  const labels: Array<[keyof TicketDisplaySettings, string]> = [
+    ["showZoneName", "Nom de la WiFi Zone"],
+    ["showUsername", "Nom d’utilisateur / code"],
+    ["showPassword", "Mot de passe"],
+    ["showPrice", "Prix"],
+    ["showDuration", "Durée"],
+    ["showDataLimit", "Volume de données"],
+    ["showCreatedAt", "Date de création"],
+    ["showExpiresAt", "Date d’expiration"],
+    ["showContact", "Contact"],
+    ["showLogo", "Logo / identité de la zone"],
+    ["showQrCode", "QR code"],
+    ["showInstructions", "Instructions de connexion"]
+  ];
+  return (
+    <div className="dialog-backdrop" role="presentation">
+      <section aria-modal="true" className="router-form-dialog ticket-display-settings" role="dialog">
+        <header className="connection-dialog__header">
+          <div className="router-card__icon"><Settings aria-hidden="true" /></div>
+          <div><h2>Paramètres des tickets</h2><p>Ces choix s’appliquent à l’écran et aux prochains PDF.</p></div>
+        </header>
+        <div className="ticket-display-settings__grid">
+          {labels.map(([key, label]) => (
+            <label className="toggle-option" key={key}>
+              <input
+                checked={draft[key]}
+                onChange={(event) => setDraft((current) => ({ ...current, [key]: event.target.checked }))}
+                type="checkbox"
+              />
+              <CheckCircle2 aria-hidden="true" />
+              <span>{label}</span>
+            </label>
+          ))}
+        </div>
+        <div className="confirm-dialog__actions">
+          <Button onClick={onClose} variant="ghost">Annuler</Button>
+          <Button icon={Settings} onClick={() => onSave(draft)} variant="primary">Enregistrer</Button>
         </div>
       </section>
     </div>
@@ -1109,11 +1375,14 @@ function TicketFiltersPanel({
 }) {
   return (
     <div className="tickets-filter-panel">
-      <label className="form-field">Plan<select value={filters.planId} onChange={(event) => onChange({ planId: event.target.value })}><option value="">Tous les plans</option>{options.plans.map((plan) => <option key={plan.id} value={plan.id}>{plan.name}</option>)}</select></label>
-      <label className="form-field">Profil<select value={filters.operatorProfile} onChange={(event) => onChange({ operatorProfile: event.target.value })}><option value="">Tous les profils</option>{options.operators.map((operator) => <option key={operator} value={operator}>{profileLabel(operator)}</option>)}</select></label>
+      <label className="form-field">Profil Hotspot<select value={filters.planId} onChange={(event) => onChange({ planId: event.target.value })}><option value="">Tous les profils</option>{options.plans.map((plan) => <option key={plan.id} value={plan.id}>{plan.name}</option>)}</select></label>
+      <label className="form-field">Utilisateur créateur<select value={filters.operatorProfile} onChange={(event) => onChange({ operatorProfile: event.target.value })}><option value="">Tous les utilisateurs</option>{options.operators.map((operator) => <option key={operator} value={operator}>{profileLabel(operator)}</option>)}</select></label>
       <label className="form-field">Statut<select value={filters.status} onChange={(event) => onChange({ status: event.target.value as TicketFilters["status"] })}><option value="">Tous les statuts</option>{options.statuses.map((status) => <option key={status} value={status}>{ticketStatusLabel(status)}</option>)}</select></label>
       <label className="form-field">Lot<select value={filters.batchId} onChange={(event) => onChange({ batchId: event.target.value })}><option value="">Tous les lots</option>{options.batches.map((batch) => <option key={batch} value={batch}>{batch}</option>)}</select></label>
       <label className="form-field">Routeur<select value={filters.routerId} onChange={(event) => onChange({ routerId: event.target.value })}><option value="">Tous les routeurs</option>{options.routers.map((router) => <option key={router.id} value={router.id}>{router.name}</option>)}</select></label>
+      <label className="form-field">Prix minimum<input inputMode="numeric" placeholder="0" value={filters.priceMin} onChange={(event) => onChange({ priceMin: event.target.value })} /></label>
+      <label className="form-field">Prix maximum<input inputMode="numeric" placeholder="1000" value={filters.priceMax} onChange={(event) => onChange({ priceMax: event.target.value })} /></label>
+      <label className="form-field">Durée (minutes)<input inputMode="numeric" placeholder="60" value={filters.durationMinutes} onChange={(event) => onChange({ durationMinutes: event.target.value })} /></label>
       <label className="form-field">Recherche MAC<input placeholder="A8:6B..." value={filters.macAddress} onChange={(event) => onChange({ macAddress: event.target.value })} /></label>
       <div className="tickets-filter-panel__actions"><Button onClick={onReset} variant="ghost">Réinitialiser</Button></div>
     </div>

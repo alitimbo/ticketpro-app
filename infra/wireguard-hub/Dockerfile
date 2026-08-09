@@ -6,6 +6,7 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY server.mjs /app/server.mjs
+COPY peer-lifecycle.mjs /app/peer-lifecycle.mjs
 COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh
 

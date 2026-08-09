@@ -21,3 +21,14 @@ sed -i "s/REMPLACER_PAR_LA_CLE_PRIVEE_DU_SERVEUR/$(cat wireguard/server_private.
 6. L'application récupère automatiquement son endpoint, sa clé publique et son sous-réseau auprès de l'API de licences. L'utilisateur ne saisit aucune configuration VPS.
 
 Le serveur WireGuard ne reçoit jamais les clés privées des routeurs ou des opérateurs. TicketPro conserve ces clés localement chiffrées et le hub ne reçoit que leur clé publique.
+
+## Cycle de vie sécurisé des clés
+
+Chaque pair possède un `resource_id` stable : identifiant du routeur ou identifiant unique du poste opérateur. Le hub sérialise les mutations d'un même compte et refuse deux clés actives pour la même ressource.
+
+- `upsert` crée une clé ou retourne la même configuration lors d'une répétition identique ; il refuse de remplacer silencieusement une autre clé active.
+- `rotate` exige `previous_public_key`, retire d'abord l'ancienne clé de `wg0`, conserve son historique comme révoqué, puis active la nouvelle clé avec la même adresse.
+- `revoke` retire immédiatement la clé de `wg0`. Une clé révoquée ne peut jamais être réactivée.
+- `POST /v1/peers/list` expose l'état réel `connected`, `disconnected` ou `revoked` ainsi que la date du dernier handshake.
+
+Après une mise à jour du service, le démarrage révoque automatiquement les anciens doublons éventuels avant de resynchroniser `wg0`.

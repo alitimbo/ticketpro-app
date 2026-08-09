@@ -22,6 +22,19 @@ export class VpnPeerRepository {
     return rows.find((row) => row.router_id === routerId && row.status !== "revoked") ?? null;
   }
 
+  async findActiveByResource(
+    accountId: string,
+    peerType: VpnPeerRecord["peer_type"],
+    resourceId: string
+  ): Promise<VpnPeerRecord | null> {
+    const rows = await this.listByAccount(accountId);
+    return rows.find((row) =>
+      row.peer_type === peerType
+      && row.resource_id === resourceId
+      && row.status !== "revoked"
+    ) ?? null;
+  }
+
   async findAssignmentConflicts(
     accountId: string,
     networkId: string,
@@ -46,7 +59,19 @@ export class VpnPeerRepository {
           && row.assigned_address === input.assigned_address
           && row.public_key === input.public_key
       );
-      if (exactExisting) return exactExisting;
+      if (exactExisting) {
+        if (exactExisting.status === "revoked" && input.status !== "revoked") {
+          throw new Error("Une clé WireGuard révoquée ne peut pas être réactivée.");
+        }
+        return exactExisting;
+      }
+
+      const activeResourcePeer = existingRows.find((row) =>
+        row.peer_type === input.peer_type
+        && row.resource_id === input.resource_id
+        && row.status !== "revoked"
+      );
+      const resourceConflicts = activeResourcePeer ? [activeResourcePeer] : [];
 
       const conflicts = await this.findAssignmentConflicts(
         input.account_id,
@@ -54,22 +79,27 @@ export class VpnPeerRepository {
         input.assigned_address,
         input.public_key
       );
+      const conflictsToRevoke = Array.from(new Map(
+        [...conflicts, ...resourceConflicts].map((conflict) => [conflict.id, conflict])
+      ).values());
+      const now = new Date().toISOString();
       await this.database.transaction([
-        ...conflicts.map((conflict) => ({
-          sql: "DELETE FROM vpn_peers WHERE id = ?1",
-          params: [conflict.id]
+        ...conflictsToRevoke.map((conflict) => ({
+          sql: "UPDATE vpn_peers SET status = 'revoked', updated_at = ?1 WHERE id = ?2",
+          params: [now, conflict.id]
         })),
         {
           sql: `INSERT INTO vpn_peers (
-            id, account_id, network_id, router_id, peer_type, name, public_key,
+            id, account_id, network_id, router_id, resource_id, peer_type, name, public_key,
             private_key_encrypted, assigned_address, allowed_ips, endpoint_address,
             endpoint_port, status, last_handshake_at
-          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`,
+          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)`,
           params: [
             input.id,
             input.account_id,
             input.network_id,
             input.router_id,
+            input.resource_id,
             input.peer_type,
             input.name,
             input.public_key,

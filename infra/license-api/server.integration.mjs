@@ -121,15 +121,23 @@ before(async () => {
         account_id: body.account_id,
         peers: [{
           assigned_address: "10.250.7.3/32",
+          connection_status: "connected",
+          last_handshake_at: new Date().toISOString(),
           name: "PC récupéré",
           peer_type: "operator",
           public_key: "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=",
+          resource_id: "operator:pc-recupere",
+          revoked_at: null,
           status: "active"
         }, {
           assigned_address: "10.250.7.2/32",
+          connection_status: "disconnected",
+          last_handshake_at: null,
           name: "Routeur masqué",
           peer_type: "router",
           public_key: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+          resource_id: "router-niger-1",
+          revoked_at: null,
           status: "active"
         }]
       }));
@@ -138,7 +146,7 @@ before(async () => {
     response.end(JSON.stringify({
       account_id: body.account_id,
       address_pool: "10.250.7.0/24",
-      assigned_address: body.action === "upsert" ? "10.250.7.2/32" : null,
+      assigned_address: body.action === "revoke" ? null : "10.250.7.2/32",
       public_key: body.public_key,
       status: body.action === "revoke" ? "revoked" : "active"
     }));
@@ -344,6 +352,12 @@ test("les politiques réseau sont versionnées, isolées par organisation et pro
   assert.equal(owner.status, 200);
   const policy = {
     antiSharingMode: "strict",
+    blockedDevices: [{
+      id: "blocked-phone",
+      ipAddress: "192.168.88.120",
+      macAddress: "",
+      name: "Téléphone bloqué"
+    }],
     infrastructureDevices: [{
       id: "antenna-north",
       internetBypass: true,
@@ -378,6 +392,7 @@ test("les politiques réseau sont versionnées, isolées par organisation et pro
   );
   assert.equal(fetched.status, 200);
   assert.equal(fetched.payload.policy.policy.lockVoucherToFirstMac, true);
+  assert.equal(fetched.payload.policy.policy.blockedDevices[0].ipAddress, "192.168.88.120");
 
   const ttlDisabledPolicy = {
     ...policy,
@@ -799,21 +814,39 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
       action: "upsert",
       name: "Routeur SaaS",
       peer_type: "router",
-      public_key: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
+      public_key: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+      resource_id: "router-niger-1"
     }
   });
   assert.equal(saasPeer.status, 200);
   assert.equal(saasPeer.payload.assigned_address, "10.250.7.2/32");
   assert.equal(hubRequests.at(-1).body.account_id, completion.payload.organization.id);
+  assert.equal(hubRequests.at(-1).body.resource_id, "router-niger-1");
+
+  const rotatedSaasPeer = await api("/v1/saas/vpn/peers", {
+    token: sessionToken,
+    body: {
+      action: "rotate",
+      name: "Routeur SaaS",
+      peer_type: "router",
+      previous_public_key: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+      public_key: "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD=",
+      resource_id: "router-niger-1"
+    }
+  });
+  assert.equal(rotatedSaasPeer.status, 200);
+  assert.equal(hubRequests.at(-1).body.action, "rotate");
+  assert.equal(hubRequests.at(-1).body.previous_public_key, "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=");
 
   const saasOperatorPeers = await api("/v1/saas/vpn/peers", {
     method: "GET",
     token: sessionToken
   });
   assert.equal(saasOperatorPeers.status, 200);
-  assert.equal(saasOperatorPeers.payload.peers.length, 1);
+  assert.equal(saasOperatorPeers.payload.peers.length, 2);
   assert.equal(saasOperatorPeers.payload.peers[0].name, "PC récupéré");
   assert.equal(saasOperatorPeers.payload.peers[0].peer_type, "operator");
+  assert.equal(saasOperatorPeers.payload.peers[1].peer_type, "router");
   assert.equal(hubRequests.at(-1).url, "/v1/peers/list");
 
   const login = await api("/v1/saas/auth/login", {

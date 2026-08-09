@@ -138,6 +138,7 @@ export type VpnPeerRecord = {
   account_id: string;
   network_id: string;
   router_id: string | null;
+  resource_id: string;
   peer_type: VpnPeerType;
   name: string;
   public_key: string;
@@ -232,6 +233,7 @@ export type TicketBatchRecord = {
   updated_at: string;
   deleted_at: string | null;
   sync_status: SyncStatus;
+  hotspot_server_name?: string;
 };
 
 export type TicketRecord = {
@@ -258,6 +260,28 @@ export type TicketRecord = {
   created_at: string;
   updated_at: string;
   sync_status: SyncStatus;
+  hotspot_server_name?: string;
+  mikrotik_profile_name?: string | null;
+  exported_at?: string | null;
+  archived_at?: string | null;
+  router_deleted_at?: string | null;
+  last_router_sync_at?: string | null;
+  uptime_seconds?: number;
+  remaining_seconds?: number | null;
+  data_remaining_bytes?: number | null;
+};
+
+export type TicketStateHistoryRecord = {
+  id: string;
+  account_id: string;
+  ticket_id: string;
+  router_id: string;
+  previous_status: string | null;
+  next_status: string;
+  source: string;
+  message: string;
+  created_by_profile_id: string | null;
+  created_at: string;
 };
 
 export type GeneratedFileRecord = {

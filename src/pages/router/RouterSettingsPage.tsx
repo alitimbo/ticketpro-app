@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import {
+  Ban,
   Network,
   Plus,
   RadioTower,
@@ -23,6 +24,7 @@ import {
   RouterAccessPolicySyncService,
   validateRouterAccessPolicy,
   type InfrastructureDevice,
+  type BlockedDevice,
   type RouterAccessPolicy,
   type RouterAccessPolicySyncStatus
 } from "../../services/access";
@@ -51,6 +53,12 @@ const emptyInfrastructureDevice: Omit<InfrastructureDevice, "id"> = {
   mode: "bridge",
   name: "",
   type: "antenna"
+};
+
+const emptyBlockedDevice: Omit<BlockedDevice, "id"> = {
+  ipAddress: "",
+  macAddress: "",
+  name: ""
 };
 
 export function RouterSettingsPage() {
@@ -88,6 +96,8 @@ export function RouterSettingsPage() {
     useState<{ policy: RouterAccessPolicy; revision: number } | null>(null);
   const [infrastructureDraft, setInfrastructureDraft] = useState(emptyInfrastructureDevice);
   const [infrastructureDraftError, setInfrastructureDraftError] = useState<string | null>(null);
+  const [blockedDeviceDraft, setBlockedDeviceDraft] = useState(emptyBlockedDevice);
+  const [blockedDeviceDraftError, setBlockedDeviceDraftError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [testMessage, setTestMessage] = useState("Non testé");
   const [isLoading, setIsLoading] = useState(true);
@@ -288,7 +298,11 @@ export function RouterSettingsPage() {
     setFeedback(null);
   };
 
-  const addInfrastructureDevice = () => {
+  const addInfrastructureDevice = async () => {
+    if (!canEditSensitive || !router || !session) {
+      setFeedback({ kind: "error", text: "Seul l'Admin peut ajouter un bypass." });
+      return;
+    }
     const device: InfrastructureDevice = {
       ...infrastructureDraft,
       id: globalThis.crypto?.randomUUID?.() ??
@@ -298,6 +312,17 @@ export function RouterSettingsPage() {
       mode: "bridge",
       name: infrastructureDraft.name.trim()
     };
+    const duplicate = accessPolicy.infrastructureDevices.find((item) =>
+      item.id === device.id
+      || normalizeMacAddress(item.macAddress) === device.macAddress
+      || item.ipAddress === device.ipAddress
+    );
+    if (duplicate) {
+      const message = `Équipement déjà présent : ${duplicate.name}.`;
+      setInfrastructureDraftError(message);
+      setFeedback({ kind: "error", text: message });
+      return;
+    }
     const candidate = {
       ...accessPolicy,
       infrastructureDevices: [...accessPolicy.infrastructureDevices, device]
@@ -305,12 +330,64 @@ export function RouterSettingsPage() {
     const validationError = validateRouterAccessPolicy(candidate);
     if (validationError) {
       setInfrastructureDraftError(validationError);
+      setFeedback({ kind: "error", text: validationError });
       return;
     }
-    setAccessPolicy(candidate);
-    setInfrastructureDraft(emptyInfrastructureDevice);
-    setInfrastructureDraftError(null);
+    setIsSavingAccessPolicy(true);
     setFeedback(null);
+    try {
+      let outcome: "already_present" | "created" | "updated" = "created";
+      if (device.internetBypass) {
+        const connections = await connectionRepository.listByRouter(router.id);
+        const service = await createPersistedRouterService({
+          authSession: session,
+          connections,
+          database,
+          router
+        });
+        const result = await service.upsertHotspotBypass({
+          address: device.ipAddress,
+          comment: `${device.name} (${device.type})`,
+          id: device.id,
+          macAddress: device.macAddress
+        });
+        outcome = result.outcome === "updated" || result.outcome === "already_present"
+          ? result.outcome
+          : "created";
+      }
+      const syncResult = await accessPolicySyncService.saveAndSync(
+        session.account_id,
+        router.id,
+        candidate,
+        cloudRouterId
+      );
+      setAccessPolicy(syncResult.policy);
+      setSavedAccessPolicy(structuredClone(syncResult.policy));
+      setAccessPolicySyncStatus(syncResult.status);
+      setConflictingRemotePolicy(
+        syncResult.status === "conflict" && syncResult.remotePolicy
+          ? { policy: syncResult.remotePolicy, revision: syncResult.revision }
+          : null
+      );
+      setInfrastructureDraft(emptyInfrastructureDevice);
+      setInfrastructureDraftError(null);
+      setFeedback({
+        kind: syncResult.status === "conflict" ? "error" : "success",
+        text: syncResult.status === "conflict"
+          ? `${device.name} est appliqué sur RouterOS et localement, mais un conflit VPS doit être résolu.`
+          : syncResult.status !== "synced"
+            ? `${device.name} est appliqué sur RouterOS et localement. Le VPS sera synchronisé au retour du réseau.`
+            : outcome === "already_present"
+              ? `${device.name} était déjà présent sur le MikroTik. La configuration locale et VPS a été resynchronisée.`
+              : outcome === "updated"
+                ? `${device.name} a été mis à jour sur RouterOS, localement et sur le VPS.`
+                : `${device.name} a été ajouté en bypass sur RouterOS, localement et sur le VPS.`
+      });
+    } catch (error) {
+      setFeedback({ kind: "error", text: accessActionError(error, `Impossible d'ajouter ${device.name}.`) });
+    } finally {
+      setIsSavingAccessPolicy(false);
+    }
   };
 
   const removeInfrastructureDevice = async (device: InfrastructureDevice) => {
@@ -327,6 +404,7 @@ export function RouterSettingsPage() {
     };
     setIsSavingAccessPolicy(true);
     setFeedback(null);
+    let missingOnRouter = false;
 
     try {
       const connections = await connectionRepository.listByRouter(router.id);
@@ -337,7 +415,10 @@ export function RouterSettingsPage() {
         router
       });
       if (device.internetBypass) {
-        await service.removeHotspotBypass(device.id, device.macAddress);
+        const result = await service.removeHotspotBypass(device.id, device.macAddress);
+        if (result.outcome === "not_found") {
+          missingOnRouter = true;
+        }
       }
 
       const syncResult = await accessPolicySyncService.saveAndSync(
@@ -354,7 +435,12 @@ export function RouterSettingsPage() {
           ? { policy: syncResult.remotePolicy, revision: syncResult.revision }
           : null
       );
-      setFeedback(syncResult.status === "synced"
+      setFeedback(missingOnRouter
+        ? {
+            kind: "error",
+            text: `${device.name} était introuvable sur le MikroTik. Sa référence locale et VPS a été nettoyée.`
+          }
+        : syncResult.status === "synced"
         ? {
             kind: "success",
             text: `${device.name} a été retiré de RouterOS, de la base locale et du VPS.`
@@ -371,35 +457,167 @@ export function RouterSettingsPage() {
     } catch (error) {
       setFeedback({
         kind: "error",
-        text: error instanceof RouterServiceError || error instanceof Error
-          ? error.message
-          : `Impossible de retirer ${device.name} du MikroTik.`
+        text: accessActionError(error, `Impossible de retirer ${device.name} du MikroTik.`)
       });
     } finally {
       setIsSavingAccessPolicy(false);
     }
   };
 
+  const updateBlockedDeviceDraft = (partial: Partial<Omit<BlockedDevice, "id">>) => {
+    setBlockedDeviceDraft((current) => ({ ...current, ...partial }));
+    setBlockedDeviceDraftError(null);
+    setFeedback(null);
+  };
+
+  const addBlockedDevice = async () => {
+    if (!canEditSensitive || !router || !session) {
+      setFeedback({ kind: "error", text: "Seul l'Admin peut bloquer un appareil." });
+      return;
+    }
+    const device: BlockedDevice = {
+      id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      ipAddress: blockedDeviceDraft.ipAddress.trim(),
+      macAddress: normalizeMacAddress(blockedDeviceDraft.macAddress),
+      name: blockedDeviceDraft.name.trim()
+    };
+    const duplicate = accessPolicy.blockedDevices.find((item) =>
+      (device.ipAddress && item.ipAddress === device.ipAddress)
+      || (device.macAddress && normalizeMacAddress(item.macAddress) === device.macAddress)
+    );
+    if (duplicate) {
+      const message = `Équipement déjà présent dans les blocages : ${duplicate.name}.`;
+      setBlockedDeviceDraftError(message);
+      setFeedback({ kind: "error", text: message });
+      return;
+    }
+    const candidate: RouterAccessPolicy = {
+      ...accessPolicy,
+      blockedDevices: [...accessPolicy.blockedDevices, device]
+    };
+    const validationError = validateRouterAccessPolicy(candidate);
+    if (validationError) {
+      setBlockedDeviceDraftError(validationError);
+      setFeedback({ kind: "error", text: validationError });
+      return;
+    }
+
+    setIsSavingAccessPolicy(true);
+    setFeedback(null);
+    try {
+      const connections = await connectionRepository.listByRouter(router.id);
+      const service = await createPersistedRouterService({
+        authSession: session,
+        connections,
+        database,
+        router
+      });
+      const result = await service.upsertHotspotBlockedDevice({
+        address: device.ipAddress,
+        comment: device.name,
+        id: device.id,
+        macAddress: device.macAddress
+      });
+      const syncResult = await accessPolicySyncService.saveAndSync(
+        session.account_id,
+        router.id,
+        candidate,
+        cloudRouterId
+      );
+      setAccessPolicy(syncResult.policy);
+      setSavedAccessPolicy(structuredClone(syncResult.policy));
+      setAccessPolicySyncStatus(syncResult.status);
+      setConflictingRemotePolicy(
+        syncResult.status === "conflict" && syncResult.remotePolicy
+          ? { policy: syncResult.remotePolicy, revision: syncResult.revision }
+          : null
+      );
+      setBlockedDeviceDraft(emptyBlockedDevice);
+      setBlockedDeviceDraftError(null);
+      setFeedback({
+        kind: syncResult.status === "conflict" ? "error" : "success",
+        text: syncResult.status === "conflict"
+          ? `${device.name} est bloqué sur RouterOS et localement, mais un conflit VPS doit être résolu.`
+          : syncResult.status !== "synced"
+            ? `${device.name} est bloqué sur RouterOS et localement. Le VPS sera synchronisé au retour du réseau.`
+            : result.outcome === "already_present"
+              ? `${device.name} était déjà bloqué sur le MikroTik. La configuration locale et VPS a été resynchronisée.`
+              : result.outcome === "updated"
+                ? `Le blocage de ${device.name} a été mis à jour sur RouterOS, localement et sur le VPS.`
+                : `${device.name} a été bloqué sur RouterOS, localement et sur le VPS.`
+      });
+    } catch (error) {
+      setFeedback({ kind: "error", text: accessActionError(error, `Impossible de bloquer ${device.name}.`) });
+    } finally {
+      setIsSavingAccessPolicy(false);
+    }
+  };
+
+  const removeBlockedDevice = async (device: BlockedDevice) => {
+    if (!canEditSensitive || !router || !session) {
+      setFeedback({ kind: "error", text: "Seul l'Admin peut débloquer un appareil." });
+      return;
+    }
+    const candidate: RouterAccessPolicy = {
+      ...accessPolicy,
+      blockedDevices: accessPolicy.blockedDevices.filter((item) => item.id !== device.id)
+    };
+    setIsSavingAccessPolicy(true);
+    setFeedback(null);
+    try {
+      const connections = await connectionRepository.listByRouter(router.id);
+      const service = await createPersistedRouterService({
+        authSession: session,
+        connections,
+        database,
+        router
+      });
+      const result = await service.removeHotspotBlockedDevice(device.id, device.macAddress);
+      const syncResult = await accessPolicySyncService.saveAndSync(
+        session.account_id,
+        router.id,
+        candidate,
+        cloudRouterId
+      );
+      setAccessPolicy(syncResult.policy);
+      setSavedAccessPolicy(structuredClone(syncResult.policy));
+      setAccessPolicySyncStatus(syncResult.status);
+      setConflictingRemotePolicy(
+        syncResult.status === "conflict" && syncResult.remotePolicy
+          ? { policy: syncResult.remotePolicy, revision: syncResult.revision }
+          : null
+      );
+      setFeedback(result.outcome === "not_found"
+        ? {
+            kind: "error",
+            text: `${device.name} était introuvable sur le MikroTik. Sa référence locale et VPS a été nettoyée.`
+          }
+        : syncResult.status === "conflict"
+          ? {
+              kind: "error",
+              text: `${device.name} est débloqué sur RouterOS et localement, mais un conflit VPS doit être résolu.`
+            }
+          : syncResult.status !== "synced"
+            ? {
+                kind: "success",
+                text: `${device.name} est débloqué sur RouterOS et localement. Le VPS sera synchronisé au retour du réseau.`
+              }
+            : {
+                kind: "success",
+                text: `${device.name} a été débloqué sur RouterOS, localement et sur le VPS.`
+              });
+    } catch (error) {
+      setFeedback({ kind: "error", text: accessActionError(error, `Impossible de débloquer ${device.name}.`) });
+    } finally {
+      setIsSavingAccessPolicy(false);
+    }
+  };
+
   const applyInfrastructurePolicy = async (
-    previousPolicy: RouterAccessPolicy,
+    _previousPolicy: RouterAccessPolicy,
     nextPolicy: RouterAccessPolicy
   ) => {
     if (!router || !session) throw new Error("Routeur ou session introuvable.");
-    const previousById = new Map(
-      previousPolicy.infrastructureDevices.map((device) => [device.id, device])
-    );
-    const nextById = new Map(
-      nextPolicy.infrastructureDevices.map((device) => [device.id, device])
-    );
-    const removals = previousPolicy.infrastructureDevices.filter((device) => {
-      const next = nextById.get(device.id);
-      return device.internetBypass && (!next || !next.internetBypass);
-    });
-    const upserts = nextPolicy.infrastructureDevices.filter(
-      (device) => device.internetBypass
-    );
-    if (removals.length === 0 && upserts.length === 0) return;
-
     const connections = await connectionRepository.listByRouter(router.id);
     const service = await createPersistedRouterService({
       authSession: session,
@@ -407,20 +625,62 @@ export function RouterSettingsPage() {
       database,
       router
     });
-    for (const device of removals) {
-      await service.removeHotspotBypass(device.id, device.macAddress);
-    }
-    for (const device of upserts) {
-      const previous = previousById.get(device.id);
-      if (previous?.internetBypass && previous.macAddress !== device.macAddress) {
-        await service.removeHotspotBypass(previous.id, previous.macAddress);
+    const desired = nextPolicy.infrastructureDevices.filter((device) => device.internetBypass);
+    const desiredIds = new Set(desired.map((device) => device.id));
+    for (const binding of await service.listManagedHotspotBypasses()) {
+      if (!desiredIds.has(binding.id)) {
+        await service.removeHotspotBypass(binding.id, binding.macAddress);
       }
+    }
+    for (const device of desired) {
       await service.upsertHotspotBypass({
         address: device.ipAddress,
         comment: `${device.name} (${device.type})`,
         id: device.id,
         macAddress: device.macAddress
       });
+    }
+    const verified = await service.listManagedHotspotBypasses();
+    if (
+      verified.length !== desired.length
+      || desired.some((device) => !verified.some((binding) =>
+        binding.id === device.id
+        && binding.address === device.ipAddress
+        && normalizeMacAddress(binding.macAddress) === normalizeMacAddress(device.macAddress)
+      ))
+    ) {
+      throw new Error("RouterOS n'a pas confirmé la synchronisation complète des bypass IP Binding.");
+    }
+  };
+
+  const applyBlockedDevicesPolicy = async (policy: RouterAccessPolicy) => {
+    if (!router || !session) throw new Error("Routeur ou session introuvable.");
+    const connections = await connectionRepository.listByRouter(router.id);
+    const service = await createPersistedRouterService({ authSession: session, connections, database, router });
+    const desiredIds = new Set(policy.blockedDevices.map((device) => device.id));
+    for (const binding of await service.listManagedHotspotBlockedDevices()) {
+      if (!desiredIds.has(binding.id)) {
+        await service.removeHotspotBlockedDevice(binding.id, binding.macAddress);
+      }
+    }
+    for (const device of policy.blockedDevices) {
+      await service.upsertHotspotBlockedDevice({
+        address: device.ipAddress,
+        comment: device.name,
+        id: device.id,
+        macAddress: device.macAddress
+      });
+    }
+    const verified = await service.listManagedHotspotBlockedDevices();
+    if (
+      verified.length !== policy.blockedDevices.length
+      || policy.blockedDevices.some((device) => !verified.some((binding) =>
+        binding.id === device.id
+        && binding.address === device.ipAddress
+        && normalizeMacAddress(binding.macAddress) === normalizeMacAddress(device.macAddress)
+      ))
+    ) {
+      throw new Error("RouterOS n'a pas confirmé la synchronisation complète des appareils bloqués.");
     }
   };
 
@@ -438,6 +698,91 @@ export function RouterSettingsPage() {
       blockIpv6: policy.monitorIpv6HopLimit,
       enabled: policy.antiSharingMode === "strict"
     });
+    const verified = await service.getHotspotAntiTetheringState();
+    const expectedIpv4 = policy.antiSharingMode === "strict" && policy.monitorIpv4Ttl;
+    const expectedIpv6 = policy.antiSharingMode === "strict" && policy.monitorIpv6HopLimit;
+    if (verified.blockIpv4Ttl !== expectedIpv4 || verified.blockIpv6 !== expectedIpv6) {
+      throw new Error("RouterOS n'a pas confirmé l'état réel des protections anti-partage.");
+    }
+  };
+
+  const refreshAccessPolicyFromRouter = async () => {
+    if (!canEditSensitive || !router || !session) {
+      setFeedback({ kind: "error", text: "Le routeur n'est pas encore disponible." });
+      return;
+    }
+    setIsSavingAccessPolicy(true);
+    setFeedback(null);
+    try {
+      const connections = await connectionRepository.listByRouter(router.id);
+      const service = await createPersistedRouterService({ authSession: session, connections, database, router });
+      const [ttlState, routerBypasses, routerBlockedDevices] = await Promise.all([
+        service.getHotspotAntiTetheringState(),
+        service.listManagedHotspotBypasses(),
+        service.listManagedHotspotBlockedDevices()
+      ]);
+      const localInfrastructureById = new Map(
+        accessPolicy.infrastructureDevices.map((device) => [device.id, device])
+      );
+      const localBlockedById = new Map(accessPolicy.blockedDevices.map((device) => [device.id, device]));
+      const nextPolicy: RouterAccessPolicy = {
+        ...accessPolicy,
+        antiSharingMode: ttlState.blockIpv4Ttl || ttlState.blockIpv6
+          ? "strict"
+          : accessPolicy.antiSharingMode === "observe" ? "observe" : "disabled",
+        blockedDevices: routerBlockedDevices.map((binding) => ({
+          id: binding.id,
+          ipAddress: binding.address,
+          macAddress: binding.macAddress,
+          name: localBlockedById.get(binding.id)?.name || binding.comment || "Appareil bloqué"
+        })),
+        infrastructureDevices: [
+          ...accessPolicy.infrastructureDevices.filter((device) => !device.internetBypass),
+          ...routerBypasses.map((binding) => {
+            const existing = localInfrastructureById.get(binding.id);
+            return existing
+              ? { ...existing, internetBypass: true, ipAddress: binding.address, macAddress: binding.macAddress }
+              : {
+                  id: binding.id,
+                  internetBypass: true,
+                  ipAddress: binding.address,
+                  macAddress: binding.macAddress,
+                  mode: "bridge" as const,
+                  name: binding.comment || "Équipement RouterOS",
+                  type: "other" as const
+                };
+          })
+        ],
+        monitorIpv4Ttl: ttlState.blockIpv4Ttl,
+        monitorIpv6HopLimit: ttlState.blockIpv6
+      };
+      const validationError = validateRouterAccessPolicy(nextPolicy);
+      if (validationError) throw new Error(validationError);
+      const syncResult = await accessPolicySyncService.saveAndSync(
+        session.account_id,
+        router.id,
+        nextPolicy,
+        cloudRouterId
+      );
+      setAccessPolicy(syncResult.policy);
+      setSavedAccessPolicy(structuredClone(syncResult.policy));
+      setAccessPolicySyncStatus(syncResult.status);
+      setConflictingRemotePolicy(
+        syncResult.status === "conflict" && syncResult.remotePolicy
+          ? { policy: syncResult.remotePolicy, revision: syncResult.revision }
+          : null
+      );
+      setFeedback({
+        kind: syncResult.status === "conflict" ? "error" : "success",
+        text: syncResult.status === "conflict"
+          ? "État RouterOS récupéré, mais un conflit avec le VPS doit être résolu."
+          : "État réel des protections et IP Binding récupéré depuis le MikroTik."
+      });
+    } catch (error) {
+      setFeedback({ kind: "error", text: accessActionError(error, "Impossible de lire les IP Binding du routeur.") });
+    } finally {
+      setIsSavingAccessPolicy(false);
+    }
   };
 
   const saveAccessPolicy = async () => {
@@ -450,6 +795,14 @@ export function RouterSettingsPage() {
       const message =
         "L’équipement renseigné n’est pas encore dans la liste. Corrigez les champs puis cliquez sur « Ajouter à la liste » avant d’enregistrer.";
       setInfrastructureDraftError(message);
+      setFeedback({ kind: "error", text: message });
+      return;
+    }
+
+    if (hasBlockedDeviceDraftContent(blockedDeviceDraft)) {
+      const message =
+        "L’appareil renseigné n’est pas encore bloqué. Corrigez les champs puis cliquez sur « Bloquer l’appareil » avant d’enregistrer.";
+      setBlockedDeviceDraftError(message);
       setFeedback({ kind: "error", text: message });
       return;
     }
@@ -473,6 +826,7 @@ export function RouterSettingsPage() {
     try {
       await applyAntiSharingPolicy(accessPolicy);
       await applyInfrastructurePolicy(savedAccessPolicy, accessPolicy);
+      await applyBlockedDevicesPolicy(accessPolicy);
 
       const syncResult = await accessPolicySyncService.saveAndSync(
         session.account_id,
@@ -505,9 +859,7 @@ export function RouterSettingsPage() {
     } catch (error) {
       setFeedback({
         kind: "error",
-        text: error instanceof RouterServiceError || error instanceof Error
-          ? error.message
-          : "Impossible d'appliquer la politique d'accès."
+        text: accessActionError(error, "Impossible d'appliquer la politique d'accès.")
       });
     } finally {
       setIsSavingAccessPolicy(false);
@@ -526,6 +878,7 @@ export function RouterSettingsPage() {
               savedAccessPolicy,
               conflictingRemotePolicy.policy
             );
+            await applyBlockedDevicesPolicy(conflictingRemotePolicy.policy);
             return accessPolicySyncService.acceptRemote(
               session.account_id,
               router.id,
@@ -537,6 +890,7 @@ export function RouterSettingsPage() {
         : await (async () => {
             await applyAntiSharingPolicy(accessPolicy);
             await applyInfrastructurePolicy(savedAccessPolicy, accessPolicy);
+            await applyBlockedDevicesPolicy(accessPolicy);
             return accessPolicySyncService.overwriteRemote(
               session.account_id,
               router.id,
@@ -806,6 +1160,13 @@ export function RouterSettingsPage() {
             }
           />
           <span>La configuration locale reste utilisable même pendant une coupure Internet.</span>
+          <Button
+            disabled={!canEditSensitive || isLoading || isSavingAccessPolicy || !router}
+            icon={Search}
+            onClick={() => void refreshAccessPolicyFromRouter()}
+          >
+            {isSavingAccessPolicy ? "Lecture…" : "Relire le MikroTik"}
+          </Button>
         </div>
 
         {conflictingRemotePolicy ? (
@@ -909,11 +1270,11 @@ export function RouterSettingsPage() {
             Le bypass concerne uniquement l'adresse de gestion de l'antenne, jamais les clients situés derrière.
           </span>
           <Button
-            disabled={!canEditSensitive || isLoading}
+            disabled={!canEditSensitive || isLoading || isSavingAccessPolicy}
             icon={Plus}
-            onClick={addInfrastructureDevice}
+            onClick={() => void addInfrastructureDevice()}
           >
-            Ajouter à la liste
+            {isSavingAccessPolicy ? "Ajout…" : "Ajouter le bypass"}
           </Button>
         </div>
 
@@ -959,6 +1320,81 @@ export function RouterSettingsPage() {
         </div>
       </Card>
 
+      <Card
+        title="IP Binding — appareils bloqués"
+        description="Bloquez une adresse IP, une adresse MAC, ou les deux. TicketPro ne modifie que les bindings qu'il gère."
+      >
+        <div className="router-form-grid">
+          <label className="form-field">
+            Nom de l'appareil
+            <input
+              disabled={!canEditSensitive || isLoading || isSavingAccessPolicy}
+              placeholder="Ex. Téléphone indésirable"
+              value={blockedDeviceDraft.name}
+              onChange={(event) => updateBlockedDeviceDraft({ name: event.target.value })}
+            />
+          </label>
+          <label className="form-field">
+            Adresse IP
+            <input
+              disabled={!canEditSensitive || isLoading || isSavingAccessPolicy}
+              placeholder="192.168.88.120"
+              value={blockedDeviceDraft.ipAddress}
+              onChange={(event) => updateBlockedDeviceDraft({ ipAddress: event.target.value })}
+            />
+          </label>
+          <label className="form-field">
+            Adresse MAC
+            <input
+              disabled={!canEditSensitive || isLoading || isSavingAccessPolicy}
+              placeholder="AA:BB:CC:DD:EE:FF"
+              value={blockedDeviceDraft.macAddress}
+              onChange={(event) => updateBlockedDeviceDraft({ macAddress: event.target.value })}
+            />
+            <small>Une adresse IP ou MAC au minimum est obligatoire.</small>
+          </label>
+        </div>
+        {blockedDeviceDraftError ? <p className="form-error">{blockedDeviceDraftError}</p> : null}
+        <div className="router-form-result">
+          <span>Le blocage utilise un IP Binding RouterOS de type « blocked ».</span>
+          <Button
+            disabled={!canEditSensitive || isLoading || isSavingAccessPolicy || !router}
+            icon={Ban}
+            onClick={() => void addBlockedDevice()}
+            variant="danger"
+          >
+            {isSavingAccessPolicy ? "Application…" : "Bloquer l'appareil"}
+          </Button>
+        </div>
+
+        {accessPolicy.blockedDevices.length > 0 ? (
+          <div className="data-list">
+            {accessPolicy.blockedDevices.map((device) => (
+              <DataListItem
+                description={[
+                  device.ipAddress ? `IP ${device.ipAddress}` : null,
+                  device.macAddress ? `MAC ${device.macAddress}` : null
+                ].filter(Boolean).join(" · ")}
+                icon={Ban}
+                key={device.id}
+                meta={(
+                  <Button
+                    disabled={!canEditSensitive || isSavingAccessPolicy}
+                    onClick={() => void removeBlockedDevice(device)}
+                    variant="ghost"
+                  >
+                    Débloquer
+                  </Button>
+                )}
+                title={device.name}
+              />
+            ))}
+          </div>
+        ) : (
+          <StatusDot label="Aucun appareil bloqué par TicketPro." status="offline" />
+        )}
+      </Card>
+
       {!isPersistent ? (
         <Card>
           <StatusDot label="La persistance native est indisponible dans ce mode." status="warning" />
@@ -970,6 +1406,16 @@ export function RouterSettingsPage() {
 
 function hasInfrastructureDraftContent(
   draft: Omit<InfrastructureDevice, "id">
+): boolean {
+  return Boolean(
+    draft.name.trim()
+    || draft.macAddress.trim()
+    || draft.ipAddress.trim()
+  );
+}
+
+function hasBlockedDeviceDraftContent(
+  draft: Omit<BlockedDevice, "id">
 ): boolean {
   return Boolean(
     draft.name.trim()
@@ -995,4 +1441,17 @@ function accessPolicySyncLabel(status: RouterAccessPolicySyncStatus): string {
     synced: "Synchronisé avec le VPS"
   };
   return labels[status];
+}
+
+function accessActionError(error: unknown, fallback: string): string {
+  if (error instanceof RouterServiceError) {
+    if (["router_offline", "timeout", "remote_unavailable", "remote_not_configured"].includes(error.code)) {
+      return `Routeur inaccessible. ${error.message}`;
+    }
+    if (error.code === "duplicate_user") return "Équipement déjà présent sur le routeur.";
+    return `Action échouée. ${error.message}`;
+  }
+  return error instanceof Error && error.message.trim()
+    ? `Action échouée. ${error.message}`
+    : fallback;
 }

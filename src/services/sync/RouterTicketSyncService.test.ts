@@ -84,7 +84,7 @@ describe("RouterTicketSyncService", () => {
         }),
         expect.objectContaining({
           id: "ticket-2",
-          status: "erreur_sync",
+          status: "supprimé_routeur",
           syncStatus: "router_missing"
         })
       ])
@@ -192,6 +192,7 @@ describe("RouterTicketSyncService", () => {
         ...routerUsers[0],
         downloadedBytes: 4_000,
         uploadedBytes: 1_000,
+        limitBytesTotal: 5_000,
         uptime: "1h",
         status: "expired"
       }],
@@ -201,8 +202,38 @@ describe("RouterTicketSyncService", () => {
     expect(report.updates[0]).toMatchObject({
       completedAt: expect.any(String),
       downloadedBytes: 4_000,
-      status: "complété",
+      status: "consommé",
       uploadedBytes: 1_000
     });
+  });
+
+  it("distingue disponible, activé, expiré et archivé à partir de RouterOS", () => {
+    const available = compareLocalAndRouterTickets(
+      [localTickets[0]],
+      [routerUsers[0]],
+      []
+    );
+    expect(available.updates[0]?.status).toBe("disponible");
+
+    const activated = compareLocalAndRouterTickets(
+      [localTickets[0]],
+      [{ ...routerUsers[0], uptime: "5m" }],
+      []
+    );
+    expect(activated.updates[0]?.status).toBe("activé");
+
+    const expired = compareLocalAndRouterTickets(
+      [localTickets[0]],
+      [{ ...routerUsers[0], comment: "TicketPro:v1;validity=60;expires=1;state=expired;", status: "expired" }],
+      []
+    );
+    expect(expired.updates[0]).toMatchObject({ status: "expiré", archivedAt: expect.any(String) });
+
+    const archived = compareLocalAndRouterTickets(
+      [{ ...localTickets[0], status: "expiré", archivedAt: "2026-08-01T10:00:00.000Z" }],
+      [],
+      []
+    );
+    expect(archived.updates[0]?.status).toBe("archivé");
   });
 });

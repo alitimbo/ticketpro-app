@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   AlertTriangle,
@@ -6,6 +6,8 @@ import {
   Eye,
   Filter,
   Laptop,
+  LoaderCircle,
+  MapPin,
   Plus,
   Router,
   Save,
@@ -97,6 +99,9 @@ export function RoutersPage() {
   const [logs, setLogs] = useState<RouterActionLog[]>([]);
   const [formState, setFormState] = useState<RouterFormState | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [connectingRouterIds, setConnectingRouterIds] = useState<Set<string>>(() => new Set());
+  const connectionAttemptsRef = useRef<Set<string>>(new Set());
+  const routersForHealthCheckRef = useRef<RouterCardData[]>([]);
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
   const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
   const recoveryService = useMemo(
@@ -161,7 +166,24 @@ export function RoutersPage() {
     const allowed = new Set(saasAccount.user.router_access.router_ids);
     return scopedRouters.filter((router) => allowed.has(router.id));
   }, [accountId, routers, saasAccount]);
+  useEffect(() => {
+    routersForHealthCheckRef.current = accountRouters;
+  }, [accountRouters]);
   const visibleRouters = useMemo(() => filterRouters(accountRouters, query, filter), [accountRouters, filter, query]);
+  const routerHealthScopeKey = useMemo(
+    () => accountRouters.map((router) => [
+      router.id,
+      router.preferredMode,
+      router.ipAddress,
+      router.remoteHost,
+      router.remotePort,
+      router.username,
+      router.encryptedPassword
+    ].join(":"))
+      .sort()
+      .join("|"),
+    [accountRouters]
+  );
   const subscriptionOverview = useMemo(
     () => getSubscriptionOverview(countRoutersForSubscription(accountRouters)),
     [accountRouters]
@@ -202,7 +224,7 @@ export function RoutersPage() {
       detectedInfo: {
         architecture: "",
         boardName: router.boardName,
-        identity: router.zoneName,
+        identity: router.routerName || router.zoneName,
         model: router.model,
         routerOsVersion: router.routerOsVersion,
         serialNumber: router.serialNumber,
@@ -260,41 +282,69 @@ export function RoutersPage() {
     if (selectedRouter) await activateRouterMode(selectedRouter, mode);
   };
 
-  const testConnection = async (router: RouterCardData) => {
-    setMessage("Test de connexion en cours…");
-    const result = await runRouterConnectionTest({
-      apiPort: router.apiPort,
-      encryptedPassword: router.encryptedPassword,
-      ipAddress: router.ipAddress,
-      mode: router.preferredMode,
-      password: "",
-      remoteHost: router.remoteHost,
-      remotePort: String(router.remotePort),
-      remoteUseSsl: router.remoteUseSsl,
-      statusHint: router.status,
-      username: router.username
-    });
+  const testConnection = async (router: RouterCardData, options: { silent?: boolean } = {}) => {
+    if (connectionAttemptsRef.current.has(router.id)) return;
+    connectionAttemptsRef.current.add(router.id);
+    setConnectingRouterIds((current) => new Set(current).add(router.id));
+    if (!options.silent) setMessage("Test de connexion en cours…");
 
-    if (isPersistent && accountId && session) {
-      try {
-        await routerRepository.recordConnectionTest({
-          accountId,
-          checkedAt: new Date().toISOString(),
-          errorMessage: result.status === "connected" ? null : result.message,
-          internalProfileId: session.internal_profile_id,
-          mode: router.preferredMode,
-          routerId: router.id,
-          status: result.status === "connected" ? "connected" : result.status === "offline" ? "offline" : "warning"
+    try {
+      const runForMode = (mode: RouterFormValues["preferredMode"]) => runRouterConnectionTest({
+          apiPort: router.apiPort,
+          encryptedPassword: router.encryptedPassword,
+          ipAddress: router.ipAddress,
+          mode,
+          password: "",
+          remoteHost: router.remoteHost,
+          remotePort: String(router.remotePort),
+          remoteUseSsl: router.remoteUseSsl,
+          statusHint: router.status,
+          username: router.username
         });
-      } catch {
-        setMessage("Connexion testée, mais le résultat n'a pas pu être enregistré.");
+      let testedMode = router.preferredMode;
+      let result = await runForMode(testedMode);
+      const alternateMode = testedMode === "local" && router.remoteHost.trim()
+        ? router.remoteMode
+        : testedMode !== "local" ? "local" : null;
+      if (result.status !== "connected" && alternateMode) {
+        const alternateResult = await runForMode(alternateMode);
+        if (alternateResult.status === "connected") {
+          result = alternateResult;
+          testedMode = alternateMode;
+        }
       }
-    }
 
-    setRouters((current) =>
-      current.map((item) => (item.id === router.id ? applyTestResult(item, result.status, result.message, result.systemInfo) : item))
-    );
-    setMessage(result.message);
+      if (isPersistent && accountId && session) {
+        try {
+          const cardStatus = routerCardStatusFromTestStatus(result.status);
+          await routerRepository.recordConnectionTest({
+            accountId,
+            checkedAt: new Date().toISOString(),
+            errorMessage: result.status === "connected" ? null : result.message,
+            internalProfileId: session.internal_profile_id,
+            mode: testedMode,
+            routerId: router.id,
+            status: cardStatus === "active" ? "connected" : cardStatus
+          });
+        } catch {
+          if (!options.silent) setMessage("Connexion testée, mais le résultat n'a pas pu être enregistré.");
+        }
+      }
+
+      setRouters((current) =>
+        current.map((item) => (item.id === router.id
+          ? applyTestResult(item, result.status, result.message, result.systemInfo)
+          : item))
+      );
+      if (!options.silent) setMessage(result.message);
+    } finally {
+      connectionAttemptsRef.current.delete(router.id);
+      setConnectingRouterIds((current) => {
+        const next = new Set(current);
+        next.delete(router.id);
+        return next;
+      });
+    }
   };
 
   const submitForm = async () => {
@@ -372,6 +422,7 @@ export function RoutersPage() {
           remoteHost: formState.values.remoteHost,
           remotePort: Number(formState.values.remotePort),
           remoteUseSsl: formState.values.remoteUseSsl,
+          routerName: formState.detectedInfo?.identity || currentRouter.routerName || currentRouter.zoneName,
           routerOsVersion: formState.detectedInfo?.routerOsVersion ?? currentRouter.routerOsVersion,
           serialNumber: formState.detectedInfo?.serialNumber ?? currentRouter.serialNumber,
           username: formState.values.username,
@@ -600,6 +651,29 @@ export function RoutersPage() {
     }
   };
 
+  useEffect(() => {
+    if (!isPersistent || !routerHealthScopeKey) return undefined;
+    let cancelled = false;
+
+    const refreshRealStatuses = async () => {
+      if (cancelled || document.visibilityState === "hidden") return;
+      const snapshot = [...routersForHealthCheckRef.current];
+      for (let index = 0; index < snapshot.length && !cancelled; index += 4) {
+        await Promise.all(
+          snapshot.slice(index, index + 4).map((router) => testConnection(router, { silent: true }))
+        );
+      }
+    };
+
+    const initialTimer = window.setTimeout(() => void refreshRealStatuses(), 800);
+    const interval = window.setInterval(() => void refreshRealStatuses(), 60_000);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(initialTimer);
+      window.clearInterval(interval);
+    };
+  }, [isPersistent, routerHealthScopeKey]);
+
   return (
     <div className="page-stack">
       <PageHeader
@@ -660,7 +734,7 @@ export function RoutersPage() {
       </Card>
 
       {message ? <p className="form-error">{message}</p> : null}
-      <div className="router-section-heading"><h2>Articles ({visibleRouters.length})</h2></div>
+      <div className="router-section-heading"><h2>Routeurs ({visibleRouters.length})</h2></div>
 
       {visibleRouters.length > 0 ? (
         <div className="router-grid">
@@ -669,6 +743,7 @@ export function RoutersPage() {
               canDelete={canDeleteRouter}
               canEdit={canEditRouter}
               key={router.id}
+              isConnecting={connectingRouterIds.has(router.id)}
               onDelete={() => setRouterToDelete(router)}
               onEdit={() => openEditForm(router)}
               onLocal={() => void activateRouterMode(router, "local")}
@@ -732,6 +807,7 @@ function readUnknownError(error: unknown, fallback: string): string {
 type RouterCardProps = {
   canDelete: boolean;
   canEdit: boolean;
+  isConnecting: boolean;
   onDelete: () => void;
   onEdit: () => void;
   onLocal: () => void;
@@ -741,7 +817,10 @@ type RouterCardProps = {
   router: RouterCardData;
 };
 
-function RouterCard({ canDelete, canEdit, onDelete, onEdit, onLocal, onOpen, onRemote, onTest, router }: RouterCardProps) {
+function RouterCard({ canDelete, canEdit, isConnecting, onDelete, onEdit, onLocal, onOpen, onRemote, onTest, router }: RouterCardProps) {
+  const routerName = router.routerName?.trim() || router.zoneName;
+  const zoneName = router.zoneName.trim() || "Site non renseigné";
+  const lastSeenLabel = formatRouterLastSeen(router.lastSeenAt);
   const menuItems = [
     { icon: Laptop, label: "Connexion locale", onSelect: onLocal },
     ...(router.remoteHost.trim()
@@ -763,38 +842,77 @@ function RouterCard({ canDelete, canEdit, onDelete, onEdit, onLocal, onOpen, onR
     <article
       className="router-card"
       onClick={onOpen}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onOpen();
-        }
-      }}
-      role="button"
-      tabIndex={0}
     >
       <header className="router-card__header">
         <div className="router-card__icon"><Router aria-hidden="true" /></div>
-        <div><h3>{router.zoneName}</h3><p>{router.model}</p></div>
+        <div className="router-card__identity">
+          <h3 title={routerName}>{routerName}</h3>
+          <p title={`${router.model} · ${router.boardName}`}>{router.model} · {router.boardName}</p>
+        </div>
+        <div aria-live="polite" className="router-card__status">
+          {isConnecting ? (
+            <span className="router-connection-indicator router-connection-indicator--connecting">
+              <LoaderCircle aria-hidden="true" /> Connexion…
+            </span>
+          ) : router.status === "active" ? (
+            <StatusDot label={statusLabels[router.status]} status="active" />
+          ) : (
+            <StatusDot
+              label={statusLabels[router.status]}
+              status={router.status === "offline" ? "offline" : "warning"}
+            />
+          )}
+        </div>
         <ActionMenu items={menuItems} />
       </header>
-      <div className="router-card__status">
-        {router.status === "active" ? (
-          <StatusDot label={statusLabels[router.status]} status="active" />
-        ) : (
-          <Badge status={router.status === "offline" ? "offline" : "warning"}>{statusLabels[router.status]}</Badge>
-        )}
+
+      <div className="router-card__zone" title={router.hotspotAddress || zoneName}>
+        <MapPin aria-hidden="true" />
+        <span>WiFi Zone</span>
+        <strong>{zoneName}</strong>
+        {router.hotspotAddress ? <small>{router.hotspotAddress}</small> : null}
       </div>
+
       <dl className="router-card__details">
-        <div><dt>Carte</dt><dd>{router.boardName}</dd></div>
-        <div><dt>Série</dt><dd>{router.serialNumber}</dd></div>
-        <div><dt>Adresse IP</dt><dd>{router.ipAddress}</dd></div>
-        <div><dt>Mode</dt><dd>{connectionModeLabel(router.preferredMode)}</dd></div>
-        <div><dt>Version</dt><dd>{router.routerOsVersion}</dd></div>
-        <div><dt>Dernière connexion</dt><dd>{router.lastSeenAt}</dd></div>
-        <div><dt>Dernier test</dt><dd>{router.lastTestMessage ?? "Non testé"}</dd></div>
+        <div><dt>Adresse IP</dt><dd title={router.ipAddress}>{router.ipAddress}</dd></div>
+        <div><dt>Dernière connexion</dt><dd title={router.lastSeenAt}>{lastSeenLabel}</dd></div>
       </dl>
+
+      <footer className="router-card__footer">
+        <span className="router-card__mode">{connectionModeLabel(router.preferredMode)}</span>
+        <div className="router-card__quick-actions">
+          <button
+            disabled={isConnecting}
+            onClick={(event) => { event.stopPropagation(); onTest(); }}
+            title="Tester la connexion"
+            type="button"
+          >
+            {isConnecting ? <LoaderCircle aria-hidden="true" /> : <Search aria-hidden="true" />}
+            {isConnecting ? "Connexion…" : "Tester"}
+          </button>
+          <button
+            className="router-card__open"
+            onClick={(event) => { event.stopPropagation(); onOpen(); }}
+            title="Ouvrir le routeur"
+            type="button"
+          >
+            <Eye aria-hidden="true" /> Ouvrir
+          </button>
+        </div>
+      </footer>
     </article>
   );
+}
+
+function formatRouterLastSeen(value: string): string {
+  const normalized = value.trim();
+  if (!normalized || normalized === "Jamais" || normalized === "Maintenant") return normalized || "Jamais";
+  const date = new Date(normalized);
+  if (Number.isNaN(date.getTime())) return normalized;
+  return new Intl.DateTimeFormat("fr-FR", {
+    dateStyle: "short",
+    timeStyle: "short"
+  }).format(date);
 }
 
 function ConnectionChoiceDialog({
@@ -1026,10 +1144,17 @@ function applyTestResult(
     lastTestedAt: "Maintenant",
     model: systemInfo?.model ?? router.model,
     remoteEnabled: status === "connected" || router.remoteEnabled,
+    routerName: systemInfo?.identity || router.routerName || router.zoneName,
     routerOsVersion: systemInfo?.routerOsVersion ?? router.routerOsVersion,
     serialNumber: systemInfo?.serialNumber ?? router.serialNumber,
-    status: status === "connected" ? "active" : status === "offline" ? "offline" : "warning"
+    status: routerCardStatusFromTestStatus(status)
   };
+}
+
+function routerCardStatusFromTestStatus(status: RouterConnectionTestStatus): RouterCardData["status"] {
+  if (status === "connected") return "active";
+  if (status === "offline" || status === "timeout" || status === "remote_unavailable") return "offline";
+  return "warning";
 }
 
 function validateRouterForm(formState: RouterFormState): string | null {

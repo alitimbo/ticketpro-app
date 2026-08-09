@@ -5,13 +5,17 @@ import type { RouterTicketSyncStatus } from "../../services/sync";
 
 export type TicketListStatus =
   | "activé"
+  | "archivé"
   | "complété"
+  | "consommé"
   | "disponible"
   | "désactivé"
+  | "en_cours_utilisation"
   | "erreur_sync"
   | "expiré"
   | "imprimé"
-  | "supprimé";
+  | "supprimé"
+  | "supprimé_routeur";
 
 export type TicketListItem = {
   accountId: string;
@@ -21,14 +25,18 @@ export type TicketListItem = {
   completedAt: string | null;
   createdAt: string;
   dataLimitMb: number | null;
+  dataRemainingBytes: number | null;
   downloadedBytes: number;
   expiresAt: string | null;
+  exportedAt: string | null;
+  archivedAt: string | null;
   generatedFileName: string | null;
   hasPdf: boolean;
   id: string;
   ipAddress: string | null;
   macAddress: string | null;
   mikrotikId: string | null;
+  lastRouterSyncAt: string | null;
   operatorProfile: string;
   passwordSecretRef: string;
   createdByProfileId: string;
@@ -37,12 +45,18 @@ export type TicketListItem = {
   planId: string;
   planProfileName?: string;
   planName: string;
+  planPrice: number | null;
+  profileName: string;
   printedCount: number;
   routerId: string;
   routerName: string;
+  routerDeletedAt: string | null;
+  serverName: string;
   status: TicketListStatus;
   syncStatus: RouterTicketSyncStatus;
   uploadedBytes: number;
+  uptimeSeconds: number;
+  remainingSeconds: number | null;
 };
 
 export type TicketLifecycleLog = {
@@ -66,14 +80,18 @@ export function ticketFromRecord(
     completedAt: record.completed_at,
     createdAt: record.created_at,
     dataLimitMb: plan?.data_limit_mb ?? null,
+    dataRemainingBytes: record.data_remaining_bytes ?? null,
     downloadedBytes: record.downloaded_bytes,
     expiresAt: record.expires_at,
+    exportedAt: record.exported_at ?? null,
+    archivedAt: record.archived_at ?? null,
     generatedFileName,
     hasPdf: Boolean(generatedFileName),
     id: record.id,
     ipAddress: record.ip_address,
     macAddress: record.mac_address,
     mikrotikId: record.mikrotik_id,
+    lastRouterSyncAt: record.last_router_sync_at ?? null,
     operatorProfile: record.created_by_profile,
     passwordSecretRef: record.password_encrypted,
     createdByProfileId: record.created_by_profile_id,
@@ -82,12 +100,18 @@ export function ticketFromRecord(
     planId: record.plan_id,
     planProfileName: plan?.mikrotik_profile_name ?? undefined,
     planName: plan?.name ?? "Plan supprimé",
+    planPrice: plan?.price_hint ?? null,
+    profileName: record.mikrotik_profile_name ?? plan?.mikrotik_profile_name ?? plan?.name ?? "Non défini",
     printedCount: record.printed_count,
     routerId: record.router_id,
     routerName,
+    routerDeletedAt: record.router_deleted_at ?? null,
+    serverName: record.hotspot_server_name ?? "all",
     status: record.status as TicketListStatus,
     syncStatus: databaseSyncStatusToTicketSyncStatus(record.sync_status),
-    uploadedBytes: record.uploaded_bytes
+    uploadedBytes: record.uploaded_bytes,
+    uptimeSeconds: record.uptime_seconds ?? 0,
+    remainingSeconds: record.remaining_seconds ?? null
   };
 }
 
@@ -99,6 +123,9 @@ export type TicketFilters = {
   macAddress: string;
   operatorProfile: string;
   planId: string;
+  priceMin: string;
+  priceMax: string;
+  durationMinutes: string;
   routerId: string;
   status: "" | TicketListStatus;
 };
@@ -111,6 +138,9 @@ export const emptyTicketFilters: TicketFilters = {
   macAddress: "",
   operatorProfile: "",
   planId: "",
+  priceMin: "",
+  priceMax: "",
+  durationMinutes: "",
   routerId: "",
   status: ""
 };
@@ -122,6 +152,9 @@ export function filterTickets(tickets: TicketListItem[], filters: TicketFilters)
   const mac = normalizeSearch(filters.macAddress);
   const from = filters.dateFrom ? startOfDay(filters.dateFrom) : null;
   const to = filters.dateTo ? endOfDay(filters.dateTo) : null;
+  const priceMin = filters.priceMin === "" ? null : Number(filters.priceMin);
+  const priceMax = filters.priceMax === "" ? null : Number(filters.priceMax);
+  const durationMinutes = filters.durationMinutes === "" ? null : Number(filters.durationMinutes);
 
   return tickets.filter((ticket) => {
     if (ticket.status === "supprimé" && filters.status !== "supprimé") {
@@ -141,6 +174,10 @@ export function filterTickets(tickets: TicketListItem[], filters: TicketFilters)
     if (filters.planId && ticket.planId !== filters.planId) {
       return false;
     }
+
+    if (priceMin !== null && (ticket.planPrice === null || ticket.planPrice < priceMin)) return false;
+    if (priceMax !== null && (ticket.planPrice === null || ticket.planPrice > priceMax)) return false;
+    if (durationMinutes !== null && ticket.planDurationMinutes !== durationMinutes) return false;
 
     if (filters.operatorProfile && ticket.operatorProfile !== filters.operatorProfile) {
       return false;
@@ -235,7 +272,7 @@ export function buildTicketLifecycleLogs(ticket: TicketListItem): TicketLifecycl
       createdAt: ticket.completedAt,
       id: `${ticket.id}-completed`,
       level: "info",
-      message: "Session complétée."
+      message: ticket.status === "consommé" ? "Durée ou quota entièrement consommé." : "Session complétée."
     });
   }
 
@@ -254,6 +291,24 @@ export function buildTicketLifecycleLogs(ticket: TicketListItem): TicketLifecycl
       id: `${ticket.id}-deleted`,
       level: "warning",
       message: "Ticket supprimé de RouterOS et masqué de la liste active."
+    });
+  }
+
+  if (ticket.status === "supprimé_routeur" && ticket.routerDeletedAt) {
+    logs.push({
+      createdAt: ticket.routerDeletedAt,
+      id: `${ticket.id}-router-deleted`,
+      level: "warning",
+      message: "Ticket détecté comme supprimé du routeur MikroTik."
+    });
+  }
+
+  if (ticket.archivedAt) {
+    logs.push({
+      createdAt: ticket.archivedAt,
+      id: `${ticket.id}-archived`,
+      level: "info",
+      message: "Ticket conservé dans les archives TicketPro."
     });
   }
 
@@ -281,13 +336,17 @@ export function buildTicketLifecycleLogs(ticket: TicketListItem): TicketLifecycl
 export function ticketStatusLabel(status: TicketListStatus): string {
   const labels: Record<TicketListStatus, string> = {
     activé: "Activé",
+    archivé: "Archivé",
     complété: "Complété",
+    consommé: "Consommé",
     disponible: "Disponible",
     désactivé: "Désactivé",
+    en_cours_utilisation: "En cours d'utilisation",
     erreur_sync: "Erreur sync",
     expiré: "Expiré",
     imprimé: "Imprimé",
-    supprimé: "Supprimé"
+    supprimé: "Supprimé",
+    supprimé_routeur: "Supprimé du routeur"
   };
 
   return labels[status];
@@ -298,11 +357,11 @@ export function ticketStatusToBadge(status: TicketListStatus): AppStatus {
     return "error";
   }
 
-  if (status === "activé") {
+  if (status === "activé" || status === "en_cours_utilisation") {
     return "active";
   }
 
-  if (status === "disponible" || status === "complété") {
+  if (status === "disponible" || status === "complété" || status === "consommé") {
     return "success";
   }
 
@@ -349,6 +408,16 @@ export function formatBytes(bytes: number): string {
   }
 
   return `${Math.round(megabytes)} MB`;
+}
+
+export function formatSeconds(seconds: number): string {
+  if (seconds <= 0) return "0 s";
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return [days ? `${days} j` : null, hours ? `${hours} h` : null, minutes ? `${minutes} min` : null]
+    .filter(Boolean)
+    .join(" ") || `${seconds} s`;
 }
 
 export function formatDateTime(value: string | null): string {
@@ -402,14 +471,18 @@ export function createDemoTickets(): TicketListItem[] {
       completedAt: status === "complété" ? expiresAt : null,
       createdAt,
       dataLimitMb: plan.dataLimitMb,
+      dataRemainingBytes: plan.dataLimitMb === null ? null : plan.dataLimitMb * 1024 * 1024,
       downloadedBytes: status === "activé" || status === "complété" ? (index + 1) * 18_874_368 : 0,
       expiresAt,
+      exportedAt: index % 4 !== 3 ? createdAt : null,
+      archivedAt: null,
       generatedFileName: index % 4 !== 3 ? `tickets-${index < 24 ? "jour" : index < 48 ? "3h" : "agent"}.pdf` : null,
       hasPdf: index % 4 !== 3,
       id: `ticket-demo-${String(index + 1).padStart(3, "0")}`,
       ipAddress: status === "activé" ? `192.168.88.${20 + index}` : null,
       macAddress: status === "activé" ? `A8:6B:AD:73:11:${String(index).padStart(2, "0")}` : null,
       mikrotikId: status === "disponible" ? null : `*${1000 + index}`,
+      lastRouterSyncAt: createdAt,
       operatorProfile: index % 5 === 0 ? "agent" : "operator",
       passwordSecretRef: `secret://routeur-demo/${demoCodes[index]}/password`,
       createdByProfileId:
@@ -420,12 +493,18 @@ export function createDemoTickets(): TicketListItem[] {
       planValidityMinutes: plan.validity,
       planId: plan.id,
       planName: plan.name,
+      planPrice: 100,
+      profileName: plan.name,
       printedCount: status === "imprimé" ? 1 : 0,
       routerId: "routeur-demo",
       routerName: "Routeur démo",
+      routerDeletedAt: null,
+      serverName: "all",
       status,
       syncStatus: index % 9 === 0 ? "conflict" : index % 6 === 0 ? "router_missing" : "router_synced",
-      uploadedBytes: status === "activé" || status === "complété" ? (index + 1) * 2_621_440 : 0
+      uploadedBytes: status === "activé" || status === "complété" ? (index + 1) * 2_621_440 : 0,
+      uptimeSeconds: activatedAt ? 900 : 0,
+      remainingSeconds: activatedAt ? Math.max(0, plan.duration * 60 - 900) : plan.duration * 60
     };
   });
 }

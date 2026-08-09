@@ -2,7 +2,7 @@
   "name": "ticketpro",
   "description": "Gestion locale et distante de hotspots MikroTik",
   "private": true,
-  "version": "0.2.2",
+  "version": "0.2.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,7 +10,7 @@
     "lint": "tsc --noEmit",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:license-api": "node --test infra/license-api/subscription-notification-policy.node-test.mjs infra/license-api/server.integration.mjs",
+    "test:license-api": "node --test infra/license-api/subscription-notification-policy.node-test.mjs infra/license-api/server.integration.mjs infra/wireguard-hub/peer-lifecycle.node-test.mjs",
     "type-check": "tsc --noEmit",
     "version:set": "node scripts/set-version.mjs",
     "tauri": "tauri",

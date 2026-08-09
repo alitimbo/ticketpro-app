@@ -230,6 +230,7 @@ export class RouterCloudRecoveryService {
         name: remote.name,
         network_id: vpnNetwork.id,
         peer_type: "router",
+        resource_id: remote.id,
         private_key_encrypted: null,
         public_key: remote.vpn.public_key,
         router_id: remote.id,

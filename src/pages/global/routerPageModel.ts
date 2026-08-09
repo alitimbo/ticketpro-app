@@ -29,6 +29,7 @@ export type RouterCardData = {
   createdByProfileId: string | null;
   hotspotAddress?: string | null;
   id: string;
+  routerName?: string;
   zoneName: string;
   model: string;
   boardName: string;
@@ -243,6 +244,7 @@ export function routerCardFromRecord(
     remoteHost: remoteConnection?.host ?? "",
     remotePort: remoteConnection?.port ?? record.api_port,
     remoteUseSsl: remoteConnection ? remoteConnection.use_ssl === 1 : false,
+    routerName: record.label || record.name,
     routerOsVersion: record.routeros_version ?? "Non détectée",
     serialNumber: record.serial_number ?? "Non détecté",
     status,
@@ -263,7 +265,7 @@ export function routerRecordFromCard(router: RouterCardData): CreateRouterInput 
     encrypted_password: router.encryptedPassword,
     hotspot_address: router.hotspotAddress,
     id: router.id,
-    label: router.zoneName,
+    label: router.routerName || router.zoneName,
     last_seen_at: router.lastTestStatus === "connected" ? new Date().toISOString() : null,
     local_ip: router.ipAddress,
     model: router.model,
@@ -340,6 +342,7 @@ export function createRouterFromForm(
     remoteHost: values.remoteHost,
     remotePort: Number(values.remotePort),
     remoteUseSsl: values.remoteUseSsl,
+    routerName: systemInfo?.identity || values.name,
     remoteEnabled: isRemoteConnectionMode(values.preferredMode) && values.remoteHost.trim().length > 0,
     routerOsVersion: systemInfo?.routerOsVersion ?? "Non détectée",
     serialNumber: systemInfo?.serialNumber ?? "Non détecté",

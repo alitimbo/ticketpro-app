@@ -19,8 +19,16 @@ export type InfrastructureDevice = {
   type: InfrastructureDeviceType;
 };
 
+export type BlockedDevice = {
+  id: string;
+  ipAddress: string;
+  macAddress: string;
+  name: string;
+};
+
 export type RouterAccessPolicy = {
   antiSharingMode: AntiSharingMode;
+  blockedDevices: BlockedDevice[];
   infrastructureDevices: InfrastructureDevice[];
   lockVoucherToFirstMac: boolean;
   monitorIpv4Ttl: boolean;
@@ -29,6 +37,7 @@ export type RouterAccessPolicy = {
 
 export const defaultRouterAccessPolicy: RouterAccessPolicy = {
   antiSharingMode: "disabled",
+  blockedDevices: [],
   infrastructureDevices: [],
   lockVoucherToFirstMac: false,
   monitorIpv4Ttl: false,
@@ -104,6 +113,34 @@ export function validateRouterAccessPolicy(
     seenIps.add(device.ipAddress);
   }
 
+  const seenBlockedIds = new Set<string>();
+  const seenBlockedMacs = new Set<string>();
+  const seenBlockedIps = new Set<string>();
+  for (const device of policy.blockedDevices) {
+    if (!device.name.trim()) return "Chaque appareil bloqué doit avoir un nom.";
+    if (!device.ipAddress.trim() && !device.macAddress.trim()) {
+      return `Renseignez l’adresse IP ou MAC de ${device.name}.`;
+    }
+    if (device.ipAddress.trim() && !isIpv4Address(device.ipAddress)) {
+      return `L’adresse IP de ${device.name} est invalide.`;
+    }
+    if (device.macAddress.trim() && !isMacAddress(device.macAddress)) {
+      return `L’adresse MAC de ${device.name} est invalide.`;
+    }
+    const mac = normalizeMacAddress(device.macAddress);
+    const ip = device.ipAddress.trim();
+    if (mac && (seenMacs.has(mac) || seenBlockedMacs.has(mac))) {
+      return `La MAC ${mac} est déjà présente dans un autre IP Binding.`;
+    }
+    if (ip && (seenIps.has(ip) || seenBlockedIps.has(ip))) {
+      return `L’IP ${ip} est déjà présente dans un autre IP Binding.`;
+    }
+    if (seenBlockedIds.has(device.id)) return "Un appareil bloqué est déclaré plusieurs fois.";
+    seenBlockedIds.add(device.id);
+    if (mac) seenBlockedMacs.add(mac);
+    if (ip) seenBlockedIps.add(ip);
+  }
+
   return null;
 }
 
@@ -126,6 +163,14 @@ function normalizePolicy(
 
   return {
     antiSharingMode,
+    blockedDevices: Array.isArray(value.blockedDevices)
+      ? value.blockedDevices.map((device) => ({
+          id: String(device.id || createId()),
+          ipAddress: String(device.ipAddress || "").trim(),
+          macAddress: normalizeMacAddress(String(device.macAddress || "")),
+          name: String(device.name || "").trim()
+        }))
+      : [],
     infrastructureDevices: Array.isArray(value.infrastructureDevices)
       ? value.infrastructureDevices.map((device) => ({
           id: String(device.id || createId()),

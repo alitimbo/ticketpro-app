@@ -392,6 +392,7 @@ export async function upsertSaasVpnPeer(input: {
   name: string;
   peerType: "operator" | "router";
   publicKey: string;
+  resourceId: string;
 }): Promise<LicenseVpnPeerResult> {
   const token = await requireSessionToken();
   return request(
@@ -400,7 +401,8 @@ export async function upsertSaasVpnPeer(input: {
       action: "upsert",
       name: input.name,
       peer_type: input.peerType,
-      public_key: input.publicKey
+      public_key: input.publicKey,
+      resource_id: input.resourceId
     },
     token
   );
@@ -409,6 +411,7 @@ export async function upsertSaasVpnPeer(input: {
 export async function revokeSaasVpnPeer(input: {
   peerType: "operator" | "router";
   publicKey: string;
+  resourceId: string;
 }): Promise<LicenseVpnPeerResult> {
   const token = await requireSessionToken();
   return request(
@@ -416,7 +419,30 @@ export async function revokeSaasVpnPeer(input: {
     {
       action: "revoke",
       peer_type: input.peerType,
-      public_key: input.publicKey
+      public_key: input.publicKey,
+      resource_id: input.resourceId
+    },
+    token
+  );
+}
+
+export async function rotateSaasVpnPeer(input: {
+  name: string;
+  peerType: "operator" | "router";
+  previousPublicKey: string;
+  publicKey: string;
+  resourceId: string;
+}): Promise<LicenseVpnPeerResult> {
+  const token = await requireSessionToken();
+  return request(
+    "/v1/saas/vpn/peers",
+    {
+      action: "rotate",
+      name: input.name,
+      peer_type: input.peerType,
+      previous_public_key: input.previousPublicKey,
+      public_key: input.publicKey,
+      resource_id: input.resourceId
     },
     token
   );
@@ -424,13 +450,17 @@ export async function revokeSaasVpnPeer(input: {
 
 export type SaasVpnPeer = {
   assigned_address: string | null;
+  connection_status: "connected" | "disconnected" | "revoked" | "configuration_error";
+  last_handshake_at: string | null;
   name: string;
-  peer_type: "operator";
+  peer_type: "operator" | "router";
   public_key: string;
+  resource_id: string;
+  revoked_at: string | null;
   status: "active" | "revoked";
 };
 
-export async function listSaasVpnOperatorPeers(): Promise<SaasVpnPeer[]> {
+export async function listSaasVpnPeers(): Promise<SaasVpnPeer[]> {
   const token = await requireSessionToken();
   const result = await request<{ peers: SaasVpnPeer[] }>(
     "/v1/saas/vpn/peers",
@@ -439,6 +469,10 @@ export async function listSaasVpnOperatorPeers(): Promise<SaasVpnPeer[]> {
     "GET"
   );
   return result.peers;
+}
+
+export async function listSaasVpnOperatorPeers(): Promise<SaasVpnPeer[]> {
+  return (await listSaasVpnPeers()).filter((peer) => peer.peer_type === "operator");
 }
 
 export async function getSaasRouterAccessPolicy(

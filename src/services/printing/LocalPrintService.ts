@@ -15,11 +15,14 @@ export type LocalPrinter = {
 export type PrintTicketInput = {
   batchId: string;
   code: string;
+  contactLabel?: string;
   dataLimitLabel: string | null;
   durationLabel: string;
+  hotspotAddress?: string;
   id: string;
   passwordLabel: string;
   planName: string;
+  priceLabel?: string | null;
   zoneName: string;
 };
 
@@ -33,6 +36,8 @@ export type PrintPreview = {
   formatLabel: string;
   lines: string[];
   paperWidthLabel: string;
+  estimatedLengthMm: number;
+  ticket: PrintTicketInput | null;
   ticketCount: number;
 };
 
@@ -114,6 +119,8 @@ export class LocalPrintService {
         ? buildTicketPreviewLines(firstTicket, settings)
         : ["Aucun ticket sélectionné.", "L’export PDF reste disponible."],
       paperWidthLabel: settings.format === "thermal58" ? "58 mm" : settings.format === "thermal80" ? "80 mm" : "A4",
+      estimatedLengthMm: estimateTicketLength(firstTicket, settings),
+      ticket: firstTicket,
       ticketCount: tickets.length
     };
   }
@@ -277,8 +284,19 @@ function buildTicketPreviewLines(ticket: PrintTicketInput, settings: PrintSettin
     `Passe : ${ticket.passwordLabel}`,
     `Durée : ${ticket.durationLabel}`,
     ticket.dataLimitLabel ? `Volume : ${ticket.dataLimitLabel}` : "Volume : illimité",
-    `Lot : ${ticket.batchId}`
+    ticket.priceLabel ?? null,
+    ticket.hotspotAddress ? `Portail : ${ticket.hotspotAddress}` : null,
+    ticket.contactLabel ? `Contact : ${ticket.contactLabel}` : null
   ];
 
-  return settings.economical ? lines.filter((_, index) => index !== 1) : lines;
+  const visibleLines = lines.filter((line): line is string => Boolean(line));
+  return settings.economical ? visibleLines.filter((line) => line !== ticket.planName) : visibleLines;
+}
+
+function estimateTicketLength(ticket: PrintTicketInput | null, settings: PrintSettings): number {
+  if (!ticket) return 0;
+  const distinctPassword = ticket.passwordLabel !== ticket.code;
+  const footerLines = Number(Boolean(ticket.hotspotAddress)) + Number(Boolean(ticket.contactLabel));
+  const base = settings.format === "thermal58" ? 34 : settings.format === "thermal80" ? 36 : 70;
+  return base + (distinctPassword ? 8 : 0) + footerLines * 4 + (settings.economical ? 0 : 5);
 }

@@ -28,6 +28,7 @@ export {
   SubscriptionPlanRepository,
   TicketBatchRepository,
   TicketRepository,
+  TicketStateHistoryRepository,
   VpnNetworkRepository,
   VpnPeerRepository
 } from "./repositories";

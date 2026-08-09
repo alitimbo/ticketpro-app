@@ -15,6 +15,7 @@ export type {
 export { routerAccessPolicyCloudId } from "./routerAccessPolicyIdentity";
 export type {
   AntiSharingMode,
+  BlockedDevice,
   InfrastructureDevice,
   InfrastructureDeviceMode,
   InfrastructureDeviceType,

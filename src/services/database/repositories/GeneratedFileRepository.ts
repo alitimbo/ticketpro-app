@@ -37,6 +37,40 @@ export class GeneratedFileRepository {
     return created;
   }
 
+  async upsert(input: CreateGeneratedFileInput): Promise<GeneratedFileRecord> {
+    const existing = await this.findById(input.id);
+    if (!existing) return this.create(input);
+    if (existing.account_id !== input.account_id) {
+      throw new Error("Ce fichier appartient à un autre compte.");
+    }
+    assertAccountProfileOwnership(input.account_id, input.created_by_profile_id);
+    await this.database.execute(
+      `UPDATE generated_files SET
+        router_id = ?1, batch_id = ?2, type = ?3, file_name = ?4, file_path = ?5,
+        format = ?6, created_by_profile = ?7, created_by_profile_id = ?8,
+        metadata_json = ?9, sync_status = ?10, deleted_at = NULL, updated_at = ?11
+       WHERE id = ?12 AND account_id = ?13`,
+      [
+        input.router_id,
+        input.batch_id,
+        input.type,
+        input.file_name,
+        input.file_path,
+        input.format,
+        input.created_by_profile,
+        input.created_by_profile_id,
+        input.metadata_json ?? null,
+        input.sync_status ?? "local",
+        new Date().toISOString(),
+        input.id,
+        input.account_id
+      ]
+    );
+    const updated = await this.findById(input.id);
+    if (!updated) throw new Error("Le fichier généré n'a pas pu être actualisé.");
+    return updated;
+  }
+
   async findById(id: string): Promise<GeneratedFileRecord | null> {
     const rows = await this.database.query<GeneratedFileRecord>("SELECT * FROM generated_files WHERE id = ?1", [id]);
     return rows[0] ?? null;

@@ -32,8 +32,11 @@ describe("LocalPrintService", () => {
     });
 
     expect(preview.paperWidthLabel).toBe("80 mm");
+    expect(preview.estimatedLengthMm).toBeGreaterThan(0);
+    expect(preview.ticket?.code).toBe("123456");
     expect(preview.lines).toContain("Code : 123456");
     expect(preview.lines).not.toContain("3h-2Go");
+    expect(preview.lines.some((line) => line.startsWith("Lot :"))).toBe(false);
   });
 
   it("prépare une impression et retourne les tickets imprimés", async () => {

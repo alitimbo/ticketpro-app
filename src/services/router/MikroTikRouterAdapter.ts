@@ -230,7 +230,8 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       "limit-uptime": user.limitUptime ?? null,
       name: user.username,
       password,
-      profile: plan.profileName
+      profile: plan.profileName,
+      server: user.serverName?.trim() || "all"
     });
 
     return this.findUserByName(user.username);
@@ -389,6 +390,7 @@ export class MikroTikRouterAdapter implements RouterAdapter {
           validityMinutes: batch.validityMinutes,
           passwordSecretRef: generatedCode.passwordSecretRef,
           planId: batch.planId,
+          serverName: batch.serverName ?? "all",
           username: generatedCode.username
         })
       );
@@ -605,58 +607,136 @@ export class MikroTikRouterAdapter implements RouterAdapter {
 
   async upsertHotspotBypass(
     binding: import("../../domain/router").HotspotBypassBinding
-  ): Promise<void> {
-    const rows = await this.call("/ip/hotspot/ip-binding/print");
-    const macAddress = normalizeMacAddress(binding.macAddress);
-    const comment = `TicketPro infrastructure:${binding.id} ${binding.comment}`.slice(0, 120);
-    const managedCommentPrefix = `TicketPro infrastructure:${binding.id}`;
-    const existing = rows.find((row) =>
-      pick(row, "comment")?.startsWith(managedCommentPrefix)
-    );
-    const params = {
-      address: binding.address,
-      comment,
-      "mac-address": macAddress,
-      server: "all",
-      type: "bypassed"
-    };
+  ): Promise<import("../../domain/router").HotspotIpBindingMutationResult> {
+    return this.upsertManagedHotspotBinding("TicketPro infrastructure:", "bypassed", binding, true);
+  }
 
+  async removeHotspotBypass(id: string, macAddress: string): Promise<import("../../domain/router").HotspotIpBindingMutationResult> {
+    return this.removeManagedHotspotBinding("TicketPro infrastructure:", id, macAddress);
+  }
+
+  async listManagedHotspotBlockedDevices(): Promise<import("../../domain/router").HotspotBypassBinding[]> {
+    return this.listManagedHotspotBindings("TicketPro blocked:");
+  }
+
+  async upsertHotspotBlockedDevice(
+    binding: import("../../domain/router").HotspotBypassBinding
+  ): Promise<import("../../domain/router").HotspotIpBindingMutationResult> {
+    return this.upsertManagedHotspotBinding("TicketPro blocked:", "blocked", binding, false);
+  }
+
+  async removeHotspotBlockedDevice(id: string, macAddress: string): Promise<import("../../domain/router").HotspotIpBindingMutationResult> {
+    return this.removeManagedHotspotBinding("TicketPro blocked:", id, macAddress);
+  }
+
+  private async listManagedHotspotBindings(prefix: string): Promise<import("../../domain/router").HotspotBypassBinding[]> {
+    const rows = await this.call("/ip/hotspot/ip-binding/print");
+    return rows.flatMap((row) => {
+      const comment = pick(row, "comment") ?? "";
+      if (!comment.startsWith(prefix)) return [];
+      const payload = comment.slice(prefix.length);
+      const separatorIndex = payload.indexOf(" ");
+      const id = (separatorIndex >= 0 ? payload.slice(0, separatorIndex) : payload).trim();
+      if (!id) return [];
+      return [{
+        address: pick(row, "address") ?? "",
+        comment: separatorIndex >= 0 ? payload.slice(separatorIndex + 1).trim() : "",
+        id,
+        macAddress: normalizeOptionalMacAddress(pick(row, "mac-address")) ?? ""
+      }];
+    });
+  }
+
+  private async upsertManagedHotspotBinding(
+    prefix: string,
+    type: "blocked" | "bypassed",
+    binding: import("../../domain/router").HotspotBypassBinding,
+    requireMacAddress: boolean
+  ): Promise<import("../../domain/router").HotspotIpBindingMutationResult> {
+    const rows = await this.call("/ip/hotspot/ip-binding/print");
+    const normalizedMacAddress = binding.macAddress.trim()
+      ? normalizeMacAddress(binding.macAddress)
+      : "";
+    if (requireMacAddress && !normalizedMacAddress) {
+      throw new RouterAdapterError("router_rejected", "Invalid MAC address");
+    }
+    const managedPrefix = `${prefix}${binding.id}`;
+    const existing = rows.find((row) => pick(row, "comment")?.startsWith(managedPrefix))
+      ?? rows.find((row) =>
+        pick(row, "comment")?.startsWith(prefix)
+        && (
+          (normalizedMacAddress && normalizeOptionalMacAddress(pick(row, "mac-address")) === normalizedMacAddress)
+          || (binding.address.trim() && pick(row, "address") === binding.address.trim())
+        )
+      );
+    const matchesTarget = (row: RouterOsApiRow) =>
+      (normalizedMacAddress
+        && normalizeOptionalMacAddress(pick(row, "mac-address")) === normalizedMacAddress)
+      || (binding.address.trim() && pick(row, "address") === binding.address.trim());
+    const collidingBinding = rows.find((row) => row !== existing && matchesTarget(row));
+    if (collidingBinding || (!existing && rows.some(matchesTarget))) {
+      throw new RouterAdapterError("duplicate_user", "IP Binding already exists on RouterOS");
+    }
     const existingId = existing ? pick(existing, ".id", "id") : null;
+    const comment = `${managedPrefix} ${binding.comment}`.slice(0, 120);
+    const params: Record<string, string> = {
+      comment,
+      server: "all",
+      type
+    };
+    if (binding.address.trim()) params.address = binding.address.trim();
+    if (normalizedMacAddress) params["mac-address"] = normalizedMacAddress;
+    const unchanged = existing
+      && pick(existing, "comment") === comment
+      && pick(existing, "address") === (params.address ?? "")
+      && (normalizeOptionalMacAddress(pick(existing, "mac-address")) ?? "") === normalizedMacAddress
+      && pick(existing, "type") === type;
+    if (unchanged) return { outcome: "already_present" };
+
     if (existingId) {
-      await this.call("/ip/hotspot/ip-binding/set", {
-        ...params,
-        numbers: existingId
-      });
+      await this.call("/ip/hotspot/ip-binding/set", { ...params, numbers: existingId });
     } else {
       await this.call("/ip/hotspot/ip-binding/add", params);
     }
+    const verified = (await this.call("/ip/hotspot/ip-binding/print")).find((row) =>
+      pick(row, "comment")?.startsWith(managedPrefix)
+    );
+    if (
+      !verified
+      || pick(verified, "type") !== type
+      || pick(verified, "address") !== (params.address ?? "")
+      || (normalizeOptionalMacAddress(pick(verified, "mac-address")) ?? "") !== normalizedMacAddress
+    ) {
+      throw new RouterAdapterError("router_rejected", "RouterOS did not confirm the IP Binding operation");
+    }
+    return { outcome: existingId ? "updated" : "created" };
   }
 
-  async removeHotspotBypass(id: string, macAddress: string): Promise<void> {
+  private async removeManagedHotspotBinding(
+    prefix: string,
+    id: string,
+    macAddress: string
+  ): Promise<import("../../domain/router").HotspotIpBindingMutationResult> {
     const rows = await this.call("/ip/hotspot/ip-binding/print");
-    const managedPrefix = "TicketPro infrastructure:";
-    const expectedPrefix = `${managedPrefix}${id}`;
-    const normalizedMacAddress = normalizeMacAddress(macAddress);
-    const existing = rows.find(
-      (row) => pick(row, "comment")?.startsWith(`TicketPro infrastructure:${id}`)
-    ) ?? rows.find((row) =>
-      pick(row, "comment")?.startsWith(managedPrefix)
-      && normalizeOptionalMacAddress(pick(row, "mac-address")) === normalizedMacAddress
-    );
+    const expectedPrefix = `${prefix}${id}`;
+    const normalizedMacAddress = macAddress.trim() ? normalizeMacAddress(macAddress) : "";
+    const existing = rows.find((row) => pick(row, "comment")?.startsWith(expectedPrefix))
+      ?? rows.find((row) =>
+        normalizedMacAddress
+        && pick(row, "comment")?.startsWith(prefix)
+        && normalizeOptionalMacAddress(pick(row, "mac-address")) === normalizedMacAddress
+      );
     const bindingId = existing ? pick(existing, ".id", "id") : null;
-    if (bindingId) {
-      await this.call("/ip/hotspot/ip-binding/remove", { numbers: bindingId });
-      const remaining = await this.call("/ip/hotspot/ip-binding/print");
-      if (remaining.some((row) =>
-        pick(row, ".id", "id") === bindingId
-        || pick(row, "comment")?.startsWith(expectedPrefix)
-      )) {
-        throw new RouterAdapterError(
-          "router_rejected",
-          "RouterOS kept the TicketPro infrastructure bypass after removal"
-        );
-      }
+    if (!bindingId) return { outcome: "not_found" };
+    await this.call("/ip/hotspot/ip-binding/remove", { numbers: bindingId });
+    const remaining = await this.call("/ip/hotspot/ip-binding/print");
+    if (remaining.some((row) =>
+      pick(row, ".id", "id") === bindingId
+      || pick(row, "comment")?.startsWith(expectedPrefix)
+    )) {
+      throw new RouterAdapterError("router_rejected", "RouterOS kept the managed IP Binding after removal");
     }
+    return { outcome: "removed" };
   }
 
   async listActiveUsers(): Promise<ActiveHotspotUser[]> {
@@ -1087,7 +1167,8 @@ async function userRowToHotspotUser(row: RouterOsApiRow): Promise<HotspotUser> {
     uptime,
     limitUptime,
     limitBytesTotal: limitBytesTotal || null,
-    macAddress: normalizeOptionalMacAddress(pick(row, "mac-address"))
+    macAddress: normalizeOptionalMacAddress(pick(row, "mac-address")),
+    serverName: pick(row, "server") || "all"
   };
 }
 

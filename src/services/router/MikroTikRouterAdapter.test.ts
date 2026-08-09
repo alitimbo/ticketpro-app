@@ -16,6 +16,22 @@ class MockRouterOsTransport implements RouterOsApiTransport {
 
   async call(request: RouterOsApiRequest): Promise<RouterOsApiRow[]> {
     this.calls.push(request);
+    if (request.command === "/ip/hotspot/ip-binding/add") {
+      const rows = this.responses["/ip/hotspot/ip-binding/print"] ??= [];
+      rows.push({ ".id": `*TP${rows.length + 1}`, ...request.params });
+      return [];
+    }
+    if (request.command === "/ip/hotspot/ip-binding/set") {
+      const rows = this.responses["/ip/hotspot/ip-binding/print"] ?? [];
+      const bindingId = String(request.params?.numbers ?? "");
+      const row = rows.find((item) => item[".id"] === bindingId || item.id === bindingId);
+      if (row && request.params) {
+        for (const [key, value] of Object.entries(request.params)) {
+          if (key !== "numbers") row[key] = value == null ? "" : String(value);
+        }
+      }
+      return [];
+    }
     if (request.command === "/ip/hotspot/ip-binding/remove") {
       const rows = this.responses["/ip/hotspot/ip-binding/print"] ?? [];
       const bindingId = String(request.params?.numbers ?? "");
@@ -267,6 +283,7 @@ describe("MikroTikRouterAdapter", () => {
         limitUptime: "3h",
         passwordSecretRef: "secret://routeur-demo/123456/password",
         planId: "*P1",
+        serverName: "WiFi-Zone-Niamey",
         username: "123456",
         validityMinutes: 300
       })
@@ -279,7 +296,8 @@ describe("MikroTikRouterAdapter", () => {
       "limit-uptime": "3h",
       name: "123456",
       password: "123456",
-      profile: "plan-3h"
+      profile: "plan-3h",
+      server: "WiFi-Zone-Niamey"
     });
     expect(JSON.stringify(normalizeMikroTikError(new Error("authentication failed")))).not.toContain("secret-not-logged");
   });
@@ -693,7 +711,7 @@ describe("MikroTikRouterAdapter", () => {
       address: "192.168.88.10",
       comment: "Antenne nord",
       id: "antenna-1",
-      macAddress: "AA:BB:CC:DD:EE:10"
+      macAddress: "AA:BB:CC:DD:EE:12"
     });
     await adapter.removeHotspotBypass("manual-rule", "AA:BB:CC:DD:EE:10");
     await adapter.removeHotspotBypass("antenna-1", "AA:BB:CC:DD:EE:10");
@@ -710,6 +728,52 @@ describe("MikroTikRouterAdapter", () => {
     );
     expect(removeCalls).toHaveLength(1);
     expect(removeCalls[0]?.params).toEqual({ numbers: "*TP1" });
+  });
+
+  it("gère idempotemment le blocage et le déblocage IP Binding", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/ip-binding/print": []
+    });
+    const adapter = createAdapter(transport);
+    const binding = {
+      address: "192.168.88.120",
+      comment: "Téléphone indésirable",
+      id: "blocked-1",
+      macAddress: ""
+    };
+
+    await expect(adapter.upsertHotspotBlockedDevice(binding)).resolves.toEqual({ outcome: "created" });
+    await expect(adapter.upsertHotspotBlockedDevice(binding)).resolves.toEqual({ outcome: "already_present" });
+    await expect(adapter.listManagedHotspotBlockedDevices()).resolves.toEqual([
+      expect.objectContaining({
+        address: "192.168.88.120",
+        id: "blocked-1",
+        macAddress: ""
+      })
+    ]);
+    await expect(adapter.removeHotspotBlockedDevice("blocked-1", "")).resolves.toEqual({ outcome: "removed" });
+    await expect(adapter.removeHotspotBlockedDevice("blocked-1", "")).resolves.toEqual({ outcome: "not_found" });
+  });
+
+  it("refuse d'écraser un IP Binding créé hors de TicketPro", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/ip-binding/print": [{
+        ".id": "*MANUAL",
+        address: "192.168.88.120",
+        comment: "Règle WinBox",
+        type: "bypassed"
+      }]
+    });
+    const adapter = createAdapter(transport);
+
+    await expect(adapter.upsertHotspotBlockedDevice({
+      address: "192.168.88.120",
+      comment: "Téléphone",
+      id: "blocked-1",
+      macAddress: ""
+    })).rejects.toMatchObject({ code: "duplicate_user" });
+    expect(transport.calls.some((call) => call.command.endsWith("/add"))).toBe(false);
+    expect(transport.calls.some((call) => call.command.endsWith("/set"))).toBe(false);
   });
 
   it("installe idempotemment le blocage du partage Hotspot", async () => {

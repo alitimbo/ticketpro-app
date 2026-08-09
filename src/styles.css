@@ -1675,14 +1675,16 @@ a {
 
 .router-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(285px, 1fr));
+  gap: 12px;
 }
 
 .router-card {
   display: grid;
-  gap: 16px;
-  padding: 18px;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-surface);
@@ -1707,68 +1709,285 @@ a {
 
 .router-card__header {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
 }
 
 .router-card__header h3 {
   margin: 0;
-  font-size: 1.08rem;
-  font-weight: 880;
+  overflow: hidden;
+  font-size: 0.96rem;
+  font-weight: 860;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .router-card__header p {
-  margin: 4px 0 0;
+  margin: 2px 0 0;
+  overflow: hidden;
   color: var(--color-muted);
-  font-weight: 700;
+  font-size: 0.75rem;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.router-card__identity {
+  min-width: 0;
 }
 
 .router-card__icon {
   display: grid;
   place-items: center;
-  width: 48px;
-  height: 48px;
-  border-radius: var(--radius-md);
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
   color: var(--color-primary);
   background: var(--color-primary-soft);
 }
 
 .router-card__icon svg {
-  width: 25px;
-  height: 25px;
+  width: 19px;
+  height: 19px;
 }
 
 .router-card__status {
-  min-height: 30px;
+  display: flex;
+  align-items: center;
+  min-height: 26px;
+  white-space: nowrap;
+}
+
+.router-card__status .badge,
+.router-card__status .status-dot {
+  font-size: 0.72rem;
+}
+
+.router-card .status-dot--active::before {
+  animation: router-online-pulse 1.8s ease-out infinite;
+}
+
+.router-card .status-dot--offline::before {
+  animation: none;
+  box-shadow: 0 0 0 3px var(--dot-bg);
+}
+
+.router-connection-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-muted);
+  font-size: 0.72rem;
+  font-weight: 760;
+}
+
+.router-connection-indicator--connecting {
+  color: var(--color-primary-strong);
+}
+
+.router-connection-indicator--connecting svg,
+.router-card__quick-actions button:disabled svg {
+  width: 14px;
+  height: 14px;
+  animation: router-connection-spin 0.8s linear infinite;
+}
+
+@keyframes router-online-pulse {
+  0% {
+    box-shadow: 0 0 0 0 var(--color-success-soft);
+  }
+  55% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+@keyframes router-connection-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .router-card .status-dot--active::before,
+  .router-connection-indicator--connecting svg,
+  .router-card__quick-actions button:disabled svg {
+    animation: none;
+  }
+}
+
+.router-card__zone {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 9px;
+  background: var(--color-surface-muted);
+}
+
+.router-card__zone svg {
+  width: 14px;
+  height: 14px;
+  color: var(--color-primary);
+}
+
+.router-card__zone span,
+.router-card__zone small {
+  color: var(--color-muted);
+  font-size: 0.7rem;
+  font-weight: 720;
+}
+
+.router-card__zone strong {
+  overflow: hidden;
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.router-card__zone small {
+  grid-column: 3;
+  overflow: hidden;
+  margin-top: -3px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .router-card__details {
   display: grid;
-  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
   margin: 0;
 }
 
 .router-card__details div {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  padding-top: 10px;
-  border-top: 1px solid var(--color-border);
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  padding: 0;
 }
 
 .router-card__details dt {
   color: var(--color-muted);
-  font-size: 0.84rem;
-  font-weight: 760;
+  font-size: 0.68rem;
+  font-weight: 740;
 }
 
 .router-card__details dd {
   margin: 0;
   color: var(--color-text);
-  font-size: 0.9rem;
-  font-weight: 820;
-  text-align: right;
+  overflow: hidden;
+  font-size: 0.8rem;
+  font-weight: 810;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.router-card__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 9px;
+  border-top: 1px solid var(--color-border);
+}
+
+.router-card__mode {
+  overflow: hidden;
+  color: var(--color-muted);
+  font-size: 0.7rem;
+  font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.router-card__quick-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.router-card__quick-actions button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  gap: 5px;
+  padding: 0 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  color: var(--color-text);
+  background: var(--color-surface);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 780;
+  cursor: pointer;
+}
+
+.router-card__quick-actions button:hover {
+  border-color: var(--color-primary-border-strong);
+  color: var(--color-primary-strong);
+  background: var(--color-primary-soft);
+}
+
+.router-card__quick-actions button:disabled {
+  color: var(--color-muted);
+  background: var(--color-surface-muted);
+  cursor: wait;
+  opacity: 0.78;
+}
+
+.router-card__quick-actions button:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+.router-card__quick-actions svg {
+  width: 14px;
+  height: 14px;
+}
+
+.router-card__quick-actions .router-card__open {
+  border-color: var(--color-primary);
+  color: white;
+  background: var(--color-primary);
+}
+
+@media (max-width: 520px) {
+  .router-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .router-card__header {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .router-card__status {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .router-card__header > :last-child {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+  }
+
+  .router-card__footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .router-card__quick-actions,
+  .router-card__quick-actions button {
+    width: 100%;
+  }
+
+  .router-card__quick-actions button {
+    justify-content: center;
+  }
 }
 
 .connection-dialog {
@@ -2650,12 +2869,95 @@ a {
 }
 
 .print-preview-ticket {
+  align-content: start;
   background: #ffffff;
   border: 1px dashed var(--color-border-strong);
   border-radius: var(--radius-md);
   display: grid;
   gap: 5px;
   padding: 12px;
+}
+
+.print-preview-ticket--thermal58 {
+  max-width: 250px;
+}
+
+.print-preview-ticket--thermal80 {
+  max-width: 330px;
+}
+
+.thermal-ticket-preview {
+  background: #fff;
+  border: 1px solid #111;
+  color: #111;
+  display: grid;
+  font-family: "Cascadia Mono", "Consolas", monospace;
+  gap: 7px;
+  overflow-wrap: anywhere;
+  padding: 10px;
+  text-align: center;
+  width: 100%;
+}
+
+.print-preview-ticket--thermal58 .thermal-ticket-preview {
+  font-size: 10px;
+  padding: 8px;
+}
+
+.print-preview-ticket--thermal80 .thermal-ticket-preview {
+  font-size: 12px;
+}
+
+.thermal-ticket-preview__zone {
+  font-size: 1.08em;
+  font-weight: 900;
+  line-height: 1.2;
+}
+
+.thermal-ticket-preview__plan {
+  font-weight: 800;
+}
+
+.thermal-ticket-preview__credentials {
+  border: 1px solid #111;
+  display: grid;
+  gap: 3px;
+  padding: 6px;
+}
+
+.thermal-ticket-preview__credentials small {
+  font-size: 0.72em;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+}
+
+.thermal-ticket-preview__credentials strong {
+  font-size: 1.45em;
+  line-height: 1.1;
+}
+
+.thermal-ticket-preview__credentials hr {
+  border: 0;
+  border-top: 1px solid #111;
+  margin: 4px -6px 2px;
+}
+
+.thermal-ticket-preview__details,
+.thermal-ticket-preview__footer {
+  display: grid;
+  gap: 3px;
+  line-height: 1.25;
+}
+
+.thermal-ticket-preview__footer {
+  border-top: 1px solid #111;
+  padding-top: 6px;
+}
+
+.print-preview-ticket > small {
+  color: var(--color-muted);
+  font-size: 11px;
+  font-weight: 750;
 }
 
 .print-preview-ticket span {
@@ -4795,16 +5097,16 @@ a {
 }
 
 .router-card__icon {
-  width: 38px;
-  height: 38px;
+  width: 34px;
+  height: 34px;
 }
 
 .router-card__details {
-  gap: 6px;
+  gap: 8px;
 }
 
 .router-card__details div {
-  padding-top: 6px;
+  padding: 0;
 }
 
 .router-hero {
@@ -5226,7 +5528,7 @@ a {
     minmax(100px, 0.65fr)
     minmax(145px, 0.85fr)
     minmax(100px, 0.6fr)
-    minmax(125px, 0.65fr);
+    minmax(250px, 1.15fr);
   align-items: center;
   column-gap: 18px;
 }
@@ -5319,6 +5621,24 @@ a {
   justify-content: flex-end;
 }
 
+.vpn-peer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.vpn-peer-actions .button {
+  min-width: 112px;
+}
+
+.vpn-button--loading svg {
+  animation: vpn-button-spin 0.8s linear infinite;
+}
+
+@keyframes vpn-button-spin {
+  to { transform: rotate(360deg); }
+}
+
 .vpn-peer-action .button {
   min-width: 112px;
   min-height: 38px;
@@ -5409,6 +5729,11 @@ a {
   .vpn-peer-action .button {
     width: 100%;
   }
+
+  .vpn-peer-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .app-update-notice {
@@ -5477,5 +5802,37 @@ a {
   .app-update-notice .button {
     grid-column: 1 / -1;
     width: 100%;
+  }
+}
+.ticket-server-selection {
+  align-items: end;
+  margin-bottom: 1rem;
+}
+
+.ticket-server-selection__status {
+  align-items: center;
+  background: var(--surface-subtle, rgba(15, 23, 42, 0.04));
+  border: 1px solid var(--border-color, rgba(15, 23, 42, 0.1));
+  border-radius: 12px;
+  display: flex;
+  gap: 0.65rem;
+  min-height: 48px;
+  padding: 0.75rem 0.9rem;
+}
+
+.ticket-display-settings {
+  max-width: 760px;
+}
+
+.ticket-display-settings__grid {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 1rem 0;
+}
+
+@media (max-width: 720px) {
+  .ticket-display-settings__grid {
+    grid-template-columns: 1fr;
   }
 }

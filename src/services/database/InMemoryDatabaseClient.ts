@@ -80,6 +80,7 @@ export class InMemoryDatabaseClient implements DatabaseClient {
 
     const tableName = this.extractInsertTable(sql);
     const columns = this.extractInsertColumns(sql);
+    assertBoundParameters(sql, params);
     const now = new Date(0).toISOString();
     const row = columns.reduce<DatabaseRow>((accumulator, column, index) => {
       accumulator[column] = params[index] ?? null;
@@ -122,17 +123,18 @@ export class InMemoryDatabaseClient implements DatabaseClient {
       const assignmentMatch = assignment.match(/^([a-z_]+)\s*=\s*\?(\d+)$/i);
       const literalMatch = assignment.match(/^([a-z_]+)\s*=\s*'([^']*)'$/i);
       const numericMatch = assignment.match(/^([a-z_]+)\s*=\s*(-?\d+(?:\.\d+)?)$/i);
+      const nullMatch = assignment.match(/^([a-z_]+)\s*=\s*null$/i);
 
-      if (!assignmentMatch && !literalMatch && !numericMatch) {
+      if (!assignmentMatch && !literalMatch && !numericMatch && !nullMatch) {
         throw new Error("Affectation de mise à jour inconnue.");
       }
 
-      const column = (assignmentMatch?.[1] ?? literalMatch?.[1] ?? numericMatch?.[1]) as string;
+      const column = (assignmentMatch?.[1] ?? literalMatch?.[1] ?? numericMatch?.[1] ?? nullMatch?.[1]) as string;
       const value = assignmentMatch
         ? params[Number(assignmentMatch[2]) - 1] ?? null
         : literalMatch
           ? literalMatch[2]
-          : Number(numericMatch?.[2]);
+          : numericMatch ? Number(numericMatch[2]) : null;
       rows.forEach((row) => {
         row[column] = value;
       });
@@ -238,5 +240,13 @@ export class InMemoryDatabaseClient implements DatabaseClient {
 
   private isTableName(value: string): value is LocalTableName {
     return tableNames.includes(value as LocalTableName);
+  }
+}
+
+function assertBoundParameters(sql: string, params: DatabaseValue[]): void {
+  const indexes = Array.from(sql.matchAll(/\?(\d+)/g), (match) => Number(match[1]));
+  const highestIndex = indexes.length > 0 ? Math.max(...indexes) : 0;
+  if (highestIndex > params.length) {
+    throw new Error(`Paramètre SQL ?${highestIndex} absent (${params.length} valeur(s) fournie(s)).`);
   }
 }

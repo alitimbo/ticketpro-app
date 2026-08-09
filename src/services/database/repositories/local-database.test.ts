@@ -147,6 +147,19 @@ describe("repositories SQLite locaux", () => {
       router_id: router.id,
       type: "tickets_pdf"
     });
+    await files.upsert({
+      account_id: "account-douma-demo",
+      batch_id: batch.id,
+      created_by_profile: "operator",
+      created_by_profile_id: "account-douma-demo:internal-profile-operator",
+      file_name: "tickets-test-thermal58.pdf",
+      file_path: "files/tickets-test-thermal58.pdf",
+      format: "thermal58",
+      id: file.id,
+      metadata_json: '{"format":"thermal58"}',
+      router_id: router.id,
+      type: "tickets_pdf"
+    });
 
     await expect(routers.findById("router-test")).resolves.toMatchObject({ label: "Routeur test" });
     await expect(plans.listByRouter(router.id)).resolves.toHaveLength(1);
@@ -155,7 +168,11 @@ describe("repositories SQLite locaux", () => {
     await expect(batches.findById(batch.id)).resolves.toMatchObject({
       created_by_profile_id: "account-douma-demo:internal-profile-operator"
     });
-    await expect(files.findById(file.id)).resolves.toMatchObject({ file_name: "tickets-test.pdf" });
+    await expect(files.findById(file.id)).resolves.toMatchObject({
+      file_name: "tickets-test-thermal58.pdf",
+      format: "thermal58",
+      metadata_json: '{"format":"thermal58"}'
+    });
     await expect(routers.findById("router-test")).resolves.toMatchObject({
       account_id: "account-douma-demo",
       created_by_profile_id: "account-douma-demo:internal-profile-operator",

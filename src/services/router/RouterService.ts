@@ -279,6 +279,29 @@ export class RouterService {
     return this.run("getRouterDateTime", () => this.adapter.getRouterDateTime());
   }
 
+  upsertHotspotBlockedDevice(binding: import("../../domain/router").HotspotBypassBinding) {
+    return this.run(
+      "upsertHotspotBlockedDevice",
+      () => this.adapter.upsertHotspotBlockedDevice(binding),
+      "router.settings.manage"
+    );
+  }
+
+  listManagedHotspotBlockedDevices() {
+    return this.run(
+      "listManagedHotspotBlockedDevices",
+      () => this.adapter.listManagedHotspotBlockedDevices()
+    );
+  }
+
+  removeHotspotBlockedDevice(id: string, macAddress: string) {
+    return this.run(
+      "removeHotspotBlockedDevice",
+      () => this.adapter.removeHotspotBlockedDevice(id, macAddress),
+      "router.settings.manage"
+    );
+  }
+
   getWireGuardInstallation(interfaceName: string) {
     return this.run("getWireGuardInstallation", () => this.adapter.getWireGuardInstallation(interfaceName));
   }

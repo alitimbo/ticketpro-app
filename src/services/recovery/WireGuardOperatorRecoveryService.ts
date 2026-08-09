@@ -93,6 +93,7 @@ export class WireGuardOperatorRecoveryService {
         name: remote.name || "Poste opérateur récupéré",
         network_id: network.id,
         peer_type: "operator",
+        resource_id: remote.resource_id,
         // Le service Windows conserve déjà la clé privée. TicketPro n'a pas
         // besoin de l'extraire ou de l'envoyer au VPS pour adopter le tunnel.
         private_key_encrypted: null,

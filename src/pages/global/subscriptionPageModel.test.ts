@@ -23,7 +23,11 @@ describe("subscriptionPageModel", () => {
   });
 
   it("prépare le pack 1 routeur par défaut", () => {
-    const overview = getSubscriptionOverview(1);
+    const overview = getSubscriptionOverview(
+      1,
+      undefined,
+      Date.parse("2026-07-15T00:00:00.000Z")
+    );
 
     expect(overview.plan.name).toBe("Pack 1 routeur");
     expect(overview.routersUsed).toBe(1);
@@ -37,7 +41,11 @@ describe("subscriptionPageModel", () => {
   it("change de pack et augmente la limite routeurs", () => {
     changeSubscriptionPlan("subscription-plan-5-routers");
 
-    const overview = getSubscriptionOverview(1);
+    const overview = getSubscriptionOverview(
+      1,
+      undefined,
+      Date.parse("2026-07-15T00:00:00.000Z")
+    );
 
     expect(overview.plan.name).toBe("Pack 5 routeurs");
     expect(overview.plan.priceCfa).toBe(6000);

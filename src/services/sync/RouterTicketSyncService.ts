@@ -20,12 +20,21 @@ export type SyncableLocalTicket = {
   passwordSecretRef: string;
   planId: string;
   planProfileName?: string;
+  planValidityMinutes?: number;
+  serverName?: string;
   routerId: string;
   status: string;
   syncStatus: RouterTicketSyncStatus;
   completedAt?: string | null;
   downloadedBytes?: number;
   uploadedBytes?: number;
+  expiresAt?: string | null;
+  uptimeSeconds?: number;
+  remainingSeconds?: number | null;
+  dataRemainingBytes?: number | null;
+  lastRouterSyncAt?: string | null;
+  routerDeletedAt?: string | null;
+  archivedAt?: string | null;
 };
 
 export type SyncedTicketUpdate = {
@@ -39,6 +48,15 @@ export type SyncedTicketUpdate = {
   status?: string;
   syncStatus: RouterTicketSyncStatus;
   uploadedBytes?: number;
+  expiresAt?: string | null;
+  uptimeSeconds?: number;
+  remainingSeconds?: number | null;
+  dataRemainingBytes?: number | null;
+  lastRouterSyncAt?: string | null;
+  routerDeletedAt?: string | null;
+  serverName?: string;
+  profileName?: string;
+  archivedAt?: string | null;
 };
 
 export type RouterOnlyTicket = {
@@ -48,6 +66,7 @@ export type RouterOnlyTicket = {
   planId: string;
   profileName: string;
   syncStatus: "local_missing";
+  serverName: string;
 };
 
 export type TicketSyncReport = {
@@ -312,7 +331,15 @@ export function compareLocalAndRouterTickets(
     const activeUser = activeByCode.get(ticket.code);
 
     if (!routerUser) {
-      updates.push({ id: ticket.id, status: "erreur_sync", syncStatus: "router_missing" });
+      const manuallyDeleted = ticket.status === "supprimé";
+      const terminal = ["consommé", "expiré", "archivé"].includes(ticket.status);
+      updates.push({
+        id: ticket.id,
+        lastRouterSyncAt: new Date().toISOString(),
+        routerDeletedAt: ticket.routerDeletedAt ?? new Date().toISOString(),
+        status: manuallyDeleted ? "supprimé" : terminal ? "archivé" : "supprimé_routeur",
+        syncStatus: "router_missing"
+      });
       logs.push({
         level: "warning",
         message: "Ticket local absent du routeur.",
@@ -325,13 +352,16 @@ export function compareLocalAndRouterTickets(
       ? ticket.planProfileName !== routerUser.profileName
       : Boolean(ticket.planId && routerUser.planId && ticket.planId !== routerUser.planId);
 
+    const usage = deriveTicketRuntime(routerUser, activeUser);
+    const terminal = usage.status === "consommé" || usage.status === "expiré";
     updates.push({
+      archivedAt: terminal ? ticket.archivedAt ?? new Date().toISOString() : ticket.archivedAt,
       activatedAt:
         activeUser || routerOsDurationHasElapsed(routerUser.uptime)
-          ? ticket.activatedAt ?? new Date().toISOString()
+          ? ticket.activatedAt ?? inferActivationAt(usage.expiresAt, ticket.planValidityMinutes) ?? new Date().toISOString()
           : ticket.activatedAt,
       completedAt:
-        routerUser.status === "expired"
+        usage.status === "consommé" || usage.status === "expiré"
           ? ticket.completedAt ?? new Date().toISOString()
           : ticket.completedAt,
       downloadedBytes: Math.max(
@@ -340,20 +370,19 @@ export function compareLocalAndRouterTickets(
         activeUser?.downloadedBytes ?? 0
       ),
       id: ticket.id,
+      dataRemainingBytes: usage.dataRemainingBytes,
+      expiresAt: usage.expiresAt ?? ticket.expiresAt,
       ipAddress: activeUser?.ipAddress ?? ticket.ipAddress,
       macAddress: activeUser?.macAddress ?? ticket.macAddress,
       mikrotikId: routerUser.id,
-      status:
-        activeUser
-          ? "activé"
-          : routerUser.status === "expired"
-            ? "complété"
-            : routerUser.status === "disabled"
-              ? "désactivé"
-              : ticket.status === "erreur_sync"
-                ? "disponible"
-                : ticket.status,
+      profileName: routerUser.profileName,
+      remainingSeconds: usage.remainingSeconds,
+      serverName: routerUser.serverName ?? "all",
+      status: usage.status,
       syncStatus: hasConflict ? "conflict" : "router_synced",
+      lastRouterSyncAt: new Date().toISOString(),
+      routerDeletedAt: null,
+      uptimeSeconds: usage.uptimeSeconds,
       uploadedBytes: Math.max(
         ticket.uploadedBytes ?? 0,
         routerUser.uploadedBytes ?? 0,
@@ -381,6 +410,7 @@ export function compareLocalAndRouterTickets(
       passwordSecretRef: user.passwordSecretRef,
       planId: user.planId,
       profileName: user.profileName,
+      serverName: user.serverName ?? "all",
       syncStatus: "local_missing"
     });
     logs.push({
@@ -402,6 +432,74 @@ function routerOsDurationHasElapsed(value: string | null | undefined): boolean {
   return Boolean(value && value !== "0s" && value !== "0");
 }
 
+function deriveTicketRuntime(user: HotspotUser, active: ActiveHotspotUser | undefined): {
+  dataRemainingBytes: number | null;
+  expiresAt: string | null;
+  remainingSeconds: number | null;
+  status: string;
+  uptimeSeconds: number;
+} {
+  const uptimeSeconds = Math.max(
+    routerOsDurationToSeconds(user.uptime),
+    routerOsDurationToSeconds(active?.uptime)
+  );
+  const limitSeconds = routerOsDurationToSeconds(user.limitUptime);
+  const usedBytes = Math.max(
+    (user.downloadedBytes ?? 0) + (user.uploadedBytes ?? 0),
+    (active?.downloadedBytes ?? 0) + (active?.uploadedBytes ?? 0)
+  );
+  const dataLimit = user.limitBytesTotal ?? 0;
+  const quotaConsumed = dataLimit > 0 && usedBytes >= dataLimit;
+  const timeConsumed = limitSeconds > 0 && uptimeSeconds >= limitSeconds;
+  const lifecycleExpired = user.comment?.includes(";state=expired;") ?? false;
+  const expiresAt = lifecycleExpirationIso(user.comment);
+  const remainingSeconds = limitSeconds > 0 ? Math.max(0, limitSeconds - uptimeSeconds) : null;
+  const dataRemainingBytes = dataLimit > 0 ? Math.max(0, dataLimit - usedBytes) : null;
+
+  return {
+    dataRemainingBytes,
+    expiresAt,
+    remainingSeconds,
+    status: active
+      ? "en_cours_utilisation"
+      : quotaConsumed || timeConsumed
+        ? "consommé"
+        : lifecycleExpired
+          ? "expiré"
+          : user.status === "expired"
+            ? "expiré"
+          : user.status === "disabled"
+            ? "désactivé"
+              : uptimeSeconds > 0 ? "activé" : "disponible",
+    uptimeSeconds
+  };
+}
+
+function routerOsDurationToSeconds(value: string | null | undefined): number {
+  if (!value) return 0;
+  const units: Record<string, number> = { w: 604800, d: 86400, h: 3600, m: 60, s: 1 };
+  let seconds = 0;
+  for (const match of value.matchAll(/(\d+)(w|d|h|m|s)/g)) {
+    seconds += Number(match[1]) * units[match[2]];
+  }
+  return seconds;
+}
+
+function lifecycleExpirationIso(comment: string | null | undefined): string | null {
+  const raw = comment?.match(/;expires=(\d+);/)?.[1];
+  if (!raw || raw === "0") return null;
+  const numeric = Number(raw);
+  if (!Number.isFinite(numeric)) return null;
+  const milliseconds = numeric > 10_000_000_000_000 ? numeric / 1_000_000 : numeric;
+  const date = new Date(milliseconds);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function inferActivationAt(expiresAt: string | null, validityMinutes: number | undefined): string | null {
+  if (!expiresAt || !validityMinutes || validityMinutes <= 0) return null;
+  return new Date(Date.parse(expiresAt) - validityMinutes * 60_000).toISOString();
+}
+
 export function syncStatusLabel(status: RouterTicketSyncStatus): string {
   const labels: Record<RouterTicketSyncStatus, string> = {
     conflict: "Conflit",
@@ -420,6 +518,7 @@ function localTicketToDraft(ticket: SyncableLocalTicket): HotspotUserDraft {
     comment: `Resynchronisation lot ${ticket.batchId}`,
     passwordSecretRef: ticket.passwordSecretRef,
     planId: ticket.planProfileName ?? ticket.planId,
+    serverName: ticket.serverName ?? "all",
     username: ticket.code
   };
 }

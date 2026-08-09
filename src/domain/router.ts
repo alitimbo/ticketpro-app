@@ -110,6 +110,7 @@ export type HotspotUser = {
   limitUptime?: string | null;
   limitBytesTotal?: number | null;
   macAddress?: string | null;
+  serverName?: string;
 };
 
 export type HotspotUserDraft = {
@@ -127,6 +128,8 @@ export type HotspotUserDraft = {
    * this value in managed RouterOS metadata so expiry remains autonomous.
    */
   validityMinutes?: number | null;
+  /** RouterOS Hotspot server name or `all`. */
+  serverName?: string;
 };
 
 export type HotspotUserLimits = {
@@ -143,6 +146,7 @@ export type HotspotUsersBatchDraft = {
   limitUptime?: string | null;
   limitBytesTotal?: number | null;
   validityMinutes?: number | null;
+  serverName?: string;
 };
 
 export type VoucherLifecycleEngineState = {
@@ -168,6 +172,10 @@ export type HotspotBypassBinding = {
   comment: string;
   id: string;
   macAddress: string;
+};
+
+export type HotspotIpBindingMutationResult = {
+  outcome: "already_present" | "created" | "not_found" | "removed" | "updated";
 };
 
 export type HotspotAntiTetheringConfig = {

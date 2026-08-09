@@ -216,7 +216,8 @@ const tableColumns: Record<LocalTableName, string[]> = {
     "generated_file_id",
     "created_by_profile",
     "created_by_profile_id",
-    "sync_status"
+    "sync_status",
+    "hotspot_server_name"
   ],
   tickets: [
     "id",
@@ -239,7 +240,16 @@ const tableColumns: Record<LocalTableName, string[]> = {
     "mikrotik_id",
     "created_by_profile",
     "created_by_profile_id",
-    "sync_status"
+    "sync_status",
+    "hotspot_server_name",
+    "mikrotik_profile_name",
+    "exported_at",
+    "archived_at",
+    "router_deleted_at",
+    "last_router_sync_at",
+    "uptime_seconds",
+    "remaining_seconds",
+    "data_remaining_bytes"
   ],
   vpn_networks: [
     "id",
@@ -258,6 +268,7 @@ const tableColumns: Record<LocalTableName, string[]> = {
     "account_id",
     "network_id",
     "router_id",
+    "resource_id",
     "peer_type",
     "name",
     "public_key",

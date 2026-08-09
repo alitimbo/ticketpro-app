@@ -22,10 +22,12 @@ describe("ArchivedTicketPdfService", () => {
     const text = new TextDecoder().decode(result.bytes);
 
     expect(result).toMatchObject({ format: "thermal80", ticketCount: 1 });
-    expect(text).toContain("/MediaBox [0 0 226.77 170.08]");
+    const mediaBox = text.match(/\/MediaBox \[0 0 226\.77 ([0-9.]+)\]/);
+    expect(Number(mediaBox?.[1])).toBeGreaterThan(0);
+    expect(Number(mediaBox?.[1])).toBeLessThan(170.08);
     expect(text).toContain("(Ancienne Zone)");
-    expect(text).toContain("(Portail ancien.hotspot.test)");
-    expect(text).toContain("(Contact +227 90 00 00 01)");
+    expect(text).toContain("(Portail : ancien.hotspot.test)");
+    expect(text).toContain("(Contact : +227 90 00 00 01)");
     expect(text).toContain("(LOGIN)");
     expect(text).toContain("(TP1001)");
   });

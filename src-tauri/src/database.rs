@@ -112,6 +112,16 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "generated_file_metadata",
         include_str!("../migrations/021_generated_file_metadata.sql"),
     ),
+    (
+        22,
+        "vpn_peer_lifecycle",
+        include_str!("../migrations/022_vpn_peer_lifecycle.sql"),
+    ),
+    (
+        23,
+        "ticket_runtime_tracking",
+        include_str!("../migrations/023_ticket_runtime_tracking.sql"),
+    ),
 ];
 
 const DATABASE_FILE_NAME: &str = "hotspot-manager.sqlite";

@@ -16,6 +16,7 @@ export { RouterConnectionRepository } from "./RouterConnectionRepository";
 export { createTableRepository, TableRepository } from "./TableRepository";
 export { TicketBatchRepository } from "./TicketBatchRepository";
 export { TicketRepository } from "./TicketRepository";
+export { TicketStateHistoryRepository } from "./TicketStateHistoryRepository";
 export { VpnNetworkRepository } from "./VpnNetworkRepository";
 export { VpnPeerRepository } from "./VpnPeerRepository";
 export type { LocalTableName } from "./TableRepository";

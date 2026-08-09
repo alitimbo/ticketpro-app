@@ -12,8 +12,10 @@ export class TicketRepository {
         id, account_id, batch_id, router_id, plan_id, username, password_encrypted, status,
         mac_address, ip_address, activated_at, completed_at, expires_at, deleted_at,
         printed_count, downloaded_bytes, uploaded_bytes, mikrotik_id, created_by_profile,
-        created_by_profile_id, sync_status
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)`,
+        created_by_profile_id, sync_status, hotspot_server_name, mikrotik_profile_name,
+        exported_at, archived_at, router_deleted_at, last_router_sync_at,
+        uptime_seconds, remaining_seconds, data_remaining_bytes
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)`,
       [
         input.id,
         input.account_id,
@@ -35,7 +37,16 @@ export class TicketRepository {
         input.mikrotik_id,
         input.created_by_profile,
         input.created_by_profile_id,
-        input.sync_status ?? "local"
+        input.sync_status ?? "local",
+        input.hotspot_server_name ?? "all",
+        input.mikrotik_profile_name ?? null,
+        input.exported_at ?? null,
+        input.archived_at ?? null,
+        input.router_deleted_at ?? null,
+        input.last_router_sync_at ?? null,
+        input.uptime_seconds ?? 0,
+        input.remaining_seconds ?? null,
+        input.data_remaining_bytes ?? null
       ]
     );
 
@@ -55,8 +66,12 @@ export class TicketRepository {
       `UPDATE tickets SET
         status = ?1, mac_address = ?2, ip_address = ?3, activated_at = ?4, completed_at = ?5,
         expires_at = ?6, deleted_at = ?7, printed_count = ?8, downloaded_bytes = ?9,
-        uploaded_bytes = ?10, mikrotik_id = ?11, sync_status = ?12, updated_at = ?13
-      WHERE id = ?14 AND account_id = ?15`,
+        uploaded_bytes = ?10, mikrotik_id = ?11, sync_status = ?12,
+        hotspot_server_name = ?13, mikrotik_profile_name = ?14, exported_at = ?15,
+        archived_at = ?16, router_deleted_at = ?17, last_router_sync_at = ?18,
+        uptime_seconds = ?19, remaining_seconds = ?20, data_remaining_bytes = ?21,
+        updated_at = ?22
+      WHERE id = ?23 AND account_id = ?24`,
       [
         input.status,
         input.mac_address,
@@ -70,6 +85,15 @@ export class TicketRepository {
         input.uploaded_bytes,
         input.mikrotik_id,
         input.sync_status ?? "local",
+        input.hotspot_server_name ?? "all",
+        input.mikrotik_profile_name ?? null,
+        input.exported_at ?? null,
+        input.archived_at ?? null,
+        input.router_deleted_at ?? null,
+        input.last_router_sync_at ?? null,
+        input.uptime_seconds ?? 0,
+        input.remaining_seconds ?? null,
+        input.data_remaining_bytes ?? null,
         input.updated_at ?? new Date().toISOString(),
         input.id,
         input.account_id

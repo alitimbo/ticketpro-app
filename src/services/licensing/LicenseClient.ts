@@ -45,6 +45,8 @@ export type LicenseVpnPeerResult = {
   address_pool: string | null;
   assigned_address: string | null;
   public_key: string;
+  replaced_public_keys?: string[];
+  resource_id?: string;
   status: "active" | "revoked";
 };
 

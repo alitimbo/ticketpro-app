@@ -1936,8 +1936,49 @@ function normalizeRouterAccessPolicy(value) {
     seenIps.add(ipAddress);
     return { id, internetBypass, ipAddress, macAddress, mode, name, type };
   });
+  if (
+    value.blockedDevices !== undefined
+    && (!Array.isArray(value.blockedDevices) || value.blockedDevices.length > 100)
+  ) {
+    throw new HttpError(400, "La liste des appareils bloqués est invalide.");
+  }
+  const seenBlockedIds = new Set();
+  const seenBlockedMacs = new Set();
+  const seenBlockedIps = new Set();
+  const blockedDevices = (value.blockedDevices ?? []).map((rawDevice) => {
+    if (!rawDevice || typeof rawDevice !== "object" || Array.isArray(rawDevice)) {
+      throw new HttpError(400, "Appareil bloqué invalide.");
+    }
+    const id = String(rawDevice.id ?? "").trim();
+    const name = String(rawDevice.name ?? "").trim();
+    const ipAddress = String(rawDevice.ipAddress ?? "").trim();
+    const macAddress = String(rawDevice.macAddress ?? "")
+      .trim()
+      .replaceAll("-", ":")
+      .toUpperCase();
+    if (!id || id.length > 200 || seenBlockedIds.has(id)) {
+      throw new HttpError(400, "Identifiant d'appareil bloqué invalide ou dupliqué.");
+    }
+    if (!name || name.length > 200) throw new HttpError(400, "Nom d'appareil bloqué invalide.");
+    if (!ipAddress && !macAddress) throw new HttpError(400, "Une adresse IP ou MAC est requise.");
+    if (ipAddress && !isIpv4Address(ipAddress)) throw new HttpError(400, "Adresse IP bloquée invalide.");
+    if (macAddress && !/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(macAddress)) {
+      throw new HttpError(400, "Adresse MAC bloquée invalide.");
+    }
+    if (macAddress && (seenMacs.has(macAddress) || seenBlockedMacs.has(macAddress))) {
+      throw new HttpError(400, "Adresse MAC déjà présente dans un autre IP Binding.");
+    }
+    if (ipAddress && (seenIps.has(ipAddress) || seenBlockedIps.has(ipAddress))) {
+      throw new HttpError(400, "Adresse IP déjà présente dans un autre IP Binding.");
+    }
+    seenBlockedIds.add(id);
+    if (macAddress) seenBlockedMacs.add(macAddress);
+    if (ipAddress) seenBlockedIps.add(ipAddress);
+    return { id, ipAddress, macAddress, name };
+  });
   return {
     antiSharingMode,
+    blockedDevices,
     infrastructureDevices,
     lockVoucherToFirstMac: value.lockVoucherToFirstMac === true,
     monitorIpv4Ttl: value.monitorIpv4Ttl === true,
@@ -1958,7 +1999,7 @@ function routerAccessPolicyResponse(record) {
   return {
     organization_id: record.organization_id,
     router_id: record.router_id,
-    policy: JSON.parse(record.policy_json),
+    policy: normalizeRouterAccessPolicy(JSON.parse(record.policy_json)),
     revision: Number(record.revision),
     updated_at: record.updated_at
   };
@@ -1968,7 +2009,7 @@ function routerAccessPolicyHistoryResponse(record) {
   return {
     organization_id: record.organization_id,
     router_id: record.router_id,
-    policy: JSON.parse(record.policy_json),
+    policy: normalizeRouterAccessPolicy(JSON.parse(record.policy_json)),
     revision: Number(record.revision),
     changed_by_user_id: record.changed_by_user_id,
     changed_at: record.changed_at
@@ -4183,6 +4224,7 @@ const handlers = [
       router_id: routerId,
       revision: Number(saved.revision),
       anti_sharing_mode: policy.antiSharingMode,
+      blocked_device_count: policy.blockedDevices.length,
       ipv4_ttl_enabled: policy.monitorIpv4Ttl,
       ipv6_block_enabled: policy.monitorIpv6HopLimit,
       infrastructure_device_count: policy.infrastructureDevices.length
@@ -4791,28 +4833,44 @@ const handlers = [
       requireActiveSubscription: true
     });
     const action = String(body.action ?? "");
-    if (!["upsert", "revoke"].includes(action)) throw new HttpError(400, "Action VPN invalide.");
+    if (!["upsert", "revoke", "rotate"].includes(action)) throw new HttpError(400, "Action VPN invalide.");
     const publicKey = requireText(body, "public_key", 128);
+    const resourceId = typeof body.resource_id === "string" && body.resource_id.trim()
+      ? requireText(body, "resource_id", 200)
+      : `legacy:${hash(publicKey)}`;
     const peer = await vpnHubRequest("/v1/peers", {
       account_id: organization.id,
       action,
       name: typeof body.name === "string" ? body.name.slice(0, 200) : "",
       peer_type: body.peer_type === "operator" ? "operator" : "router",
       persistent_keepalive: 25,
-      public_key: publicKey
+      previous_public_key: typeof body.previous_public_key === "string" ? body.previous_public_key : undefined,
+      public_key: publicKey,
+      resource_id: resourceId
     });
     logEvent(
       request,
       null,
-      action === "revoke" ? "saas_vpn_peer_revoked" : "saas_vpn_peer_upserted",
+      action === "revoke"
+        ? "saas_vpn_peer_revoked"
+        : action === "rotate" ? "saas_vpn_peer_rotated" : "saas_vpn_peer_upserted",
       organization.id,
       null,
-      { organization_user_id: user.id, public_key_hash: hash(publicKey) }
+      {
+        organization_user_id: user.id,
+        previous_public_key_hash: typeof body.previous_public_key === "string"
+          ? hash(body.previous_public_key)
+          : null,
+        public_key_hash: hash(publicKey),
+        resource_id: resourceId
+      }
     );
     return {
       address_pool: peer.address_pool ?? null,
       assigned_address: peer.assigned_address ?? null,
       public_key: publicKey,
+      replaced_public_keys: peer.replaced_public_keys ?? [],
+      resource_id: peer.resource_id ?? resourceId,
       status: peer.status
     };
   }),
@@ -4831,12 +4889,17 @@ const handlers = [
     return {
       peers: Array.isArray(result.peers)
         ? result.peers
-          .filter((peer) => peer.peer_type === "operator")
           .map((peer) => ({
             assigned_address: peer.assigned_address ?? null,
+            connection_status: ["connected", "disconnected", "revoked"].includes(peer.connection_status)
+              ? peer.connection_status
+              : "configuration_error",
+            last_handshake_at: peer.last_handshake_at ?? null,
             name: peer.name ?? "",
-            peer_type: "operator",
+            peer_type: peer.peer_type === "operator" ? "operator" : "router",
             public_key: peer.public_key,
+            resource_id: peer.resource_id ?? `legacy:${hash(peer.public_key)}`,
+            revoked_at: peer.revoked_at ?? null,
             status: peer.status === "revoked" ? "revoked" : "active"
           }))
         : []
@@ -4847,23 +4910,33 @@ const handlers = [
     if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. Réessayez plus tard.");
     const { activation, license } = requireLicensedDevice(body);
     const action = String(body.action ?? "");
-    if (!["upsert", "revoke"].includes(action)) throw new HttpError(400, "Action VPN invalide.");
+    if (!["upsert", "revoke", "rotate"].includes(action)) throw new HttpError(400, "Action VPN invalide.");
     const publicKey = requireText(body, "public_key", 128);
+    const resourceId = typeof body.resource_id === "string" && body.resource_id.trim()
+      ? requireText(body, "resource_id", 200)
+      : `legacy:${hash(publicKey)}`;
     const peer = await vpnHubRequest("/v1/peers", {
       account_id: license.id,
       action,
       name: typeof body.name === "string" ? body.name.slice(0, 200) : "",
       peer_type: body.peer_type === "operator" ? "operator" : "router",
       persistent_keepalive: 25,
-      public_key: publicKey
+      previous_public_key: typeof body.previous_public_key === "string" ? body.previous_public_key : undefined,
+      public_key: publicKey,
+      resource_id: resourceId
     });
-    logEvent(request, license.id, action === "revoke" ? "vpn_peer_revoked" : "vpn_peer_upserted", activation.account_id, activation.device_id_hash, {
-      public_key_hash: hash(publicKey)
+    logEvent(request, license.id, action === "revoke"
+      ? "vpn_peer_revoked"
+      : action === "rotate" ? "vpn_peer_rotated" : "vpn_peer_upserted", activation.account_id, activation.device_id_hash, {
+      public_key_hash: hash(publicKey),
+      resource_id: resourceId
     });
     return {
       address_pool: peer.address_pool ?? null,
       assigned_address: peer.assigned_address ?? null,
       public_key: publicKey,
+      replaced_public_keys: peer.replaced_public_keys ?? [],
+      resource_id: peer.resource_id ?? resourceId,
       status: peer.status
     };
   }),

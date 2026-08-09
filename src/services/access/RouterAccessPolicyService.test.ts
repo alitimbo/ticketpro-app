@@ -12,6 +12,7 @@ describe("RouterAccessPolicyService", () => {
     await database.initialize();
     const service = new RouterAccessPolicyService(database);
     const policy: RouterAccessPolicy = {
+      blockedDevices: [],
       antiSharingMode: "observe",
       infrastructureDevices: [{
         id: "antenna-1",
@@ -44,6 +45,7 @@ describe("RouterAccessPolicyService", () => {
 
   it("refuse le bypass d'un équipement qui masque ses clients avec du NAT", () => {
     const error = validateRouterAccessPolicy({
+      blockedDevices: [],
       antiSharingMode: "observe",
       infrastructureDevices: [{
         id: "antenna-1",
@@ -73,6 +75,7 @@ describe("RouterAccessPolicyService", () => {
     };
     const error = validateRouterAccessPolicy({
       antiSharingMode: "observe",
+      blockedDevices: [],
       infrastructureDevices: [
         { ...baseDevice, id: "antenna-1" },
         { ...baseDevice, id: "antenna-2", name: "Antenne bis" }
@@ -88,6 +91,7 @@ describe("RouterAccessPolicyService", () => {
   it("refuse une adresse MAC incomplète ou contenant un caractère non hexadécimal", () => {
     const error = validateRouterAccessPolicy({
       antiSharingMode: "observe",
+      blockedDevices: [],
       infrastructureDevices: [{
         id: "antenna-invalid",
         internetBypass: true,
@@ -109,6 +113,7 @@ describe("RouterAccessPolicyService", () => {
   it("autorise le blocage TTL sans verrouiller le voucher sur une MAC", () => {
     expect(validateRouterAccessPolicy({
       antiSharingMode: "strict",
+      blockedDevices: [],
       infrastructureDevices: [],
       lockVoucherToFirstMac: false,
       monitorIpv4Ttl: true,
@@ -119,6 +124,7 @@ describe("RouterAccessPolicyService", () => {
   it("exige au moins une protection réseau en mode strict", () => {
     const error = validateRouterAccessPolicy({
       antiSharingMode: "strict",
+      blockedDevices: [],
       infrastructureDevices: [],
       lockVoucherToFirstMac: true,
       monitorIpv4Ttl: false,
@@ -127,4 +133,58 @@ describe("RouterAccessPolicyService", () => {
 
     expect(error).toContain("au moins une protection réseau");
   });
+
+  it("valide un blocage par IP ou MAC et refuse un appareil sans adresse", () => {
+    expect(validateRouterAccessPolicy({
+      ...structuredClone(defaultPolicy()),
+      blockedDevices: [{
+        id: "blocked-ip",
+        ipAddress: "192.168.88.120",
+        macAddress: "",
+        name: "Téléphone"
+      }]
+    })).toBeNull();
+
+    expect(validateRouterAccessPolicy({
+      ...structuredClone(defaultPolicy()),
+      blockedDevices: [{
+        id: "blocked-empty",
+        ipAddress: "",
+        macAddress: "",
+        name: "Inconnu"
+      }]
+    })).toContain("IP ou MAC");
+  });
+
+  it("refuse de bloquer une adresse déjà utilisée par un bypass", () => {
+    const policy = defaultPolicy();
+    policy.infrastructureDevices = [{
+      id: "antenna-1",
+      internetBypass: true,
+      ipAddress: "192.168.88.10",
+      macAddress: "AA:BB:CC:DD:EE:FF",
+      mode: "bridge",
+      name: "Antenne nord",
+      type: "antenna"
+    }];
+    policy.blockedDevices = [{
+      id: "blocked-1",
+      ipAddress: "192.168.88.10",
+      macAddress: "",
+      name: "Doublon"
+    }];
+
+    expect(validateRouterAccessPolicy(policy)).toContain("déjà présente");
+  });
 });
+
+function defaultPolicy(): RouterAccessPolicy {
+  return {
+    antiSharingMode: "disabled",
+    blockedDevices: [],
+    infrastructureDevices: [],
+    lockVoucherToFirstMac: false,
+    monitorIpv4Ttl: false,
+    monitorIpv6HopLimit: false
+  };
+}

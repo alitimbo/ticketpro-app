@@ -38,6 +38,7 @@ export type {
   SyncStatus,
   TicketBatchRecord,
   TicketRecord,
+  TicketStateHistoryRecord,
   VpnNetworkRecord,
   VpnNetworkStatus,
   VpnPeerRecord,

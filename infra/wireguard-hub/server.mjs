@@ -1,8 +1,12 @@
 import http from "node:http";
 import { execFile } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
+import {
+  revokeDuplicateActivePeers,
+  selectActivePeersToReplace
+} from "./peer-lifecycle.mjs";
 
 const execFileAsync = promisify(execFile);
 const port = Number(process.env.HUB_PORT ?? 8788);
@@ -17,6 +21,7 @@ const publicEndpoint = process.env.HUB_PUBLIC_ENDPOINT ?? "";
 const serverPublicKey = process.env.HUB_SERVER_PUBLIC_KEY ?? "";
 const serverPort = Number(process.env.HUB_SERVER_PORT ?? 51820);
 const tenants = await loadTenants();
+const peerMutationQueues = new Map();
 
 validateConfiguration();
 upgradeTenantData();
@@ -69,6 +74,7 @@ const server = http.createServer(async (request, response) => {
       const tenant = tenants[accountId];
       if (!tenant) throw new HubError(404, "tenant_not_found");
       requireTenantOrMaster(request, accountId);
+      const latestHandshakes = await readLatestHandshakes();
       json(response, 200, {
         account_id: accountId,
         peers: tenant.peers.map((peer) => ({
@@ -77,8 +83,10 @@ const server = http.createServer(async (request, response) => {
           name: peer.name ?? "",
           peer_type: peer.peer_type,
           public_key: peer.public_key,
+          resource_id: peer.resource_id ?? legacyResourceId(peer.public_key),
           revoked_at: peer.revoked_at ?? null,
-          status: peer.status
+          status: peer.status,
+          ...peerRuntimeState(peer, latestHandshakes)
         }))
       });
     } catch (error) {
@@ -95,71 +103,13 @@ const server = http.createServer(async (request, response) => {
       if (!tenant) throw new HubError(404, "tenant_not_found");
       requireTenantOrMaster(request, accountId);
       validatePublicKey(body.public_key);
-      if (body.action !== "upsert" && body.action !== "revoke") {
+      if (!["upsert", "revoke", "rotate"].includes(body.action)) {
         throw new HubError(400, "invalid_action");
       }
-
-      const existing = tenant.peers.find((peer) => peer.public_key === body.public_key);
-      if (body.action === "revoke") {
-        await runWireGuard(["set", interfaceName, "peer", body.public_key, "remove"]);
-        if (existing) {
-          existing.status = "revoked";
-          existing.revoked_at = new Date().toISOString();
-        }
-        await saveWireGuardConfig();
-        await persistTenants();
-        json(response, 200, {
-          account_id: accountId,
-          public_key: body.public_key,
-          status: "revoked"
-        });
-        return;
-      }
-
-      const peer = existing ?? {
-        assigned_address: allocatePeerAddress(tenant),
-        created_at: new Date().toISOString(),
-        public_key: body.public_key
-      };
-      if (existing && tenant.peers.some((item) =>
-        item.public_key !== existing.public_key
-        && item.status === "active"
-        && item.assigned_address === existing.assigned_address
-      )) {
-        peer.assigned_address = allocatePeerAddress(tenant);
-      }
-      peer.name = typeof body.name === "string" ? body.name.slice(0, 200) : "";
-      peer.peer_type = body.peer_type === "operator" ? "operator" : "router";
-      const activeOfType = tenant.peers.filter((item) =>
-        item.public_key !== peer.public_key
-        && item.peer_type === peer.peer_type
-        && item.status === "active"
-      ).length;
-      const limit = peer.peer_type === "operator" ? tenant.operator_limit : tenant.router_limit;
-      if (activeOfType >= limit) throw new HubError(409, `${peer.peer_type}_peer_limit_reached`);
-      peer.status = "active";
-      peer.revoked_at = null;
-      if (!existing) tenant.peers.push(peer);
-
-      await runWireGuard([
-        "set",
-        interfaceName,
-        "peer",
-        peer.public_key,
-        "allowed-ips",
-        peer.assigned_address,
-        "persistent-keepalive",
-        String(normalizeKeepalive(body.persistent_keepalive))
-      ]);
-      await saveWireGuardConfig();
-      await persistTenants();
-      json(response, 200, {
-        account_id: accountId,
-        address_pool: tenant.address_pool,
-        assigned_address: peer.assigned_address,
-        public_key: peer.public_key,
-        status: "active"
-      });
+      const result = await withPeerMutationLock(accountId, () =>
+        mutatePeer(accountId, tenant, body)
+      );
+      json(response, 200, result);
     } catch (error) {
       jsonError(response, error);
     }
@@ -191,9 +141,197 @@ function upgradeTenantData() {
     tenant.created_at ||= new Date().toISOString();
     tenant.address_pool ||= allocateTenantSubnet(accountId);
     tenant.peers = Array.isArray(tenant.peers) ? tenant.peers : [];
+    for (const peer of tenant.peers) {
+      peer.resource_id ||= legacyResourceId(peer.public_key);
+    }
+    revokeDuplicateActivePeers(tenant.peers);
     tenant.router_limit = normalizeLimit(tenant.router_limit, 1);
     tenant.operator_limit = normalizeLimit(tenant.operator_limit, 1);
   }
+  revokeCrossTenantDuplicateKeys();
+}
+
+async function mutatePeer(accountId, tenant, body) {
+  const publicKey = String(body.public_key);
+  const peerType = body.peer_type === "operator" ? "operator" : "router";
+  const resourceId = normalizeResourceId(body.resource_id ?? legacyResourceId(publicKey));
+  const existing = tenant.peers.find((peer) => peer.public_key === publicKey);
+  const previousPublicKey = body.previous_public_key
+    ? String(body.previous_public_key)
+    : null;
+  if (previousPublicKey) validatePublicKey(previousPublicKey);
+  if (body.action === "rotate" && (!previousPublicKey || previousPublicKey === publicKey)) {
+    throw new HubError(400, "rotation_requires_distinct_previous_key");
+  }
+
+  if (body.action === "revoke") {
+    await runWireGuard(["set", interfaceName, "peer", publicKey, "remove"]);
+    const revokedAt = new Date().toISOString();
+    if (existing) {
+      existing.status = "revoked";
+      existing.revoked_at = revokedAt;
+    }
+    await saveWireGuardConfig();
+    await persistTenants();
+    return { account_id: accountId, public_key: publicKey, resource_id: resourceId, status: "revoked" };
+  }
+
+  if (existing?.status === "revoked") {
+    throw new HubError(409, "revoked_key_cannot_be_reactivated");
+  }
+  const usedByAnotherTenant = Object.entries(tenants).some(([candidateAccountId, candidate]) =>
+    candidateAccountId !== accountId
+    && candidate.peers.some((peer) => peer.public_key === publicKey)
+  );
+  if (usedByAnotherTenant) throw new HubError(409, "public_key_already_registered");
+
+  if (
+    body.action === "rotate"
+    && existing?.status === "active"
+    && existing.peer_type === peerType
+    && existing.resource_id === resourceId
+  ) {
+    return {
+      account_id: accountId,
+      address_pool: tenant.address_pool,
+      assigned_address: existing.assigned_address,
+      public_key: publicKey,
+      resource_id: resourceId,
+      replaced_public_keys: [],
+      status: "active"
+    };
+  }
+
+  const replacedPeers = selectActivePeersToReplace(tenant.peers, {
+    peerType,
+    previousPublicKey,
+    publicKey,
+    resourceId
+  });
+  if (body.action === "upsert" && replacedPeers.length > 0) {
+    throw new HubError(409, "active_peer_already_exists_for_resource");
+  }
+  if (body.action === "rotate" && replacedPeers.length === 0) {
+    throw new HubError(409, "active_previous_peer_not_found");
+  }
+
+  let replacementAddress = null;
+  if (body.action === "rotate" && replacedPeers.length > 0) {
+    replacementAddress = replacedPeers[0].assigned_address;
+    const revokedAt = new Date().toISOString();
+    for (const replaced of replacedPeers) {
+      // Security is fail-closed: the former key is removed before the new key
+      // is accepted and persisted.
+      await runWireGuard(["set", interfaceName, "peer", replaced.public_key, "remove"]);
+      replaced.status = "revoked";
+      replaced.revoked_at = revokedAt;
+    }
+    await saveWireGuardConfig();
+    await persistTenants();
+  }
+
+  const peer = existing ?? {
+    assigned_address: replacementAddress ?? allocatePeerAddress(tenant),
+    created_at: new Date().toISOString(),
+    public_key: publicKey
+  };
+  peer.name = typeof body.name === "string" ? body.name.slice(0, 200) : "";
+  peer.peer_type = peerType;
+  peer.resource_id = resourceId;
+  const activeOfType = tenant.peers.filter((item) =>
+    item.public_key !== peer.public_key
+    && item.peer_type === peerType
+    && item.status === "active"
+  ).length;
+  const limit = peerType === "operator" ? tenant.operator_limit : tenant.router_limit;
+  if (activeOfType >= limit) throw new HubError(409, `${peerType}_peer_limit_reached`);
+
+  await runWireGuard([
+    "set", interfaceName, "peer", publicKey,
+    "allowed-ips", peer.assigned_address,
+    "persistent-keepalive", String(normalizeKeepalive(body.persistent_keepalive))
+  ]);
+  peer.status = "active";
+  peer.revoked_at = null;
+  if (!existing) tenant.peers.push(peer);
+  await saveWireGuardConfig();
+  await persistTenants();
+  return {
+    account_id: accountId,
+    address_pool: tenant.address_pool,
+    assigned_address: peer.assigned_address,
+    public_key: publicKey,
+    resource_id: resourceId,
+    replaced_public_keys: replacedPeers.map((replaced) => replaced.public_key),
+    status: "active"
+  };
+}
+
+async function withPeerMutationLock(accountId, mutation) {
+  const previous = peerMutationQueues.get(accountId) ?? Promise.resolve();
+  let release;
+  const current = new Promise((resolve) => { release = resolve; });
+  const queued = previous.then(() => current);
+  peerMutationQueues.set(accountId, queued);
+  await previous;
+  try {
+    return await mutation();
+  } finally {
+    release();
+    if (peerMutationQueues.get(accountId) === queued) peerMutationQueues.delete(accountId);
+  }
+}
+
+function revokeCrossTenantDuplicateKeys() {
+  const seen = new Set();
+  for (const accountId of Object.keys(tenants).sort()) {
+    for (const peer of tenants[accountId].peers
+      .filter((item) => item.status === "active")
+      .sort((left, right) => String(right.created_at ?? "").localeCompare(String(left.created_at ?? "")))) {
+      if (seen.has(peer.public_key)) {
+        peer.status = "revoked";
+        peer.revoked_at ||= new Date().toISOString();
+      } else {
+        seen.add(peer.public_key);
+      }
+    }
+  }
+}
+
+async function readLatestHandshakes() {
+  const { stdout } = await execFileAsync(
+    "wg",
+    ["show", interfaceName, "latest-handshakes"],
+    { timeout: 10_000 }
+  );
+  return new Map(stdout.trim().split(/\r?\n/).filter(Boolean).map((line) => {
+    const [publicKey, rawTimestamp] = line.trim().split(/\s+/);
+    return [publicKey, Number(rawTimestamp) || 0];
+  }));
+}
+
+function peerRuntimeState(peer, latestHandshakes) {
+  if (peer.status === "revoked") {
+    return { connection_status: "revoked", last_handshake_at: null };
+  }
+  const timestamp = latestHandshakes.get(peer.public_key) ?? 0;
+  const connected = timestamp > 0 && timestamp * 1_000 >= Date.now() - 180_000;
+  return {
+    connection_status: connected ? "connected" : "disconnected",
+    last_handshake_at: timestamp > 0 ? new Date(timestamp * 1_000).toISOString() : null
+  };
+}
+
+function normalizeResourceId(value) {
+  const resourceId = String(value ?? "").trim();
+  if (!/^[a-zA-Z0-9._:-]{1,200}$/.test(resourceId)) {
+    throw new HubError(400, "invalid_resource_id");
+  }
+  return resourceId;
+}
+
+function legacyResourceId(publicKey) {
+  return `legacy:${createHash("sha256").update(String(publicKey)).digest("hex")}`;
 }
 
 function createTenant() {

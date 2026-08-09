@@ -15,9 +15,13 @@ describe("WireGuardOperatorRecoveryService", () => {
       }],
       listRemote: async () => [{
         assigned_address: "10.250.7.3/32",
+        connection_status: "connected",
+        last_handshake_at: new Date().toISOString(),
         name: "PC Ali",
         peer_type: "operator",
         public_key: "public-a",
+        resource_id: "operator:pc-ali",
+        revoked_at: null,
         status: "active"
       }]
     });
@@ -55,9 +59,13 @@ describe("WireGuardOperatorRecoveryService", () => {
       }],
       listRemote: async () => [{
         assigned_address: "10.250.7.3/32",
+        connection_status: "revoked",
+        last_handshake_at: null,
         name: "Ancien PC",
         peer_type: "operator",
         public_key: "public-revoked",
+        resource_id: "operator:pc-ali",
+        revoked_at: new Date().toISOString(),
         status: "revoked"
       }],
       removeInstalled

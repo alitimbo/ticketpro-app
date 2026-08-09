@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
-import { CheckCircle2, ChevronLeft, ChevronRight, FileText, Hash, Printer, Ticket } from "lucide-react";
-import type { HotspotPlan, HotspotUser, RouterSummary } from "../../domain/router";
+import { CheckCircle2, ChevronLeft, ChevronRight, FileText, Hash, Printer, RefreshCw, Ticket, Wifi } from "lucide-react";
+import type { HotspotPlan, HotspotServer, HotspotUser, RouterSummary } from "../../domain/router";
 import type {
   CreateGeneratedFileInput,
   CreateTicketBatchInput,
@@ -30,7 +30,12 @@ import {
   TicketRepository,
   useAppDatabase
 } from "../../services/database";
-import { buildGeneratedTicketPdfRecord, generateTicketPdf, resolveTicketPdfPassword } from "../../services/pdf";
+import {
+  buildGeneratedTicketPdfRecord,
+  generateTicketPdf,
+  resolveTicketPdfPassword,
+  type TicketPdfFormat
+} from "../../services/pdf";
 import {
   LocalPrintService,
   printFormatLabel,
@@ -71,6 +76,9 @@ import { planFromRecord } from "./plansPageModel";
 import {
   protectTicketPassword,
   resolveTicketPasswordValue,
+  defaultTicketDisplaySettings,
+  TicketDisplaySettingsService,
+  type TicketDisplaySettings,
   TicketCodeGenerator
 } from "../../services/tickets";
 import { TauriFileService } from "../../services/files";
@@ -91,6 +99,7 @@ export function TicketGenerationPage() {
   const [state, setState] = useState<TicketGenerationState>(() => createInitialTicketGenerationState(routerId));
   const [routers, setRouters] = useState<RouterSummary[]>([]);
   const [plans, setPlans] = useState<HotspotPlan[]>([]);
+  const [hotspotServers, setHotspotServers] = useState<HotspotServer[]>([]);
   const [tickets, setTickets] = useState<CreateTicketInput[]>([]);
   const [result, setResult] = useState<TicketGenerationResult | null>(null);
   const [logs, setLogs] = useState<RouterActionLog[]>([]);
@@ -98,7 +107,9 @@ export function TicketGenerationPage() {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [ownerPhone, setOwnerPhone] = useState<string | null>(null);
+  const [displaySettings, setDisplaySettings] = useState<TicketDisplaySettings>(defaultTicketDisplaySettings);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isCatalogLoading, setIsCatalogLoading] = useState(false);
   const [printers, setPrinters] = useState<LocalPrinter[]>([]);
   const [printSettings, setPrintSettings] = useState<PrintSettings>({
     economical: true,
@@ -125,6 +136,8 @@ export function TicketGenerationPage() {
     [session]
   );
   const [persistedRouterService, setPersistedRouterService] = useState<RouterService | null>(null);
+  const persistedRouterServiceIdRef = useRef<string | null>(null);
+  const routerServicePreparationRef = useRef<{ promise: Promise<RouterService>; routerId: string } | null>(null);
   const fileService = useMemo(() => new TauriFileService(), []);
   const printService = useMemo(
     () => new LocalPrintService(isPersistent ? fileService : undefined),
@@ -133,6 +146,59 @@ export function TicketGenerationPage() {
   const codeGenerator = useMemo(() => new TicketCodeGenerator(), []);
   const generatedFiles = useMemo(() => new GeneratedFileRepository(database), [database]);
   const printHistoryRepository = useMemo(() => new PrintHistoryRepository(database), [database]);
+  const displaySettingsService = useMemo(() => new TicketDisplaySettingsService(database), [database]);
+
+  const loadPersistedRouterService = async (): Promise<RouterService> => {
+    if (persistedRouterService && persistedRouterServiceIdRef.current === routerId) {
+      return persistedRouterService;
+    }
+    if (routerServicePreparationRef.current?.routerId === routerId) {
+      return routerServicePreparationRef.current.promise;
+    }
+    if (!isInitialized || !session) {
+      throw new Error("La base locale ou la session n'est pas encore prête.");
+    }
+
+    const preparation = (async () => {
+      const router = await routerRepository.findById(routerId);
+      if (!router || router.account_id !== session.account_id) {
+        throw new Error("Le routeur sélectionné est introuvable pour ce compte.");
+      }
+      return createPersistedRouterService({
+        authSession: session,
+        connections: await connectionRepository.listByRouter(routerId),
+        database,
+        logger: { write: (log) => setLogs((current) => [...current, log]) },
+        router
+      });
+    })();
+
+    routerServicePreparationRef.current = { promise: preparation, routerId };
+    try {
+      return await preparation;
+    } finally {
+      if (routerServicePreparationRef.current?.promise === preparation) {
+        routerServicePreparationRef.current = null;
+      }
+    }
+  };
+
+  const getRouterServiceForAction = async (): Promise<RouterService> => {
+    if (!isPersistent) return service;
+    const serviceForRouter = await loadPersistedRouterService();
+    persistedRouterServiceIdRef.current = routerId;
+    setPersistedRouterService(serviceForRouter);
+    return serviceForRouter;
+  };
+
+  useEffect(() => {
+    if (!isInitialized || !session) return undefined;
+    let mounted = true;
+    void displaySettingsService.get(session.account_id, routerId).then((settings) => {
+      if (mounted) setDisplaySettings(settings);
+    });
+    return () => { mounted = false; };
+  }, [displaySettingsService, isInitialized, routerId, session]);
 
   useEffect(() => {
     if (!isInitialized || !session) {
@@ -157,29 +223,18 @@ export function TicketGenerationPage() {
 
   useEffect(() => {
     if (!isPersistent || !isInitialized || !session) {
+      persistedRouterServiceIdRef.current = null;
+      routerServicePreparationRef.current = null;
       setPersistedRouterService(null);
       return undefined;
     }
 
     let mounted = true;
-    const currentSession = session;
-
     async function prepareRouterService() {
-      const router = await routerRepository.findById(routerId);
-
-      if (!router || router.account_id !== currentSession.account_id) {
-        throw new Error("Le routeur sélectionné est introuvable pour ce compte.");
-      }
-
-      const serviceForRouter = await createPersistedRouterService({
-        authSession: currentSession,
-        connections: await connectionRepository.listByRouter(routerId),
-        database,
-        logger: { write: (log) => setLogs((current) => [...current, log]) },
-        router
-      });
+      const serviceForRouter = await loadPersistedRouterService();
 
       if (mounted) {
+        persistedRouterServiceIdRef.current = routerId;
         setPersistedRouterService(serviceForRouter);
       }
     }
@@ -195,6 +250,93 @@ export function TicketGenerationPage() {
       mounted = false;
     };
   }, [connectionRepository, isInitialized, isPersistent, routerId, routerRepository, session]);
+
+  const refreshRouterCatalog = async () => {
+    setIsCatalogLoading(true);
+    setError(null);
+    let catalogService: RouterService;
+    try {
+      catalogService = await getRouterServiceForAction();
+    } catch (connectionError) {
+      setIsCatalogLoading(false);
+      setError(connectionError instanceof Error ? connectionError.message : "Connexion au routeur indisponible.");
+      return;
+    }
+    try {
+      const [routerServers, routerPlans, localPlanRecords] = await Promise.all([
+        catalogService.getHotspotServers(),
+        catalogService.getHotspotPlans(),
+        isPersistent ? planRepository.listByRouter(routerId) : Promise.resolve([])
+      ]);
+      const enabledServers = routerServers.filter((server) => server.isEnabled);
+      let livePlans = routerPlans;
+      if (isPersistent) {
+        const recordsByProfile = new Map(
+          localPlanRecords.map((record) => [record.mikrotik_profile_name ?? record.name, record])
+        );
+        for (const remotePlan of routerPlans) {
+          if (recordsByProfile.has(remotePlan.profileName)) continue;
+          const created = await planRepository.create({
+            data_limit_mb: remotePlan.dataLimitMb,
+            download_limit: remotePlan.downloadLimit,
+            duration_minutes: remotePlan.durationMinutes,
+            id: `plan-${routerId}-${catalogSlug(remotePlan.profileName)}`,
+            mikrotik_profile_name: remotePlan.profileName,
+            name: remotePlan.name,
+            price_hint: remotePlan.priceHint,
+            router_id: routerId,
+            shared_users: remotePlan.sharedUsers,
+            status: remotePlan.status,
+            sync_status: "synced",
+            upload_limit: remotePlan.uploadLimit,
+            validity_minutes: remotePlan.validityMinutes
+          });
+          recordsByProfile.set(remotePlan.profileName, created);
+        }
+        livePlans = routerPlans.map((remotePlan) => {
+          const local = recordsByProfile.get(remotePlan.profileName);
+          return local
+            ? {
+                ...remotePlan,
+                id: local.id,
+                name: local.name,
+                priceHint: local.price_hint,
+                validityMinutes: local.validity_minutes ?? remotePlan.validityMinutes
+              }
+            : remotePlan;
+        });
+      }
+      setHotspotServers(routerServers);
+      setPlans(livePlans);
+      setState((current) => {
+        const serverStillExists = current.selectedServerName === "all"
+          || enabledServers.some((server) => server.name === current.selectedServerName);
+        return {
+          ...current,
+          selectedPlanId: livePlans.some((plan) => plan.id === current.selectedPlanId && plan.status === "active")
+            ? current.selectedPlanId
+            : livePlans.find((plan) => plan.status === "active")?.id ?? "",
+          selectedServerName: enabledServers.length === 1
+            ? enabledServers[0].name
+            : serverStillExists ? current.selectedServerName : ""
+        };
+      });
+      setMessage(`${enabledServers.length} serveur(s) et ${livePlans.length} profil(s) relus depuis RouterOS.`);
+    } catch (catalogError) {
+      setError(catalogError instanceof Error
+        ? `Impossible d'actualiser le catalogue RouterOS : ${catalogError.message}`
+        : "Impossible d'actualiser le catalogue RouterOS.");
+    } finally {
+      setIsCatalogLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if ((isPersistent && !persistedRouterService) || (!isPersistent && !service)) return;
+    void refreshRouterCatalog();
+    // The catalog must be refreshed when the concrete router service changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPersistent, persistedRouterService, routerId]);
 
   useEffect(() => {
     if (isPersistent && (!isInitialized || !session)) {
@@ -297,7 +439,11 @@ export function TicketGenerationPage() {
       return;
     }
 
-    const stepError = validateStep(state.step, state, routers, plans);
+    if (state.step === 2 && hotspotServers.length === 0) {
+      setError("Aucun serveur Hotspot n'a pu être lu sur le MikroTik. Actualisez RouterOS avant de continuer.");
+      return;
+    }
+    const stepError = validateStep(state.step, state, routers, plans, hotspotServers);
 
     if (stepError) {
       setError(stepError);
@@ -323,17 +469,13 @@ export function TicketGenerationPage() {
       return;
     }
 
-    const validationError = validateTicketGeneration(state, routers, plans);
+    const validationError = validateTicketGeneration(state, routers, plans, hotspotServers);
 
     if (validationError || !selectedPlan || !selectedRouter || !session) {
       setError(validationError ?? "La génération n'est pas prête.");
       return;
     }
 
-    if (isPersistent && !persistedRouterService) {
-      setError("Le routeur n'est pas prêt ou son mot de passe doit être ressaisi.");
-      return;
-    }
     if (isPersistent && !selectedRouter.hotspotAddress?.trim()) {
       setError("Renseignez et enregistrez l'adresse Hotspot dans Paramètres routeur avant de créer les tickets.");
       return;
@@ -351,24 +493,44 @@ export function TicketGenerationPage() {
     const requestedQuantity = getSelectedQuantity(state);
     const succeededTickets: CreateTicketInput[] = [];
     const failedTickets: CreateTicketInput[] = [];
+    let firstCreationError: string | null = null;
 
     try {
-      const generationService = persistedRouterService ?? service;
+      const generationService = await getRouterServiceForAction();
       await generationService.ensureVoucherLifecycleEngine();
-      const [existingUsers, existingLocalTickets, remotePlans] = await Promise.all([
+      const [existingUsers, existingLocalTickets, remotePlans, remoteServers] = await Promise.all([
         generationService.listHotspotUsers(),
         isPersistent
           ? ticketRepository.listExistingUsernamesByRouter(state.selectedRouterId)
           : Promise.resolve([]),
-        generationService.getHotspotPlans()
+        generationService.getHotspotPlans(),
+        generationService.getHotspotServers()
       ]);
-      if (
-        isPersistent &&
-        !remotePlans.some((plan) => plan.profileName === selectedPlan.profileName)
-      ) {
+      const liveSelectedPlan = remotePlans.find((plan) => plan.profileName === selectedPlan.profileName);
+      if (isPersistent && !liveSelectedPlan) {
         throw new Error(
           `Le plan ${selectedPlan.name} n'existe pas encore sur RouterOS. Synchronisez d'abord ce plan.`
         );
+      }
+      if (liveSelectedPlan && (
+        liveSelectedPlan.durationMinutes !== selectedPlan.durationMinutes
+        || liveSelectedPlan.dataLimitMb !== selectedPlan.dataLimitMb
+        || liveSelectedPlan.downloadLimit !== selectedPlan.downloadLimit
+        || liveSelectedPlan.uploadLimit !== selectedPlan.uploadLimit
+        || liveSelectedPlan.sharedUsers !== selectedPlan.sharedUsers
+        || liveSelectedPlan.status !== selectedPlan.status
+      )) {
+        setPlans((current) => current.map((plan) => plan.id === selectedPlan.id
+          ? { ...liveSelectedPlan, id: plan.id, name: plan.name, priceHint: plan.priceHint }
+          : plan));
+        throw new Error(`Le profil ${selectedPlan.profileName} a été modifié sur RouterOS. La liste vient d'être actualisée ; vérifiez-le avant de relancer la création.`);
+      }
+      const selectedRemoteServer = state.selectedServerName === "all"
+        ? "all"
+        : remoteServers.find((server) => server.isEnabled && server.name === state.selectedServerName)?.name;
+      if (!selectedRemoteServer) {
+        setHotspotServers(remoteServers);
+        throw new Error("Le serveur Hotspot sélectionné n'existe plus ou est désactivé. La liste a été actualisée.");
       }
       const generatedUsernames = codeGenerator.generate({
         alphabet: "numeric",
@@ -413,7 +575,9 @@ export function TicketGenerationPage() {
           mikrotikId: null,
           passwordSecretRef: credential.passwordSecretRef,
           planId: state.selectedPlanId,
+          profileName: selectedPlan.profileName,
           routerId: state.selectedRouterId,
+          serverName: selectedRemoteServer,
           status: "erreur_sync",
           syncStatus: "pending",
           username: credential.username
@@ -428,6 +592,7 @@ export function TicketGenerationPage() {
         planId: state.selectedPlanId,
         quantity: requestedQuantity,
         routerId: state.selectedRouterId,
+        serverName: selectedRemoteServer,
         syncStatus: "pending"
       });
 
@@ -443,6 +608,7 @@ export function TicketGenerationPage() {
             comment: `Lot ${batchId}`,
             passwordSecretRef: credential.passwordSecretRef,
             planId: state.selectedPlanId,
+            serverName: selectedRemoteServer,
             username: credential.username
           });
 
@@ -459,6 +625,11 @@ export function TicketGenerationPage() {
           succeededTickets.push(succeededTicket);
           if (isPersistent) await ticketRepository.update(succeededTicket);
         } catch (creationError) {
+          const creationErrorMessage = readGenerationError(
+            creationError,
+            "RouterOS a refusé la création du voucher."
+          );
+          firstCreationError ??= creationErrorMessage;
           let recoveredUser: HotspotUser | null = null;
 
           if (isPersistent) {
@@ -494,7 +665,10 @@ export function TicketGenerationPage() {
               action: "createHotspotUser",
               level: "error",
               technicalCode: creationError instanceof RouterServiceError ? creationError.code : undefined,
-              userMessage: `Le voucher ${credential.username} reste en attente de synchronisation.`
+              technicalMessage: creationError instanceof RouterServiceError
+                ? creationError.technicalMessage
+                : creationErrorMessage,
+              userMessage: `Le voucher ${credential.username} reste en attente : ${creationErrorMessage}`
             }
           ]);
         }
@@ -510,6 +684,7 @@ export function TicketGenerationPage() {
         planId: state.selectedPlanId,
         quantity: requestedQuantity,
         routerId: state.selectedRouterId,
+        serverName: selectedRemoteServer,
         syncStatus
       });
       const fileName = buildFileName(batchId);
@@ -543,15 +718,11 @@ export function TicketGenerationPage() {
         pdfError
           ? `${succeededTickets.length} ticket(s) créé(s). PDF à reprendre : ${pdfError}`
           : failedTickets.length > 0
-          ? `${succeededTickets.length} ticket(s) créés, ${failedTickets.length} en attente de reprise depuis Tickets.`
+          ? `${succeededTickets.length} ticket(s) créés, ${failedTickets.length} en attente. ${firstCreationError ?? "Reprenez-les depuis Tickets."}`
           : `${succeededTickets.length} ticket(s) créés avec succès${createdPdf ? " et PDF enregistré." : "."}`
       );
     } catch (generationError) {
-      setError(
-        generationError instanceof Error
-          ? generationError.message
-          : "La génération des tickets a échoué."
-      );
+      setError(readGenerationError(generationError, "La génération des tickets a échoué."));
     } finally {
       setIsGenerating(false);
     }
@@ -563,7 +734,8 @@ export function TicketGenerationPage() {
   const createAndStorePdf = async (
     batch: CreateTicketBatchInput,
     pdfTickets: CreateTicketInput[],
-    fileName: string
+    fileName: string,
+    output?: { format: TicketPdfFormat; recordId: string }
   ): Promise<CreateGeneratedFileInput> => {
     if (!selectedPlan || !selectedRouter) {
       throw new Error("Le plan ou le routeur du PDF est introuvable.");
@@ -578,10 +750,11 @@ export function TicketGenerationPage() {
         "Renseignez le téléphone du propriétaire dans Mon compte avant de générer le PDF."
       );
     }
+    const generatedAt = new Date().toISOString();
     const basePdfInput = buildTicketPdfInputFromOptions({
       batch,
       fileName,
-      generatedAt: new Date().toISOString(),
+      generatedAt,
       options: state.options,
       ownerPhone: ownerPhone?.trim() || "Contact propriétaire",
       plan: selectedPlan,
@@ -590,6 +763,10 @@ export function TicketGenerationPage() {
     });
     const pdfInput = {
       ...basePdfInput,
+      fileName,
+      format: output?.format ?? basePdfInput.format,
+      displaySettings,
+      qrCodeEnabled: displaySettings.showQrCode,
       tickets: await mapWithConcurrency(
         pdfTickets,
         8,
@@ -605,6 +782,7 @@ export function TicketGenerationPage() {
     };
     const pdfBytes = generateTicketPdf(pdfInput);
     let fileRecord = buildGeneratedTicketPdfRecord(pdfInput);
+    if (output) fileRecord = { ...fileRecord, id: output.recordId };
 
     if (isPersistent) {
       const savedFile = await fileService.writeBytes(fileRecord.file_path, pdfBytes);
@@ -613,7 +791,18 @@ export function TicketGenerationPage() {
       downloadPdf(pdfInput.fileName, pdfBytes);
     }
 
-    await generatedFiles.create(fileRecord);
+    await generatedFiles.upsert(fileRecord);
+    if (isPersistent) {
+      await Promise.all(pdfTickets.map(async (ticket) => {
+        ticket.exported_at = generatedAt;
+        await ticketRepository.update(ticket);
+      }));
+      setTickets((current) => current.map((ticket) =>
+        pdfTickets.some((exported) => exported.id === ticket.id)
+          ? { ...ticket, exported_at: generatedAt }
+          : ticket
+      ));
+    }
     return fileRecord;
   };
 
@@ -648,10 +837,23 @@ export function TicketGenerationPage() {
       return;
     }
 
+    const printableTickets = tickets.filter((ticket) => ticket.sync_status === "synced");
+    if (printableTickets.length === 0) {
+      setError("Aucun voucher synchronisé n'est disponible pour l'impression.");
+      return;
+    }
+    const printFileName = `tickets-${result.batch.id}-${printSettings.format}.pdf`;
     let fileToPrint = generatedFile;
-
-    if (!fileToPrint && result.fileName) {
-      fileToPrint = await generatePdf();
+    try {
+      if (isPersistent) {
+        fileToPrint = await createAndStorePdf(result.batch, printableTickets, printFileName, {
+          format: printSettings.format,
+          recordId: `${result.batch.id}-pdf-${printSettings.format}`
+        });
+      }
+    } catch (printFileError) {
+      setError(readGenerationError(printFileError, "Le PDF d'impression n'a pas pu être préparé."));
+      return;
     }
 
     if (isPersistent && !fileToPrint) {
@@ -764,7 +966,16 @@ export function TicketGenerationPage() {
         <StepRouter routers={routers} selectedRouterId={state.selectedRouterId} onSelect={(selectedRouterId) => updateState({ selectedRouterId })} />
       ) : null}
       {state.step === 2 ? (
-        <StepPlan plans={plans} selectedPlanId={state.selectedPlanId} onSelect={(selectedPlanId) => updateState({ selectedPlanId })} />
+        <StepPlan
+          isLoading={isCatalogLoading}
+          onRefresh={() => void refreshRouterCatalog()}
+          onSelect={(selectedPlanId) => updateState({ selectedPlanId })}
+          onServerSelect={(selectedServerName) => updateState({ selectedServerName })}
+          plans={plans}
+          selectedPlanId={state.selectedPlanId}
+          selectedServerName={state.selectedServerName}
+          servers={hotspotServers}
+        />
       ) : null}
       {state.step === 3 ? (
         <StepQuantity state={state} onChange={updateState} />
@@ -779,16 +990,19 @@ export function TicketGenerationPage() {
           plan={selectedPlan}
           quantity={quantity}
           router={selectedRouter}
+          serverName={state.selectedServerName}
           summary={summary}
         />
       ) : null}
       {state.step === 6 && result && selectedPlan && selectedRouter ? (
         <StepResult
+          displaySettings={displaySettings}
           generatedFile={generatedFile}
           onPdf={() => void generatePdf()}
           onPrint={() => void printBatch()}
           onTestPrinter={() => void testPrinter()}
           onUpdatePrintSettings={(partial) => setPrintSettings((current) => ({ ...current, ...partial }))}
+          ownerPhone={ownerPhone}
           plan={selectedPlan}
           printHistory={printHistory}
           printers={printers}
@@ -878,16 +1092,52 @@ function StepRouter({
 }
 
 function StepPlan({
+  isLoading,
+  onRefresh,
   onSelect,
+  onServerSelect,
   plans,
-  selectedPlanId
+  selectedPlanId,
+  selectedServerName,
+  servers
 }: {
+  isLoading: boolean;
+  onRefresh: () => void;
   onSelect: (planId: string) => void;
+  onServerSelect: (serverName: string) => void;
   plans: HotspotPlan[];
   selectedPlanId: string;
+  selectedServerName: string;
+  servers: HotspotServer[];
 }) {
+  const enabledServers = servers.filter((server) => server.isEnabled);
   return (
-    <Card title="Choisir le plan" description="Seuls les plans actifs peuvent générer de nouveaux tickets.">
+    <Card
+      actions={<Button disabled={isLoading} icon={RefreshCw} onClick={onRefresh}>{isLoading ? "Actualisation…" : "Actualiser RouterOS"}</Button>}
+      title="Choisir le serveur et le profil"
+      description="La liste provient directement du MikroTik. TicketPro la revérifiera avant la création."
+    >
+      <div className="router-form-grid ticket-server-selection">
+        <label className="form-field">
+          Serveur Hotspot
+          <select value={selectedServerName} onChange={(event) => onServerSelect(event.target.value)}>
+            {enabledServers.length > 1 ? <option value="">Choisir un serveur…</option> : null}
+            {enabledServers.map((server) => (
+              <option key={server.id} value={server.name}>{server.name} · {server.interfaceName}</option>
+            ))}
+            {enabledServers.length > 0 ? <option value="all">All — tous les serveurs compatibles</option> : null}
+          </select>
+          <small>
+            {enabledServers.length === 1
+              ? `${enabledServers[0].name} a été sélectionné automatiquement.`
+              : `${enabledServers.length} serveurs actifs détectés : un choix est obligatoire.`}
+          </small>
+        </label>
+        <div className="ticket-server-selection__status">
+          <Wifi aria-hidden="true" />
+          <span>{enabledServers.length} serveur(s) Hotspot actif(s) lu(s) sur RouterOS.</span>
+        </div>
+      </div>
       <div className="choice-grid">
         {plans.map((plan) => (
           <button
@@ -898,7 +1148,10 @@ function StepPlan({
             type="button"
           >
             <strong>{plan.name}</strong>
-            <span>{plan.durationMinutes} min · {plan.dataLimitMb ? `${plan.dataLimitMb} MB` : "Volume illimité"}</span>
+            <span>Profil : {plan.profileName}</span>
+            <span>{formatPlanDurationLabel(plan.durationMinutes)} · validité {formatPlanDurationLabel(plan.validityMinutes ?? plan.durationMinutes)}</span>
+            <span>Débit {plan.downloadLimit ?? "∞"} / {plan.uploadLimit ?? "∞"} · {plan.dataLimitMb ? `${plan.dataLimitMb} MB` : "Volume illimité"}</span>
+            <span>{plan.sharedUsers} appareil(s) autorisé(s)</span>
             <span>{plan.priceHint ? `${plan.priceHint} CFA` : "Prix non défini"}</span>
             <Badge status={plan.status === "active" ? "success" : "offline"}>
               {plan.status === "active" ? "Actif" : "Inactif"}
@@ -1049,6 +1302,7 @@ function StepConfirmation({
   plan,
   quantity,
   router,
+  serverName,
   summary
 }: {
   logsCount: number;
@@ -1056,6 +1310,7 @@ function StepConfirmation({
   plan: HotspotPlan;
   quantity: number;
   router: RouterSummary;
+  serverName: string;
   summary: ReturnType<typeof getTicketSummary>;
 }) {
   return (
@@ -1075,6 +1330,8 @@ function StepConfirmation({
           <SummaryItem label="Plan" value={summary.plan} />
           <SummaryItem label="Quantité" value={String(summary.quantity)} />
           <SummaryItem label="Routeur" value={`${summary.router} · ${router.host}`} />
+          <SummaryItem label="Serveur Hotspot" value={serverName === "all" ? "All" : serverName} />
+          <SummaryItem label="Profil MikroTik" value={plan.profileName} />
           <SummaryItem label="Opérateur" value={summary.operator} />
           <SummaryItem label="Code" value={`${options.prefix ? `${options.prefix} + ` : ""}${options.codeLength} chiffres`} />
           <SummaryItem label="PDF" value="Automatique et archivé" />
@@ -1086,11 +1343,13 @@ function StepConfirmation({
 }
 
 function StepResult({
+  displaySettings,
   generatedFile,
   onPdf,
   onPrint,
   onTestPrinter,
   onUpdatePrintSettings,
+  ownerPhone,
   plan,
   printHistory,
   printers,
@@ -1099,11 +1358,13 @@ function StepResult({
   router,
   tickets
 }: {
+  displaySettings: TicketDisplaySettings;
   generatedFile: CreateGeneratedFileInput | null;
   onPdf: () => void;
   onPrint: () => void;
   onTestPrinter: () => void;
   onUpdatePrintSettings: (settings: Partial<PrintSettings>) => void;
+  ownerPhone: string | null;
   plan: HotspotPlan;
   printHistory: PrintHistoryEntry[];
   printers: LocalPrinter[];
@@ -1113,7 +1374,16 @@ function StepResult({
   tickets: CreateTicketInput[];
 }) {
   const printTickets = tickets.map((ticket) =>
-    buildPrintTicketFromGeneratedTicket(ticket, plan, router.name, result.batch.id)
+    buildPrintTicketFromGeneratedTicket(
+      ticket,
+      plan,
+      router.name,
+      result.batch.id,
+      undefined,
+      router.hotspotAddress,
+      ownerPhone,
+      displaySettings
+    )
   );
   const preview = new LocalPrintService().buildPreview(printTickets, printSettings);
 
@@ -1226,11 +1496,30 @@ function StepResult({
         </div>
 
         <div className="print-preview-layout">
-          <div className="print-preview-ticket">
-            <span>Aperçu {preview.paperWidthLabel}</span>
-            {preview.lines.map((line) => (
-              <strong key={line}>{line}</strong>
-            ))}
+          <div className={`print-preview-ticket print-preview-ticket--${printSettings.format}`}>
+            <span>Aperçu fidèle {preview.paperWidthLabel}</span>
+            {preview.ticket ? (
+              <div className="thermal-ticket-preview">
+                <div className="thermal-ticket-preview__zone">{preview.ticket.zoneName}</div>
+                {!printSettings.economical ? <div className="thermal-ticket-preview__plan">{preview.ticket.planName}</div> : null}
+                <div className="thermal-ticket-preview__credentials">
+                  <small>LOGIN</small>
+                  <strong>{preview.ticket.code}</strong>
+                  {preview.ticket.passwordLabel !== preview.ticket.code ? (
+                    <><hr /><small>MOT DE PASSE</small><strong>{preview.ticket.passwordLabel}</strong></>
+                  ) : null}
+                </div>
+                <div className="thermal-ticket-preview__details">
+                  <span>{preview.ticket.durationLabel}{preview.ticket.dataLimitLabel ? ` - ${preview.ticket.dataLimitLabel}` : ""}</span>
+                  {preview.ticket.priceLabel ? <strong>{preview.ticket.priceLabel}</strong> : null}
+                </div>
+                <div className="thermal-ticket-preview__footer">
+                  {preview.ticket.hotspotAddress ? <strong>Portail : {preview.ticket.hotspotAddress}</strong> : null}
+                  {preview.ticket.contactLabel ? <span>Contact : {preview.ticket.contactLabel}</span> : null}
+                </div>
+              </div>
+            ) : <strong>Aucun ticket disponible.</strong>}
+            <small>Longueur estimée : {preview.estimatedLengthMm} mm par ticket</small>
           </div>
           <div className="print-history-list">
             <h3>Historique d'impression</h3>
@@ -1285,19 +1574,25 @@ function buildPrintTicketFromGeneratedTicket(
   plan: HotspotPlan,
   zoneName: string,
   batchId: string,
-  passwordLabel?: string
+  passwordLabel?: string,
+  hotspotAddress?: string | null,
+  ownerPhone?: string | null,
+  displaySettings?: TicketDisplaySettings
 ) {
   return {
     batchId,
     code: ticket.username,
+    contactLabel: displaySettings?.showContact === false ? undefined : ownerPhone?.trim() || undefined,
     dataLimitLabel: plan.dataLimitMb ? `${plan.dataLimitMb} MB` : null,
     durationLabel: plan.durationMinutes >= 60 && plan.durationMinutes % 60 === 0 ? `${plan.durationMinutes / 60} h` : `${plan.durationMinutes} min`,
+    hotspotAddress: displaySettings?.showInstructions === false ? undefined : hotspotAddress?.trim() || undefined,
     id: ticket.id,
     passwordLabel: passwordLabel ?? resolveTicketPdfPassword({
       passwordSecretRef: ticket.password_encrypted,
       username: ticket.username
     }),
     planName: plan.name,
+    priceLabel: displaySettings?.showPrice === false || plan.priceHint === null ? null : `${plan.priceHint} CFA`,
     zoneName
   };
 }
@@ -1315,14 +1610,15 @@ function validateStep(
   step: TicketGenerationStep,
   state: TicketGenerationState,
   routers: RouterSummary[],
-  plans: HotspotPlan[]
+  plans: HotspotPlan[],
+  servers: HotspotServer[]
 ): string | null {
   if (step === 1 && !routers.some((router) => router.id === state.selectedRouterId)) {
     return "Choisissez un routeur.";
   }
 
-  if (step === 2 && !plans.some((plan) => plan.id === state.selectedPlanId && plan.status === "active")) {
-    return "Choisissez un plan actif.";
+  if (step === 2) {
+    return validateTicketGeneration(state, routers, plans, servers);
   }
 
   if (step === 3) {
@@ -1334,10 +1630,21 @@ function validateStep(
   }
 
   if (step === 4) {
-    return validateTicketGeneration(state, routers, plans);
+    return validateTicketGeneration(state, routers, plans, servers);
   }
 
   return null;
+}
+
+function formatPlanDurationLabel(minutes: number): string {
+  if (!minutes) return "Non défini";
+  if (minutes >= 1440 && minutes % 1440 === 0) return `${minutes / 1440} j`;
+  if (minutes >= 60 && minutes % 60 === 0) return `${minutes / 60} h`;
+  return `${minutes} min`;
+}
+
+function catalogSlug(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "default";
 }
 
 function ticketStatusToBadge(status: string): AppStatus {
@@ -1391,4 +1698,19 @@ async function mapWithConcurrency<T, R>(
     results[index] = await operation(value, index);
   });
   return results;
+}
+
+function readGenerationError(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message.trim()) return error.message.trim();
+  if (typeof error === "string" && error.trim()) return error.trim();
+  if (error && typeof error === "object") {
+    const candidate = error as { error?: unknown; message?: unknown };
+    if (typeof candidate.message === "string" && candidate.message.trim()) {
+      return candidate.message.trim();
+    }
+    if (typeof candidate.error === "string" && candidate.error.trim()) {
+      return candidate.error.trim();
+    }
+  }
+  return fallback;
 }

@@ -1,4 +1,4 @@
-import type { HotspotPlan, HotspotUser, RouterSummary } from "../../domain/router";
+import type { HotspotPlan, HotspotServer, HotspotUser, RouterSummary } from "../../domain/router";
 import type { CreateTicketBatchInput, CreateTicketInput, SyncStatus } from "../../domain/database";
 import type { UserRole } from "../../domain/auth";
 import type { TicketPdfFormat, TicketPdfInput, TicketPdfTemplate } from "../../services/pdf";
@@ -35,6 +35,7 @@ export type TicketGenerationState = {
   quantity: number | "custom";
   selectedPlanId: string;
   selectedRouterId: string;
+  selectedServerName: string;
   step: TicketGenerationStep;
 };
 
@@ -93,6 +94,7 @@ export function createInitialTicketGenerationState(routerId: string): TicketGene
     quantity: 20,
     selectedPlanId: "",
     selectedRouterId: routerId,
+    selectedServerName: "",
     step: 1
   };
 }
@@ -104,7 +106,8 @@ export function getSelectedQuantity(state: TicketGenerationState): number {
 export function validateTicketGeneration(
   state: TicketGenerationState,
   routers: RouterSummary[],
-  plans: HotspotPlan[]
+  plans: HotspotPlan[],
+  servers: HotspotServer[] = []
 ): string | null {
   if (!routers.some((router) => router.id === state.selectedRouterId)) {
     return "Choisissez un routeur.";
@@ -112,6 +115,20 @@ export function validateTicketGeneration(
 
   if (!plans.some((plan) => plan.id === state.selectedPlanId && plan.status === "active")) {
     return "Choisissez un plan actif.";
+  }
+
+  const enabledServers = servers.filter((server) => server.isEnabled);
+  if (servers.length > 0 && enabledServers.length === 0) {
+    return "Aucun serveur Hotspot actif n'est disponible sur le routeur.";
+  }
+  if (
+    enabledServers.length > 0
+    && state.selectedServerName !== "all"
+    && !enabledServers.some((server) => server.name === state.selectedServerName)
+  ) {
+    return enabledServers.length === 1
+      ? "Le serveur Hotspot sélectionné n'existe plus. Actualisez la liste."
+      : "Choisissez un serveur Hotspot ou l'option All.";
   }
 
   const quantity = getSelectedQuantity(state);
@@ -139,6 +156,7 @@ export function buildTicketBatch(input: {
   planId: string;
   quantity: number;
   routerId: string;
+  serverName?: string;
   syncStatus: SyncStatus;
   options: TicketGenerationOptions;
 }): CreateTicketBatchInput {
@@ -154,6 +172,7 @@ export function buildTicketBatch(input: {
     prefix: normalizePrefix(input.options.prefix) || null,
     quantity: input.quantity,
     router_id: input.routerId,
+    hotspot_server_name: input.serverName ?? "all",
     status: input.syncStatus === "synced" ? "terminé" : "partiel",
     sync_status: input.syncStatus
   };
@@ -168,6 +187,8 @@ export function buildTicketRecord(input: {
   passwordSecretRef: string;
   planId: string;
   routerId: string;
+  serverName?: string;
+  profileName?: string;
   status: TicketStatus;
   syncStatus: SyncStatus;
   username: string;
@@ -192,6 +213,8 @@ export function buildTicketRecord(input: {
     plan_id: input.planId,
     printed_count: input.status === "imprimé" ? 1 : 0,
     router_id: input.routerId,
+    hotspot_server_name: input.serverName ?? "all",
+    mikrotik_profile_name: input.profileName ?? null,
     status: input.status,
     sync_status: input.syncStatus,
     uploaded_bytes: 0,
@@ -316,6 +339,7 @@ export function userToTicketRecord(input: {
   passwordSecretRef?: string;
   planId?: string;
   routerId: string;
+  serverName?: string;
   user: HotspotUser;
 }): CreateTicketInput {
   return buildTicketRecord({
@@ -326,7 +350,9 @@ export function userToTicketRecord(input: {
     mikrotikId: input.user.id,
     passwordSecretRef: input.passwordSecretRef ?? input.user.passwordSecretRef,
     planId: input.planId ?? input.user.planId,
+    profileName: input.user.profileName,
     routerId: input.routerId,
+    serverName: input.serverName ?? input.user.serverName ?? "all",
     status: "disponible",
     syncStatus: "synced",
     username: input.user.username
