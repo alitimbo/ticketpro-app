@@ -213,7 +213,7 @@ export function SubscriptionPage() {
                   {plans.map((plan) => (
                     <option key={plan.id} value={plan.id}>
                       {plan.name} — {formatPlanDuration(plan.duration_days)} — {plan.router_limit} routeur(s) —{" "}
-                      {formatCfa(plan.price_cfa)}
+                      {formatDeviceLimit(plan)} — {formatCfa(plan.price_cfa)}
                     </option>
                   ))}
                 </select>
@@ -249,6 +249,10 @@ export function SubscriptionPage() {
                 <div>
                   <span>Capacité</span>
                   <strong>{selectedPlan.router_limit} routeur(s)</strong>
+                </div>
+                <div>
+                  <span>Appareils</span>
+                  <strong>{formatDeviceLimit(selectedPlan)}</strong>
                 </div>
                 <div>
                   <span>Montant</span>
@@ -293,4 +297,10 @@ export function SubscriptionPage() {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Une erreur est survenue.";
+}
+
+function formatDeviceLimit(plan: LicensePlan): string {
+  return plan.device_limit_mode === "unlimited" || plan.max_devices === null
+    ? "Appareils illimités"
+    : `${plan.max_devices} appareil(s)`;
 }

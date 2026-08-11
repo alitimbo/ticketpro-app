@@ -353,7 +353,9 @@ pub fn db_transaction(
     statements: Vec<DbStatement>,
 ) -> Result<Vec<DbExecuteResult>, String> {
     let mut connection = open_connection(&app)?;
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
     let mut results = Vec::with_capacity(statements.len());
 
     for statement in statements {
@@ -445,7 +447,9 @@ pub fn db_backup(app: AppHandle, file_name: String) -> Result<DatabaseBackup, St
     }
     let target = backup_path(&app, &file_name)?;
     fs::copy(&source, &target).map_err(|error| error.to_string())?;
-    let size_bytes = fs::metadata(&target).map_err(|error| error.to_string())?.len();
+    let size_bytes = fs::metadata(&target)
+        .map_err(|error| error.to_string())?
+        .len();
     Ok(DatabaseBackup {
         absolute_path: target.to_string_lossy().to_string(),
         file_name,

@@ -25,6 +25,7 @@ work/
 TicketPro-Setup-*.exe
 *-setup.exe
 *.msi
+src-tauri/resources/ticketpro-vpn-service.exe
 
 # Configuration locale, clés et secrets
 .env

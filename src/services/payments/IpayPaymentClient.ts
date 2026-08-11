@@ -11,7 +11,8 @@ export type PaymentOrder = {
     code: string;
     name: string;
     router_limit: number;
-    max_devices: number;
+    device_limit_mode: "limited" | "unlimited";
+    max_devices: number | null;
     duration_days: number;
     price_cfa: number;
   };

@@ -1,12 +1,16 @@
 [package]
 name = "ticketpro"
-version = "0.2.3"
+version = "0.2.4"
 description = "Gestion locale et distante de hotspots MikroTik"
 authors = ["Akicorp Solutions"]
 license = ""
 repository = ""
 edition = "2021"
 rust-version = "1.77.2"
+
+[workspace]
+members = [".", "vpn-service"]
+resolver = "2"
 
 [lib]
 name = "ticketpro_lib"
@@ -27,9 +31,13 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
   "Win32_Graphics_Printing",
   "Win32_Security_Cryptography",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
   "Win32_System_Memory",
+  "Win32_System_Pipes",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging"
 ] }

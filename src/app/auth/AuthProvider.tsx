@@ -37,6 +37,7 @@ import {
   type SaasAuthResult
 } from "../../services/saas";
 import { completeFirstLaunch, defaultFirstLaunchState } from "../../pages/auth/firstLaunchModel";
+import { disconnectEmbeddedVpn, getVpnProviderStatus } from "../../services/vpn";
 
 type LoginResult = {
   ok: boolean;
@@ -109,6 +110,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logoutAccount = useCallback(() => {
+    void getVpnProviderStatus()
+      .then((status) => status.provider === "EMBEDDED" ? disconnectEmbeddedVpn() : undefined)
+      .catch(() => undefined);
     void logoutSaas();
     clearStoredSession();
     clearMainAccountSession();

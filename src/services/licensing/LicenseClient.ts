@@ -11,7 +11,8 @@ export type LicensePlan = {
   is_active: boolean;
   is_recommended: boolean;
   is_reseller?: boolean;
-  max_devices: number;
+  device_limit_mode?: "limited" | "unlimited";
+  max_devices: number | null;
   name: string;
   price_cfa: number | null;
   router_limit: number;

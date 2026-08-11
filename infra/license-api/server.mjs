@@ -48,6 +48,9 @@ const SAAS_TRIAL_PLAN_CODE = "TRIAL-7D";
 const SAAS_PAID_GRACE_DAYS = 7;
 const DAY_MS = 86_400_000;
 const SUBSCRIPTION_NOTIFICATION_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const VPN_RECONCILIATION_INTERVAL_MS = Number(
+  process.env.VPN_RECONCILIATION_INTERVAL_MS ?? 60_000
+);
 const ORGANIZATION_APP_ROLES = new Set(["admin", "operator", "agent", "guest"]);
 const ORGANIZATION_ROLE_PERMISSIONS = {
   admin: [
@@ -94,6 +97,7 @@ db.exec(`
     description TEXT,
     router_limit INTEGER NOT NULL CHECK(router_limit > 0),
     max_devices INTEGER NOT NULL CHECK(max_devices > 0),
+    device_limit_mode TEXT NOT NULL DEFAULT 'limited' CHECK(device_limit_mode IN ('limited', 'unlimited')),
     duration_days INTEGER NOT NULL CHECK(duration_days > 0),
     price_cfa INTEGER,
     billing_period TEXT NOT NULL CHECK(billing_period IN ('monthly', 'yearly', 'custom')),
@@ -306,6 +310,8 @@ db.exec(`
     plan_name TEXT NOT NULL,
     status TEXT NOT NULL CHECK(status IN ('active', 'expired', 'cancelled')),
     router_limit INTEGER NOT NULL CHECK(router_limit > 0),
+    max_devices INTEGER NOT NULL DEFAULT 1 CHECK(max_devices > 0),
+    device_limit_mode TEXT NOT NULL DEFAULT 'limited' CHECK(device_limit_mode IN ('limited', 'unlimited')),
     amount INTEGER NOT NULL,
     currency TEXT NOT NULL DEFAULT 'XOF',
     current_period_start TEXT NOT NULL,
@@ -324,6 +330,40 @@ db.exec(`
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (organization_id, router_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS organization_devices (
+    id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    registered_by_user_id TEXT REFERENCES organization_users(id) ON DELETE SET NULL,
+    installation_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    platform TEXT NOT NULL CHECK(platform IN ('windows', 'macos', 'linux')),
+    os_version TEXT,
+    app_version TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('active', 'offline', 'stale', 'revoked')),
+    last_seen_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    revoked_at TEXT,
+    UNIQUE (organization_id, installation_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS organization_vpn_peers (
+    id TEXT PRIMARY KEY,
+    device_id TEXT NOT NULL UNIQUE REFERENCES organization_devices(id) ON DELETE CASCADE,
+    gateway_id TEXT NOT NULL DEFAULT 'gateway-africa-west-1',
+    public_key TEXT NOT NULL UNIQUE,
+    vpn_ip TEXT UNIQUE,
+    key_version INTEGER NOT NULL DEFAULT 1 CHECK(key_version > 0),
+    config_version INTEGER NOT NULL DEFAULT 1 CHECK(config_version > 0),
+    desired_state TEXT NOT NULL CHECK(desired_state IN ('enabled', 'disabled')),
+    applied_state TEXT NOT NULL CHECK(applied_state IN ('pending', 'enabled', 'disabled', 'error')),
+    last_handshake_at TEXT,
+    last_error_code TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    revoked_at TEXT
   );
 
   CREATE TABLE IF NOT EXISTS subscription_notifications (
@@ -402,6 +442,7 @@ db.exec(`
     plan_name TEXT NOT NULL,
     router_limit INTEGER NOT NULL,
     max_devices INTEGER NOT NULL,
+    device_limit_mode TEXT NOT NULL DEFAULT 'limited' CHECK(device_limit_mode IN ('limited', 'unlimited')),
     duration_days INTEGER NOT NULL,
     amount INTEGER NOT NULL CHECK(amount > 0),
     currency TEXT NOT NULL DEFAULT 'XOF',
@@ -459,6 +500,10 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_organization_sessions_token ON organization_sessions(token_hash);
   CREATE INDEX IF NOT EXISTS idx_organization_subscriptions_organization
     ON organization_subscriptions(organization_id, current_period_end);
+  CREATE INDEX IF NOT EXISTS idx_organization_devices_organization
+    ON organization_devices(organization_id, status, last_seen_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_organization_vpn_peers_desired_state
+    ON organization_vpn_peers(desired_state, applied_state, updated_at);
   CREATE INDEX IF NOT EXISTS idx_subscription_notifications_status
     ON subscription_notifications(status, created_at);
   CREATE INDEX IF NOT EXISTS idx_router_access_policies_organization
@@ -474,6 +519,7 @@ db.exec(`
 `);
 
 ensureColumn("plans", "is_reseller", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("plans", "device_limit_mode", "TEXT NOT NULL DEFAULT 'limited'");
 ensureColumn("licenses", "plan_id", "TEXT");
 ensureColumn("licenses", "plan_code", "TEXT");
 ensureColumn("licenses", "plan_name", "TEXT");
@@ -495,11 +541,14 @@ ensureColumn("reseller_accounts", "last_login_at", "TEXT");
 ensureColumn("payment_orders", "reseller_registration_id", "TEXT");
 ensureColumn("payment_orders", "organization_id", "TEXT");
 ensureColumn("payment_orders", "organization_user_id", "TEXT");
+ensureColumn("payment_orders", "device_limit_mode", "TEXT NOT NULL DEFAULT 'limited'");
 ensureColumn("organization_users", "app_role", "TEXT NOT NULL DEFAULT 'operator'");
 ensureColumn("organization_users", "router_access_mode", "TEXT NOT NULL DEFAULT 'selected'");
 ensureColumn("organization_users", "invitation_pending", "INTEGER NOT NULL DEFAULT 0");
 ensureColumn("organization_users", "created_by_user_id", "TEXT");
 ensureColumn("organization_sessions", "active_membership_id", "TEXT");
+ensureColumn("organization_subscriptions", "max_devices", "INTEGER NOT NULL DEFAULT 1");
+ensureColumn("organization_subscriptions", "device_limit_mode", "TEXT NOT NULL DEFAULT 'limited'");
 
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_licenses_reseller ON licenses(reseller_id, status);
@@ -563,6 +612,33 @@ const seedPlan = db.prepare(`
   ["subscription-plan-100-routers", "RESELLER-100", "Pack Revendeur 100", "Pour revendre des sous-licences isolées.", 100, 100, 30, 70000, 0, 1, 50]
 ].forEach((plan) => seedPlan.run(...plan, timestamp, timestamp));
 db.exec("UPDATE plans SET is_reseller = 1 WHERE code LIKE 'RESELLER-%';");
+db.exec(`
+  UPDATE plans
+  SET device_limit_mode = 'unlimited'
+  WHERE is_reseller = 0 AND max_devices >= 100000;
+
+  UPDATE payment_orders
+  SET device_limit_mode = 'unlimited'
+  WHERE purchaser_type = 'organization' AND max_devices >= 100000;
+
+  UPDATE organization_subscriptions
+  SET device_limit_mode = 'unlimited'
+  WHERE max_devices >= 100000;
+
+  UPDATE organization_subscriptions
+  SET max_devices = COALESCE(
+    (SELECT plan.max_devices FROM plans AS plan WHERE plan.id = organization_subscriptions.plan_id),
+    max_devices,
+    1
+  );
+
+  UPDATE organization_subscriptions
+  SET device_limit_mode = COALESCE(
+    (SELECT plan.device_limit_mode FROM plans AS plan WHERE plan.id = organization_subscriptions.plan_id),
+    device_limit_mode,
+    'limited'
+  )
+`);
 
 const statements = {
   listPlans: db.prepare("SELECT * FROM plans WHERE is_active = 1 AND is_reseller = 0 ORDER BY sort_order ASC, router_limit ASC"),
@@ -575,12 +651,13 @@ const statements = {
   `),
   upsertPlan: db.prepare(`
     INSERT INTO plans (
-      id, code, name, description, router_limit, max_devices, duration_days,
+      id, code, name, description, router_limit, max_devices, device_limit_mode, duration_days,
       price_cfa, billing_period, is_recommended, is_active, is_reseller, sort_order, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       code = excluded.code, name = excluded.name, description = excluded.description,
       router_limit = excluded.router_limit, max_devices = excluded.max_devices,
+      device_limit_mode = excluded.device_limit_mode,
       duration_days = excluded.duration_days, price_cfa = excluded.price_cfa,
       billing_period = excluded.billing_period, is_recommended = excluded.is_recommended,
       is_active = excluded.is_active, is_reseller = excluded.is_reseller,
@@ -928,10 +1005,10 @@ const statements = {
   `),
   insertOrganizationSubscription: db.prepare(`
     INSERT INTO organization_subscriptions (
-      id, organization_id, plan_id, plan_code, plan_name, status, router_limit,
+      id, organization_id, plan_id, plan_code, plan_name, status, router_limit, max_devices, device_limit_mode,
       amount, currency, current_period_start, current_period_end, payment_order_id,
       created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, 'XOF', ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, 'XOF', ?, ?, ?, ?, ?)
   `),
   expireOrganizationSubscriptions: db.prepare(`
     UPDATE organization_subscriptions SET status = 'expired', updated_at = ?
@@ -972,6 +1049,117 @@ const statements = {
     SELECT 1 AS found FROM organization_subscriptions
     WHERE organization_id = ? AND plan_id <> ?
     LIMIT 1
+  `),
+  findOrganizationDeviceByInstallation: db.prepare(`
+    SELECT * FROM organization_devices
+    WHERE organization_id = ? AND installation_id = ? LIMIT 1
+  `),
+  findOrganizationDeviceById: db.prepare(`
+    SELECT * FROM organization_devices
+    WHERE organization_id = ? AND id = ? LIMIT 1
+  `),
+  countOrganizationRegisteredDevices: db.prepare(`
+    SELECT COUNT(*) AS count FROM organization_devices
+    WHERE organization_id = ? AND status <> 'revoked'
+  `),
+  insertOrganizationDevice: db.prepare(`
+    INSERT OR IGNORE INTO organization_devices (
+      id, organization_id, registered_by_user_id, installation_id, name,
+      platform, os_version, app_version, status, last_seen_at,
+      created_at, updated_at, revoked_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, NULL)
+  `),
+  touchOrganizationDevice: db.prepare(`
+    UPDATE organization_devices
+    SET name = ?, platform = ?, os_version = ?, app_version = ?, status = 'active',
+      last_seen_at = ?, updated_at = ?
+    WHERE organization_id = ? AND id = ? AND status <> 'revoked'
+  `),
+  heartbeatOrganizationDevice: db.prepare(`
+    UPDATE organization_devices
+    SET app_version = ?, status = CASE WHEN status = 'revoked' THEN status ELSE 'active' END,
+      last_seen_at = ?, updated_at = ?
+    WHERE organization_id = ? AND id = ?
+  `),
+  revokeOrganizationDevice: db.prepare(`
+    UPDATE organization_devices
+    SET status = 'revoked', revoked_at = ?, updated_at = ?
+    WHERE organization_id = ? AND id = ? AND status <> 'revoked'
+  `),
+  listOrganizationDevices: db.prepare(`
+    SELECT device.*, peer.id AS peer_id, peer.gateway_id, peer.public_key,
+      peer.vpn_ip, peer.key_version, peer.config_version, peer.desired_state,
+      peer.applied_state, peer.last_handshake_at, peer.last_error_code
+    FROM organization_devices AS device
+    LEFT JOIN organization_vpn_peers AS peer ON peer.device_id = device.id
+    WHERE device.organization_id = ?
+    ORDER BY device.created_at ASC
+  `),
+  listOrganizationVpnPeersForReconciliation: db.prepare(`
+    SELECT peer.*, device.organization_id, device.name AS device_name,
+      device.status AS device_status
+    FROM organization_vpn_peers AS peer
+    JOIN organization_devices AS device ON device.id = peer.device_id
+    ORDER BY peer.updated_at ASC
+  `),
+  findOrganizationVpnPeerByDevice: db.prepare(`
+    SELECT peer.* FROM organization_vpn_peers AS peer
+    JOIN organization_devices AS device ON device.id = peer.device_id
+    WHERE device.organization_id = ? AND peer.device_id = ? LIMIT 1
+  `),
+  findOrganizationVpnPeerByPublicKey: db.prepare(`
+    SELECT peer.*, device.organization_id FROM organization_vpn_peers AS peer
+    JOIN organization_devices AS device ON device.id = peer.device_id
+    WHERE peer.public_key = ? LIMIT 1
+  `),
+  insertOrganizationVpnPeer: db.prepare(`
+    INSERT OR IGNORE INTO organization_vpn_peers (
+      id, device_id, gateway_id, public_key, vpn_ip, key_version,
+      config_version, desired_state, applied_state, last_handshake_at,
+      last_error_code, created_at, updated_at, revoked_at
+    ) VALUES (?, ?, 'gateway-africa-west-1', ?, NULL, 1, 1,
+      'enabled', 'pending', NULL, NULL, ?, ?, NULL)
+  `),
+  markOrganizationVpnPeerEnabled: db.prepare(`
+    UPDATE organization_vpn_peers
+    SET vpn_ip = ?, desired_state = 'enabled', applied_state = 'enabled',
+      last_error_code = NULL, revoked_at = NULL, updated_at = ?
+    WHERE device_id = ?
+  `),
+  markOrganizationVpnPeerPending: db.prepare(`
+    UPDATE organization_vpn_peers
+    SET desired_state = ?, applied_state = 'pending', last_error_code = NULL, updated_at = ?
+    WHERE device_id = ?
+  `),
+  markOrganizationVpnPeerDisabled: db.prepare(`
+    UPDATE organization_vpn_peers
+    SET desired_state = 'disabled', applied_state = 'disabled', revoked_at = ?,
+      last_error_code = NULL, updated_at = ?
+    WHERE device_id = ?
+  `),
+  markOrganizationVpnPeerSuspended: db.prepare(`
+    UPDATE organization_vpn_peers
+    SET desired_state = 'disabled', applied_state = 'disabled', revoked_at = NULL,
+      last_error_code = NULL, updated_at = ?
+    WHERE device_id = ?
+  `),
+  markOrganizationVpnPeerError: db.prepare(`
+    UPDATE organization_vpn_peers
+    SET applied_state = 'error', last_error_code = ?, updated_at = ?
+    WHERE device_id = ?
+  `),
+  rotateOrganizationVpnPeer: db.prepare(`
+    UPDATE organization_vpn_peers
+    SET public_key = ?, key_version = key_version + 1,
+      config_version = config_version + 1, desired_state = 'enabled',
+      applied_state = 'enabled', last_error_code = NULL, revoked_at = NULL,
+      updated_at = ?
+    WHERE device_id = ? AND public_key = ?
+  `),
+  updateOrganizationVpnPeerHandshake: db.prepare(`
+    UPDATE organization_vpn_peers
+    SET last_handshake_at = ?, updated_at = ?
+    WHERE device_id = ?
   `),
   listOrganizationOwnerRecipients: db.prepare(`
     SELECT DISTINCT user.email, user.name
@@ -1094,10 +1282,10 @@ const statements = {
       id, transaction_id, purchaser_type, reseller_id, reseller_registration_id,
       organization_id, organization_user_id,
       plan_id, plan_code, plan_name,
-      router_limit, max_devices, duration_days, amount, currency, country, msisdn,
+      router_limit, max_devices, device_limit_mode, duration_days, amount, currency, country, msisdn,
       customer_name, payment_type, status, fulfillment_status, access_token_hash,
       created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'XOF', 'NE', ?, ?, ?, 'pending', 'pending', ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'XOF', 'NE', ?, ?, ?, 'pending', 'pending', ?, ?, ?)
   `),
   findPaymentOrderById: db.prepare("SELECT * FROM payment_orders WHERE id = ?"),
   findPaymentOrderByTransaction: db.prepare("SELECT * FROM payment_orders WHERE transaction_id = ?"),
@@ -1366,6 +1554,195 @@ async function vpnHubRequest(pathname, body) {
   return payload;
 }
 
+function requireInstallationId(body) {
+  const installationId = String(body?.installation_id ?? body?.installationId ?? "").trim();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(installationId)) {
+    throw new HttpError(400, "Identifiant d'installation invalide.", {
+      code: "INSTALLATION_ID_INVALID"
+    });
+  }
+  return installationId.toLowerCase();
+}
+
+function requireVpnPublicKey(body, field = "public_key") {
+  const publicKey = String(body?.[field] ?? body?.publicKey ?? "").trim();
+  if (!/^[A-Za-z0-9+/]{43}=$/.test(publicKey)) {
+    throw new HttpError(400, "ClÃ© publique WireGuard invalide.", {
+      code: "VPN_PUBLIC_KEY_INVALID"
+    });
+  }
+  return publicKey;
+}
+
+function normalizeDevicePlatform(value) {
+  const platform = String(value ?? "windows").trim().toLowerCase();
+  if (!['windows', 'macos', 'linux'].includes(platform)) {
+    throw new HttpError(400, "Plateforme d'appareil invalide.", {
+      code: "DEVICE_PLATFORM_INVALID"
+    });
+  }
+  return platform;
+}
+
+function organizationDeviceResponse(record) {
+  const lastSeenMs = Date.parse(record.last_seen_at ?? "");
+  const inactivityMs = Number.isFinite(lastSeenMs) ? Date.now() - lastSeenMs : Number.POSITIVE_INFINITY;
+  const effectiveStatus = record.status === "revoked"
+    ? "revoked"
+    : inactivityMs > 30 * DAY_MS
+      ? "stale"
+      : inactivityMs > 5 * 60_000
+        ? "offline"
+        : "active";
+  return {
+    id: record.id,
+    installation_id: record.installation_id,
+    name: record.name,
+    platform: record.platform,
+    os_version: record.os_version ?? null,
+    app_version: record.app_version,
+    status: effectiveStatus,
+    is_current: false,
+    last_seen_at: record.last_seen_at,
+    created_at: record.created_at,
+    revoked_at: record.revoked_at ?? null,
+    vpn: record.peer_id ? {
+      gateway_id: record.gateway_id,
+      assigned_address: record.vpn_ip ?? null,
+      key_version: Number(record.key_version),
+      config_version: Number(record.config_version),
+      desired_state: record.desired_state,
+      applied_state: record.applied_state,
+      last_handshake_at: record.last_handshake_at ?? null,
+      last_error_code: record.last_error_code ?? null
+    } : null
+  };
+}
+
+let vpnReconciliationRunning = false;
+
+function managedOrganizationDeviceResources(organizationId) {
+  return new Set(
+    statements.listOrganizationDevices
+      .all(organizationId)
+      .filter((device) => device.status !== "revoked")
+      .map((device) => `device:${device.id}`)
+  );
+}
+
+async function revokeUnmanagedOrganizationOperatorPeers(organizationId, actual = null) {
+  const managedResources = managedOrganizationDeviceResources(organizationId);
+  const hubState = actual ?? await vpnHubRequest("/v1/peers/list", {
+    account_id: organizationId
+  });
+  for (const peer of Array.isArray(hubState.peers) ? hubState.peers : []) {
+    if (peer.peer_type !== "operator" || peer.status !== "active"
+      || managedResources.has(peer.resource_id)) {
+      continue;
+    }
+    await vpnHubRequest("/v1/peers", {
+      account_id: organizationId,
+      action: "revoke",
+      name: peer.name || "Ancien appareil TicketPro",
+      peer_type: "operator",
+      public_key: peer.public_key,
+      resource_id: peer.resource_id
+    });
+  }
+  return hubState;
+}
+
+async function reconcileOrganizationVpnPeers() {
+  if (vpnReconciliationRunning) return;
+  vpnReconciliationRunning = true;
+  try {
+    const peers = statements.listOrganizationVpnPeersForReconciliation.all();
+    const organizationIds = new Set();
+    for (const peer of peers) {
+      organizationIds.add(peer.organization_id);
+      const subscription = currentOrganizationSubscription(peer.organization_id);
+      const subscriptionActive = organizationSubscriptionLifecycle(subscription).isActive;
+      const shouldEnable = peer.device_status === "active" && subscriptionActive;
+      const desiredState = shouldEnable ? "enabled" : "disabled";
+      if (peer.desired_state !== desiredState || peer.applied_state === "error") {
+        statements.markOrganizationVpnPeerPending.run(desiredState, nowIso(), peer.device_id);
+      }
+      try {
+        if (shouldEnable) {
+          await vpnHubRequest("/v1/tenants", {
+            account_id: peer.organization_id,
+            operator_limit: deviceLimitForHub(subscription),
+            router_limit: Number(subscription.router_limit)
+          });
+          const provisioned = await vpnHubRequest("/v1/peers", {
+            account_id: peer.organization_id,
+            action: "upsert",
+            name: peer.device_name,
+            peer_type: "operator",
+            persistent_keepalive: 25,
+            public_key: peer.public_key,
+            resource_id: `device:${peer.device_id}`
+          });
+          statements.markOrganizationVpnPeerEnabled.run(
+            provisioned.assigned_address ?? peer.vpn_ip,
+            nowIso(),
+            peer.device_id
+          );
+        } else {
+          await vpnHubRequest("/v1/peers", {
+            account_id: peer.organization_id,
+            action: peer.device_status === "revoked" ? "revoke" : "disable",
+            name: peer.device_name,
+            peer_type: "operator",
+            public_key: peer.public_key,
+            resource_id: `device:${peer.device_id}`
+          });
+          if (peer.device_status === "revoked") {
+            statements.markOrganizationVpnPeerDisabled.run(
+              peer.revoked_at ?? nowIso(), nowIso(), peer.device_id
+            );
+          } else {
+            statements.markOrganizationVpnPeerSuspended.run(nowIso(), peer.device_id);
+          }
+        }
+      } catch (error) {
+        const errorCode = shouldEnable
+          ? "VPN_RECONCILIATION_ENABLE_FAILED"
+          : "VPN_RECONCILIATION_DISABLE_FAILED";
+        statements.markOrganizationVpnPeerError.run(errorCode, nowIso(), peer.device_id);
+        if (process.env.NODE_ENV !== "test") {
+          console.error(`RÃ©conciliation VPN impossible pour ${peer.device_id}:`, error);
+        }
+      }
+    }
+    for (const organizationId of organizationIds) {
+      try {
+        const actual = await vpnHubRequest("/v1/peers/list", {
+          account_id: organizationId
+        });
+        await revokeUnmanagedOrganizationOperatorPeers(organizationId, actual);
+        const actualByResource = new Map(
+          (Array.isArray(actual.peers) ? actual.peers : []).map((peer) => [peer.resource_id, peer])
+        );
+        for (const peer of peers.filter((item) => item.organization_id === organizationId)) {
+          const runtime = actualByResource.get(`device:${peer.device_id}`);
+          statements.updateOrganizationVpnPeerHandshake.run(
+            runtime?.last_handshake_at ?? null,
+            nowIso(),
+            peer.device_id
+          );
+        }
+      } catch (error) {
+        if (process.env.NODE_ENV !== "test") {
+          console.error(`Lecture de l'état VPN impossible pour ${organizationId}:`, error);
+        }
+      }
+    }
+  } finally {
+    vpnReconciliationRunning = false;
+  }
+}
+
 async function initiateIpayPayment(order) {
   assertIpayConfigured();
   const payload = await ipayRequest("/api/sdk/v1/payments", {
@@ -1440,14 +1817,30 @@ function requireLicensedDevice(body) {
   return { activation, accountId, license };
 }
 
+function deviceLimitMode(record) {
+  return record?.device_limit_mode === "unlimited" ? "unlimited" : "limited";
+}
+
+function deviceLimitValue(record) {
+  return deviceLimitMode(record) === "unlimited"
+    ? null
+    : Math.max(1, Number(record?.max_devices ?? 1));
+}
+
+function deviceLimitForHub(record) {
+  return deviceLimitValue(record);
+}
+
 function planResponse(plan) {
+  const limitMode = deviceLimitMode(plan);
   return {
     id: plan.id,
     code: plan.code,
     name: plan.name,
     description: plan.description ?? "",
     router_limit: Number(plan.router_limit),
-    max_devices: Number(plan.max_devices),
+    device_limit_mode: limitMode,
+    max_devices: limitMode === "unlimited" ? null : Number(plan.max_devices),
     duration_days: Number(plan.duration_days),
     price_cfa: plan.price_cfa === null ? null : Number(plan.price_cfa),
     billing_period: plan.billing_period,
@@ -1684,6 +2077,8 @@ function organizationSubscriptionResponse(subscription) {
       status: "none",
       is_active: false,
       router_limit: 0,
+      device_limit_mode: "limited",
+      max_devices: 0,
       current_period_start: null,
       current_period_end: null,
       access_ends_at: null,
@@ -1697,6 +2092,7 @@ function organizationSubscriptionResponse(subscription) {
   const graceDaysRemaining = lifecycle.inGrace && lifecycle.graceEndsAt
     ? Math.max(1, Math.ceil((Date.parse(lifecycle.graceEndsAt) - Date.now()) / DAY_MS))
     : 0;
+  const limitMode = deviceLimitMode(subscription);
   return {
     id: subscription.id,
     status: lifecycle.inGrace
@@ -1706,6 +2102,8 @@ function organizationSubscriptionResponse(subscription) {
         : subscription.status === "cancelled" ? "cancelled" : "expired",
     is_active: lifecycle.isActive,
     router_limit: Number(subscription.router_limit),
+    device_limit_mode: limitMode,
+    max_devices: limitMode === "unlimited" ? null : Number(subscription.max_devices ?? 1),
     current_period_start: subscription.current_period_start,
     current_period_end: subscription.current_period_end,
     access_ends_at: lifecycle.accessEndsAt,
@@ -2397,6 +2795,7 @@ function createStandardLicenseFromPlan(plan, label, notes) {
 }
 
 function paymentOrderResponse(order, includeLicenseKey = false) {
+  const limitMode = deviceLimitMode(order);
   return {
     order_id: order.id,
     transaction_id: order.transaction_id,
@@ -2406,7 +2805,8 @@ function paymentOrderResponse(order, includeLicenseKey = false) {
       code: order.plan_code,
       name: order.plan_name,
       router_limit: Number(order.router_limit),
-      max_devices: Number(order.max_devices),
+      device_limit_mode: limitMode,
+      max_devices: limitMode === "unlimited" ? null : Number(order.max_devices),
       duration_days: Number(order.duration_days),
       price_cfa: Number(order.amount)
     },
@@ -2515,6 +2915,8 @@ function processVerifiedPayment(request, order, payment) {
           current.plan_code,
           current.plan_name,
           Number(current.router_limit),
+          Number(current.max_devices),
+          deviceLimitMode(current),
           Number(current.amount),
           startsAt,
           endsAt,
@@ -3184,6 +3586,7 @@ async function createIpayOrder(
     plan.name,
     Number(plan.router_limit),
     Number(plan.max_devices),
+    deviceLimitMode(plan),
     Number(plan.duration_days),
     amount,
     normalizeNigerMsisdn(body.msisdn),
@@ -3344,6 +3747,8 @@ const handlers = [
         SAAS_TRIAL_PLAN_CODE,
         "Essai gratuit 7 jours",
         SAAS_TRIAL_ROUTER_LIMIT,
+        1,
+        "limited",
         0,
         createdAt,
         expiresAt,
@@ -3500,6 +3905,8 @@ const handlers = [
         license.plan_code ?? "LEGACY",
         license.plan_name ?? "Abonnement migré",
         Number(license.router_limit),
+        Number(license.max_devices ?? 1),
+        Number(license.max_devices ?? 1) >= 100_000 ? "unlimited" : "limited",
         Number(license.price_cfa ?? 0),
         license.activated_at ?? createdAt,
         license.expires_at,
@@ -4813,7 +5220,7 @@ const handlers = [
     });
     const tenant = await vpnHubRequest("/v1/tenants", {
       account_id: organization.id,
-      operator_limit: 1_000,
+      operator_limit: deviceLimitForHub(subscription),
       router_limit: Number(subscription.router_limit)
     });
     logEvent(request, null, "saas_vpn_bootstrapped", organization.id, null, {
@@ -4825,6 +5232,337 @@ const handlers = [
       server_port: tenant.server_port,
       server_public_key: tenant.server_public_key
     };
+  }),
+
+  route("POST", "/v1/saas/devices/register", async (request, body) => {
+    if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. RÃ©essayez plus tard.");
+    const { organization, subscription, user } = requireOrganizationPermission(request, "global.vpn", {
+      requireActiveSubscription: true
+    });
+    const installationId = requireInstallationId(body);
+    const publicKey = requireVpnPublicKey(body);
+    const name = String(body.name ?? "").trim();
+    const platform = normalizeDevicePlatform(body.platform);
+    const osVersion = String(body.os_version ?? body.osVersion ?? "").trim() || null;
+    const appVersion = String(body.app_version ?? body.appVersion ?? "").trim();
+    if (!name || name.length > 200 || !appVersion || appVersion.length > 64
+      || (osVersion && osVersion.length > 200)) {
+      throw new HttpError(400, "Informations de l'appareil invalides.", {
+        code: "DEVICE_METADATA_INVALID"
+      });
+    }
+
+    let device = statements.findOrganizationDeviceByInstallation.get(organization.id, installationId);
+    const maxDevices = deviceLimitValue(subscription);
+    const now = nowIso();
+    if (!device) {
+      const registeredCount = Number(
+        statements.countOrganizationRegisteredDevices.get(organization.id).count
+      );
+      if (maxDevices !== null && registeredCount >= maxDevices) {
+        const replacementDeviceId = typeof body.replacement_device_id === "string"
+          ? body.replacement_device_id.trim()
+          : "";
+        if (!replacementDeviceId) {
+          throw new HttpError(409, "La limite d'appareils de votre abonnement est atteinte.", {
+            code: "DEVICE_LIMIT_REACHED",
+            active_count: registeredCount,
+            max_devices: maxDevices
+          });
+        }
+        const replacedDevice = statements.findOrganizationDeviceById.get(
+          organization.id,
+          replacementDeviceId
+        );
+        if (!replacedDevice || replacedDevice.status === "revoked") {
+          throw new HttpError(404, "L'appareil à remplacer est introuvable.", {
+            code: "REPLACEMENT_DEVICE_NOT_FOUND"
+          });
+        }
+        const replacedPeer = statements.findOrganizationVpnPeerByDevice.get(
+          organization.id,
+          replacedDevice.id
+        );
+        if (replacedPeer) {
+          await vpnHubRequest("/v1/peers", {
+            account_id: organization.id,
+            action: "revoke",
+            name: replacedDevice.name,
+            peer_type: "operator",
+            public_key: replacedPeer.public_key,
+            resource_id: `device:${replacedDevice.id}`
+          });
+          statements.markOrganizationVpnPeerDisabled.run(now, now, replacedDevice.id);
+        }
+        statements.revokeOrganizationDevice.run(now, now, organization.id, replacedDevice.id);
+        logEvent(request, null, "saas_device_replaced", organization.id, null, {
+          new_installation_id_hash: hash(installationId),
+          replaced_device_id: replacedDevice.id,
+          organization_user_id: user.id
+        });
+      }
+      statements.insertOrganizationDevice.run(
+        crypto.randomUUID(), organization.id, user.id, installationId, name,
+        platform, osVersion, appVersion, now, now, now
+      );
+      device = statements.findOrganizationDeviceByInstallation.get(organization.id, installationId);
+    }
+    if (!device) throw new HttpError(500, "Impossible d'enregistrer cet appareil.");
+    if (device.status === "revoked") {
+      throw new HttpError(409, "Cet appareil a Ã©tÃ© rÃ©voquÃ©.", {
+        code: "DEVICE_REVOKED",
+        device_id: device.id
+      });
+    }
+    statements.touchOrganizationDevice.run(
+      name, platform, osVersion, appVersion, now, now, organization.id, device.id
+    );
+    device = statements.findOrganizationDeviceById.get(organization.id, device.id);
+
+    let vpnPeer = statements.findOrganizationVpnPeerByDevice.get(organization.id, device.id);
+    if (vpnPeer && vpnPeer.public_key !== publicKey) {
+      throw new HttpError(409, "La clÃ© VPN de cet appareil a changÃ©. Une rotation explicite est requise.", {
+        code: "DEVICE_KEY_ROTATION_REQUIRED",
+        device_id: device.id,
+        key_version: Number(vpnPeer.key_version)
+      });
+    }
+    if (!vpnPeer) {
+      statements.insertOrganizationVpnPeer.run(
+        crypto.randomUUID(), device.id, publicKey, now, now
+      );
+      vpnPeer = statements.findOrganizationVpnPeerByDevice.get(organization.id, device.id);
+      if (!vpnPeer) {
+        throw new HttpError(409, "Cette clÃ© VPN appartient dÃ©jÃ  Ã  un autre appareil.", {
+          code: "VPN_PUBLIC_KEY_ALREADY_REGISTERED"
+        });
+      }
+    }
+    statements.markOrganizationVpnPeerPending.run("enabled", now, device.id);
+
+    let tenant;
+    let provisioned;
+    try {
+      tenant = await vpnHubRequest("/v1/tenants", {
+        account_id: organization.id,
+        operator_limit: maxDevices,
+        router_limit: Number(subscription.router_limit)
+      });
+      await revokeUnmanagedOrganizationOperatorPeers(organization.id);
+      provisioned = await vpnHubRequest("/v1/peers", {
+        account_id: organization.id,
+        action: "upsert",
+        name,
+        peer_type: "operator",
+        persistent_keepalive: 25,
+        public_key: publicKey,
+        resource_id: `device:${device.id}`
+      });
+    } catch (error) {
+      statements.markOrganizationVpnPeerError.run("VPN_HUB_PROVISIONING_FAILED", nowIso(), device.id);
+      throw error;
+    }
+    statements.markOrganizationVpnPeerEnabled.run(
+      provisioned.assigned_address, nowIso(), device.id
+    );
+    vpnPeer = statements.findOrganizationVpnPeerByDevice.get(organization.id, device.id);
+    const joinedDevice = statements.listOrganizationDevices
+      .all(organization.id)
+      .find((item) => item.id === device.id);
+    if (!joinedDevice) throw new HttpError(500, "Impossible de relire cet appareil.");
+    logEvent(request, null, "saas_device_registered", organization.id, null, {
+      device_id: device.id,
+      installation_id_hash: hash(installationId),
+      key_version: Number(vpnPeer.key_version),
+      organization_user_id: user.id
+    });
+    return {
+      device: organizationDeviceResponse(joinedDevice),
+      active_device_count: Number(
+        statements.countOrganizationRegisteredDevices.get(organization.id).count
+      ),
+      device_limit_mode: deviceLimitMode(subscription),
+      max_devices: maxDevices,
+      vpn: {
+        address: provisioned.assigned_address,
+        allowed_ips: [tenant.address_pool],
+        config_version: Number(vpnPeer.config_version),
+        endpoint: tenant.server_endpoint,
+        gateway_id: vpnPeer.gateway_id,
+        gateway_public_key: tenant.server_public_key,
+        persistent_keepalive: 25,
+        port: tenant.server_port
+      }
+    };
+  }),
+
+  route("GET", "/v1/saas/devices", async (request) => {
+    const { organization } = requireOrganizationPermission(request, "global.vpn");
+    const subscription = currentOrganizationSubscription(organization.id);
+    return {
+      devices: statements.listOrganizationDevices.all(organization.id).map(organizationDeviceResponse),
+      active_count: Number(
+        statements.countOrganizationRegisteredDevices.get(organization.id).count
+      ),
+      device_limit_mode: deviceLimitMode(subscription),
+      max_devices: deviceLimitValue(subscription)
+    };
+  }),
+
+  route("POST", "/v1/saas/devices/heartbeat", async (request, body) => {
+    const { organization } = requireOrganizationPermission(request, "global.vpn");
+    const installationId = requireInstallationId(body);
+    const appVersion = String(body.app_version ?? body.appVersion ?? "").trim();
+    if (!appVersion || appVersion.length > 64) {
+      throw new HttpError(400, "Version d'application invalide.");
+    }
+    const device = statements.findOrganizationDeviceByInstallation.get(organization.id, installationId);
+    if (!device) throw new HttpError(404, "Appareil introuvable.", { code: "DEVICE_NOT_FOUND" });
+    const now = nowIso();
+    statements.heartbeatOrganizationDevice.run(appVersion, now, now, organization.id, device.id);
+    const subscription = currentOrganizationSubscription(organization.id);
+    return {
+      ok: true,
+      device_id: device.id,
+      status: device.status,
+      vpn_access: device.status !== "revoked"
+        && organizationSubscriptionLifecycle(subscription).isActive
+    };
+  }),
+
+  route("POST", "/v1/saas/devices/rotate-key", async (request, body) => {
+    if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. Réessayez plus tard.");
+    const { organization, subscription, user } = requireOrganizationPermission(request, "global.vpn", {
+      requireActiveSubscription: true
+    });
+    const installationId = requireInstallationId(body);
+    const previousPublicKey = requireVpnPublicKey({ public_key: body.previous_public_key });
+    const newPublicKey = requireVpnPublicKey({ public_key: body.public_key });
+    if (previousPublicKey === newPublicKey) {
+      throw new HttpError(400, "La nouvelle clé doit être différente de l'ancienne.", {
+        code: "VPN_KEY_ROTATION_REQUIRES_NEW_KEY"
+      });
+    }
+    const device = statements.findOrganizationDeviceByInstallation.get(
+      organization.id,
+      installationId
+    );
+    if (!device || device.status === "revoked") {
+      throw new HttpError(404, "Appareil actif introuvable.", { code: "DEVICE_NOT_FOUND" });
+    }
+    let vpnPeer = statements.findOrganizationVpnPeerByDevice.get(organization.id, device.id);
+    if (!vpnPeer) throw new HttpError(404, "Pair VPN introuvable.", { code: "VPN_PEER_NOT_FOUND" });
+    const alreadyRotated = vpnPeer.public_key === newPublicKey;
+    if (!alreadyRotated && vpnPeer.public_key !== previousPublicKey) {
+      throw new HttpError(409, "La clé VPN active a changé. Actualisez l'appareil avant de réessayer.", {
+        code: "VPN_KEY_VERSION_CONFLICT",
+        key_version: Number(vpnPeer.key_version)
+      });
+    }
+    const conflictingPeer = statements.findOrganizationVpnPeerByPublicKey.get(newPublicKey);
+    if (conflictingPeer && conflictingPeer.device_id !== device.id) {
+      throw new HttpError(409, "Cette clé VPN appartient déjà à un autre appareil.", {
+        code: "VPN_PUBLIC_KEY_ALREADY_REGISTERED"
+      });
+    }
+
+    const maxDevices = deviceLimitValue(subscription);
+    const tenant = await vpnHubRequest("/v1/tenants", {
+      account_id: organization.id,
+      operator_limit: maxDevices,
+      router_limit: Number(subscription.router_limit)
+    });
+    statements.markOrganizationVpnPeerPending.run("enabled", nowIso(), device.id);
+    let provisioned;
+    try {
+      provisioned = await vpnHubRequest("/v1/peers", {
+        account_id: organization.id,
+        action: alreadyRotated ? "upsert" : "rotate",
+        name: device.name,
+        peer_type: "operator",
+        persistent_keepalive: 25,
+        previous_public_key: alreadyRotated ? undefined : previousPublicKey,
+        public_key: newPublicKey,
+        resource_id: `device:${device.id}`
+      });
+    } catch (error) {
+      statements.markOrganizationVpnPeerError.run("VPN_KEY_ROTATION_FAILED", nowIso(), device.id);
+      throw error;
+    }
+    if (!alreadyRotated) {
+      statements.rotateOrganizationVpnPeer.run(
+        newPublicKey,
+        nowIso(),
+        device.id,
+        previousPublicKey
+      );
+    }
+    statements.markOrganizationVpnPeerEnabled.run(
+      provisioned.assigned_address ?? vpnPeer.vpn_ip,
+      nowIso(),
+      device.id
+    );
+    vpnPeer = statements.findOrganizationVpnPeerByDevice.get(organization.id, device.id);
+    const joinedDevice = statements.listOrganizationDevices
+      .all(organization.id)
+      .find((item) => item.id === device.id);
+    logEvent(request, null, "saas_device_vpn_key_rotated", organization.id, null, {
+      device_id: device.id,
+      key_version: Number(vpnPeer.key_version),
+      organization_user_id: user.id,
+      previous_public_key_hash: hash(previousPublicKey),
+      public_key_hash: hash(newPublicKey)
+    });
+    return {
+      device: organizationDeviceResponse(joinedDevice),
+      active_device_count: Number(
+        statements.countOrganizationRegisteredDevices.get(organization.id).count
+      ),
+      device_limit_mode: deviceLimitMode(subscription),
+      max_devices: maxDevices,
+      vpn: {
+        address: provisioned.assigned_address ?? vpnPeer.vpn_ip,
+        allowed_ips: [tenant.address_pool],
+        config_version: Number(vpnPeer.config_version),
+        endpoint: tenant.server_endpoint,
+        gateway_id: vpnPeer.gateway_id,
+        gateway_public_key: tenant.server_public_key,
+        persistent_keepalive: 25,
+        port: tenant.server_port
+      }
+    };
+  }),
+
+  route("POST", "/v1/saas/devices/revoke", async (request, body) => {
+    if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. RÃ©essayez plus tard.");
+    const { organization, user } = requireOrganizationPermission(request, "global.vpn");
+    const deviceId = requireText(body, "device_id", 200);
+    const device = statements.findOrganizationDeviceById.get(organization.id, deviceId);
+    if (!device) throw new HttpError(404, "Appareil introuvable.", { code: "DEVICE_NOT_FOUND" });
+    const vpnPeer = statements.findOrganizationVpnPeerByDevice.get(organization.id, device.id);
+    if (!vpnPeer) throw new HttpError(404, "Pair VPN introuvable.", { code: "VPN_PEER_NOT_FOUND" });
+    const now = nowIso();
+    statements.markOrganizationVpnPeerPending.run("disabled", now, device.id);
+    try {
+      await vpnHubRequest("/v1/peers", {
+        account_id: organization.id,
+        action: "revoke",
+        name: device.name,
+        peer_type: "operator",
+        public_key: vpnPeer.public_key,
+        resource_id: `device:${device.id}`
+      });
+    } catch (error) {
+      statements.markOrganizationVpnPeerError.run("VPN_HUB_REVOCATION_FAILED", nowIso(), device.id);
+      throw error;
+    }
+    statements.revokeOrganizationDevice.run(now, now, organization.id, device.id);
+    statements.markOrganizationVpnPeerDisabled.run(now, now, device.id);
+    logEvent(request, null, "saas_device_revoked", organization.id, null, {
+      device_id: device.id,
+      organization_user_id: user.id
+    });
+    return { ok: true, device_id: device.id, status: "revoked" };
   }),
 
   route("POST", "/v1/saas/vpn/peers", async (request, body) => {
@@ -4900,7 +5638,9 @@ const handlers = [
             public_key: peer.public_key,
             resource_id: peer.resource_id ?? `legacy:${hash(peer.public_key)}`,
             revoked_at: peer.revoked_at ?? null,
-            status: peer.status === "revoked" ? "revoked" : "active"
+            status: ["active", "disabled", "revoked"].includes(peer.status)
+              ? peer.status
+              : "disabled"
           }))
         : []
     };
@@ -4990,11 +5730,18 @@ const handlers = [
     const isActive = body.is_active !== false;
     const isReseller = Boolean(body.is_reseller);
     const existing = statements.findPlanById.get(planId);
-    // Conservé uniquement pour la compatibilité des anciennes licences.
-    // Les abonnements SaaS n'ont aucune limite de PC.
-    const maxDevices = isReseller
-      ? requireInteger(body, "max_devices", 1, 100_000)
-      : Number(existing?.max_devices ?? 100_000);
+    const requestedLimitMode = String(
+      body.device_limit_mode ?? existing?.device_limit_mode ?? "limited"
+    ).trim().toLowerCase();
+    if (!isReseller && !["limited", "unlimited"].includes(requestedLimitMode)) {
+      throw new HttpError(400, "device_limit_mode invalide.");
+    }
+    const limitMode = isReseller ? "limited" : requestedLimitMode;
+    const maxDevices = limitMode === "unlimited"
+      ? Math.max(1, Number(existing?.max_devices ?? 1))
+      : body.max_devices === undefined
+        ? Math.max(1, Number(existing?.max_devices ?? 1))
+        : requireInteger(body, "max_devices", 1, 100_000);
     const priceCfa = body.price_cfa === null || body.price_cfa === undefined
       ? null
       : requireInteger(body, "price_cfa", 1, 1_000_000_000);
@@ -5012,6 +5759,7 @@ const handlers = [
       body.description ? String(body.description).slice(0, 2000) : null,
       routerLimit,
       maxDevices,
+      limitMode,
       durationDays,
       priceCfa,
       billingPeriod,
@@ -5357,6 +6105,12 @@ const handlers = [
     };
   }),
 
+  route("POST", "/v1/admin/vpn/reconcile", async (request) => {
+    requireMaster(request);
+    await reconcileOrganizationVpnPeers();
+    return { ok: true };
+  }),
+
   route("POST", "/v1/admin/licenses/activations", async (request, body) => {
     requireMaster(request);
     const licenseId = requireText(body, "license_id", 128);
@@ -5419,6 +6173,9 @@ server.listen(PORT, HOST, () => {
   void processSubscriptionNotifications().catch((error) =>
     console.error("Traitement initial des relances d'abonnement impossible:", error)
   );
+  void reconcileOrganizationVpnPeers().catch((error) =>
+    console.error("Reconciliation VPN initiale impossible:", error)
+  );
 });
 
 const subscriptionNotificationTimer = setInterval(() => {
@@ -5427,3 +6184,12 @@ const subscriptionNotificationTimer = setInterval(() => {
   );
 }, SUBSCRIPTION_NOTIFICATION_INTERVAL_MS);
 subscriptionNotificationTimer.unref();
+
+const vpnReconciliationTimer = setInterval(() => {
+  void reconcileOrganizationVpnPeers().catch((error) =>
+    console.error("Reconciliation VPN planifiee impossible:", error)
+  );
+}, Number.isFinite(VPN_RECONCILIATION_INTERVAL_MS) && VPN_RECONCILIATION_INTERVAL_MS >= 1_000
+  ? VPN_RECONCILIATION_INTERVAL_MS
+  : 60_000);
+vpnReconciliationTimer.unref();

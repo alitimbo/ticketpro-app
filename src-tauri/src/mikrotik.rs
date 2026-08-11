@@ -97,7 +97,8 @@ fn execute_once(request: &MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
         .map_err(|error| format!("timeout: write timeout unavailable: {error}"))?;
 
     if request.use_ssl {
-        let connector = TlsConnector::new().map_err(|error| format!("api ssl: TLS indisponible: {error}"))?;
+        let connector =
+            TlsConnector::new().map_err(|error| format!("api ssl: TLS indisponible: {error}"))?;
         let mut stream = ApiStream::Tls(
             connector
                 .connect(&request.host, stream)
@@ -110,7 +111,10 @@ fn execute_once(request: &MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
     }
 }
 
-fn execute_session<S: Read + Write>(stream: &mut S, request: &MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
+fn execute_session<S: Read + Write>(
+    stream: &mut S,
+    request: &MikroTikApiRequest,
+) -> Result<Vec<ApiRow>, String> {
     send_sentence(
         stream,
         &[

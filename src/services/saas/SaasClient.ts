@@ -19,6 +19,8 @@ export type SaasSubscription = {
   is_active: boolean;
   is_trial: boolean;
   router_limit: number;
+  device_limit_mode: "limited" | "unlimited";
+  max_devices: number | null;
   current_period_start: string | null;
   current_period_end: string | null;
   access_ends_at: string | null;
@@ -96,6 +98,54 @@ export type SaasRouterAccessPolicyHistoryEntry = {
   router_id: string;
   changed_by_user_id: string;
   changed_at: string;
+};
+
+export type SaasDevice = {
+  id: string;
+  installation_id: string;
+  name: string;
+  platform: "windows" | "macos" | "linux" | "unknown";
+  os_version: string | null;
+  app_version: string;
+  status: "active" | "offline" | "stale" | "revoked";
+  is_current: boolean;
+  vpn: {
+    gateway_id: string;
+    assigned_address: string | null;
+    key_version: number;
+    config_version: number;
+    desired_state: "enabled" | "disabled";
+    applied_state: "enabled" | "disabled" | "pending" | "error";
+    last_handshake_at: string | null;
+    last_error_code: string | null;
+  } | null;
+  last_seen_at: string | null;
+  created_at: string;
+  revoked_at: string | null;
+};
+
+export type SaasDeviceRegistration = {
+  active_device_count: number;
+  device: SaasDevice;
+  device_limit_mode: "limited" | "unlimited";
+  max_devices: number | null;
+  vpn: {
+    address: string;
+    allowed_ips: string[];
+    config_version: number;
+    endpoint: string;
+    gateway_id: string;
+    gateway_public_key: string;
+    persistent_keepalive: number;
+    port: number;
+  };
+};
+
+export type SaasDeviceInventory = {
+  active_count: number;
+  devices: SaasDevice[];
+  device_limit_mode: "limited" | "unlimited";
+  max_devices: number | null;
 };
 
 export type SaasRouterRecoverySnapshot = {
@@ -424,6 +474,86 @@ export async function revokeSaasVpnPeer(input: {
     },
     token
   );
+}
+
+export async function registerSaasDevice(input: {
+  installationId: string;
+  publicKey: string;
+  name: string;
+  platform: "windows" | "macos" | "linux";
+  osVersion?: string;
+  appVersion: string;
+  replacementDeviceId?: string;
+}): Promise<SaasDeviceRegistration> {
+  const token = await requireSessionToken();
+  return request(
+    "/v1/saas/devices/register",
+    {
+      installation_id: input.installationId,
+      public_key: input.publicKey,
+      name: input.name,
+      platform: input.platform,
+      os_version: input.osVersion,
+      app_version: input.appVersion,
+      replacement_device_id: input.replacementDeviceId
+    },
+    token
+  );
+}
+
+export async function heartbeatSaasDevice(input: {
+  installationId: string;
+  appVersion: string;
+}): Promise<{ ok: boolean; device_id: string; status: SaasDevice["status"]; vpn_access: boolean }> {
+  const token = await requireSessionToken();
+  return request(
+    "/v1/saas/devices/heartbeat",
+    {
+      installation_id: input.installationId,
+      app_version: input.appVersion
+    },
+    token
+  );
+}
+
+export async function listSaasDevices(): Promise<SaasDevice[]> {
+  return (await getSaasDeviceInventory()).devices;
+}
+
+export async function getSaasDeviceInventory(): Promise<SaasDeviceInventory> {
+  const token = await requireSessionToken();
+  return request<SaasDeviceInventory>(
+    "/v1/saas/devices",
+    undefined,
+    token,
+    "GET"
+  );
+}
+
+export async function rotateCurrentSaasDeviceKey(input: {
+  installationId: string;
+  previousPublicKey: string;
+  publicKey: string;
+}): Promise<SaasDeviceRegistration> {
+  const token = await requireSessionToken();
+  return request(
+    "/v1/saas/devices/rotate-key",
+    {
+      installation_id: input.installationId,
+      previous_public_key: input.previousPublicKey,
+      public_key: input.publicKey
+    },
+    token
+  );
+}
+
+export async function revokeSaasDevice(deviceId: string): Promise<{
+  ok: boolean;
+  device_id: string;
+  status: "revoked";
+}> {
+  const token = await requireSessionToken();
+  return request("/v1/saas/devices/revoke", { device_id: deviceId }, token);
 }
 
 export async function rotateSaasVpnPeer(input: {

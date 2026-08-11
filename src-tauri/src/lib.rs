@@ -3,6 +3,7 @@ mod files;
 mod licensing;
 mod mikrotik;
 mod printing;
+mod vpn;
 mod wireguard;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -36,6 +37,15 @@ pub fn run() {
             mikrotik::mikrotik_api_call,
             printing::print_file,
             printing::print_list_printers,
+            vpn::vpn_apply_config,
+            vpn::vpn_abort_identity_rotation,
+            vpn::vpn_commit_identity_rotation,
+            vpn::vpn_connect,
+            vpn::vpn_disconnect,
+            vpn::vpn_ensure_identity,
+            vpn::vpn_provider_status,
+            vpn::vpn_prepare_identity_rotation,
+            vpn::vpn_repair,
             wireguard::wireguard_available,
             wireguard::wireguard_install,
             wireguard::wireguard_list_ticketpro_tunnels,

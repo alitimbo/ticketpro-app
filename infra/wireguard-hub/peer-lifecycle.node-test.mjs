@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  isIdempotentActivePeer,
+  isPeerLimitReached,
   revokeDuplicateActivePeers,
   selectActivePeersToReplace
 } from "./peer-lifecycle.mjs";
@@ -35,6 +37,26 @@ test("les doublons historiques sont révoqués sans effacer leur historique", ()
   assert.equal(peers.length, 3);
   assert.equal(peers[0].status, "active");
   assert.equal(peers[1].revoked_at, "2026-08-03T12:00:00Z");
+});
+
+test("un pair actif existant reste idempotent même si la limite a ensuite baissé", () => {
+  const existing = peer("device-key", "operator", "device:pc-1", "10.250.0.5/32");
+  assert.equal(isIdempotentActivePeer(existing, {
+    peerType: "operator",
+    publicKey: "device-key",
+    resourceId: "device:pc-1"
+  }), true);
+  assert.equal(isIdempotentActivePeer(existing, {
+    peerType: "operator",
+    publicKey: "another-key",
+    resourceId: "device:pc-2"
+  }), false);
+});
+
+test("une limite opérateur nulle autorise le mode illimité", () => {
+  assert.equal(isPeerLimitReached(100_000, null), false);
+  assert.equal(isPeerLimitReached(5, 5), true);
+  assert.equal(isPeerLimitReached(4, 5), false);
 });
 
 function peer(publicKey, peerType, resourceId, assignedAddress) {

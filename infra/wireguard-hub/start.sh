@@ -14,6 +14,13 @@ else
   rm -f /tmp/wg0-stripped.conf
 fi
 
+# `wg syncconf` restaure la configuration cryptographique mais ne remonte pas
+# une interface existante qui a ete laissee administrativement DOWN (par
+# exemple apres un redemarrage du VPS ou un ancien arret incomplet). Sans cette
+# instruction, le hub conserve ses peers et son port tout en ignorant les
+# handshakes entrants.
+ip link set dev wg0 up
+
 if [ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)" != "1" ]; then
   echo "net.ipv4.ip_forward doit être activé sur le VPS" >&2
   exit 1

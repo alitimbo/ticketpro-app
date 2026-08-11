@@ -45,8 +45,8 @@ mod platform {
     use std::path::Path;
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Graphics::Printing::{
-        EnumPrintersW, GetDefaultPrinterW, PRINTER_INFO_4W, PRINTER_ENUM_CONNECTIONS,
-        PRINTER_ENUM_LOCAL,
+        EnumPrintersW, GetDefaultPrinterW, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL,
+        PRINTER_INFO_4W,
     };
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
@@ -153,7 +153,10 @@ mod platform {
     }
 
     fn wide(value: &str) -> Vec<u16> {
-        OsStr::new(value).encode_wide().chain(std::iter::once(0)).collect()
+        OsStr::new(value)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
     }
 
     unsafe fn wide_string(pointer: windows_sys::core::PWSTR) -> Option<String> {

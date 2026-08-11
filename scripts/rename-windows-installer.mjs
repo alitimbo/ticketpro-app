@@ -5,6 +5,7 @@ import { join } from "node:path";
 const packageJson = JSON.parse(await readFile("package.json", "utf8"));
 const version = packageJson.version;
 const installerName = `TicketPro-Setup-${version}-x64.exe`;
+const tauriInstallerName = `TicketPro_${version}_x64-setup.exe`;
 const candidateDirectories = [
   join("src-tauri", "target", "x86_64-pc-windows-msvc", "release", "bundle", "nsis"),
   join("src-tauri", "target", "release", "bundle", "nsis")
@@ -13,9 +14,10 @@ const candidateDirectories = [
 for (const directory of candidateDirectories) {
   try {
     const files = await readdir(directory);
-    const generatedInstaller = files.includes(installerName)
-      ? installerName
-      : files.find((file) => file.toLowerCase().endsWith("-setup.exe"));
+    const generatedInstaller = files.includes(tauriInstallerName)
+      ? tauriInstallerName
+      : files.find((file) => file !== installerName && file.toLowerCase().endsWith("-setup.exe"))
+        ?? (files.includes(installerName) ? installerName : undefined);
 
     if (generatedInstaller) {
       const installerPath = join(directory, installerName);

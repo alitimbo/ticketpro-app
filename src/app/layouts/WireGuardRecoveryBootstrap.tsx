@@ -6,29 +6,43 @@ import {
 } from "../../services/database";
 import { WireGuardOperatorRecoveryService } from "../../services/recovery";
 import { bootstrapSaasVpn } from "../../services/saas";
+import { EmbeddedVpnProvisioningService } from "../../services/vpn";
 
 const recoveredAccounts = new Set<string>();
 
 export function WireGuardRecoveryBootstrap() {
-  const { accountSession, session } = useAuth();
+  const { accountSession, saasAccount, session } = useAuth();
   const { database, isInitialized } = useAppDatabase();
   const accountId = accountSession?.accountId ?? session?.account_id ?? null;
   const canUseVpn = Boolean(session?.permissions.includes("global.vpn"));
 
   useEffect(() => {
     if (!accountId || !session || !isInitialized || !canUseVpn) return;
-    if (recoveredAccounts.has(accountId)) return;
+    const recoveryKey = `${accountId}:${saasAccount?.organization.id ?? "legacy"}`;
+    if (recoveredAccounts.has(recoveryKey)) return;
     const scopedAccountId = accountId;
-    recoveredAccounts.add(scopedAccountId);
+    const provisioning = new EmbeddedVpnProvisioningService();
+    let heartbeatTimer: number | null = null;
+    let disposed = false;
+    recoveredAccounts.add(recoveryKey);
 
     void recoverExistingTunnel()
+      .then((embedded) => {
+        if (!embedded || disposed) return;
+        heartbeatTimer = window.setInterval(() => {
+          void provisioning.heartbeatCurrent().catch(() => undefined);
+        }, 120_000);
+      })
       .catch(() => {
         // Une panne réseau ou un refus temporaire sera retenté après une
         // reconnexion ou au chargement explicite de la page VPN.
-        recoveredAccounts.delete(scopedAccountId);
+        recoveredAccounts.delete(recoveryKey);
       });
 
-    async function recoverExistingTunnel() {
+    async function recoverExistingTunnel(): Promise<boolean> {
+      const embedded = await provisioning.ensureConnected();
+      if (embedded.state !== "SKIPPED") return true;
+
       const networks = new VpnNetworkRepository(database);
       let network = await networks.findByAccount(scopedAccountId);
       if (!network) {
@@ -47,8 +61,15 @@ export function WireGuardRecoveryBootstrap() {
         });
       }
       await new WireGuardOperatorRecoveryService(database, scopedAccountId).recover(network);
+      return false;
     }
-  }, [accountId, canUseVpn, database, isInitialized, session]);
+
+    return () => {
+      disposed = true;
+      if (heartbeatTimer !== null) window.clearInterval(heartbeatTimer);
+      recoveredAccounts.delete(recoveryKey);
+    };
+  }, [accountId, canUseVpn, database, isInitialized, saasAccount?.organization.id, session?.account_id]);
 
   return null;
 }

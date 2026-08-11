@@ -471,7 +471,9 @@ fn tunnel_ipv4_address(tunnel_name: &str) -> Option<String> {
     }
     String::from_utf8_lossy(&output.stdout)
         .split_whitespace()
-        .map(|token| token.trim_matches(|character: char| !character.is_ascii_digit() && character != '.'))
+        .map(|token| {
+            token.trim_matches(|character: char| !character.is_ascii_digit() && character != '.')
+        })
         .find(|candidate| is_ipv4_address(candidate))
         .map(ToOwned::to_owned)
 }
@@ -509,9 +511,6 @@ mod tests {
 
     #[test]
     fn builds_the_wireguard_windows_service_name() {
-        assert_eq!(
-            tunnel_service_name("tp-demo"),
-            "WireGuardTunnel$tp-demo"
-        );
+        assert_eq!(tunnel_service_name("tp-demo"), "WireGuardTunnel$tp-demo");
     }
 }

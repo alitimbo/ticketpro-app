@@ -27,7 +27,9 @@ Le serveur WireGuard ne reçoit jamais les clés privées des routeurs ou des op
 Chaque pair possède un `resource_id` stable : identifiant du routeur ou identifiant unique du poste opérateur. Le hub sérialise les mutations d'un même compte et refuse deux clés actives pour la même ressource.
 
 - `upsert` crée une clé ou retourne la même configuration lors d'une répétition identique ; il refuse de remplacer silencieusement une autre clé active.
-- `rotate` exige `previous_public_key`, retire d'abord l'ancienne clé de `wg0`, conserve son historique comme révoqué, puis active la nouvelle clé avec la même adresse.
+- `rotate` exige `previous_public_key`, retire d'abord l'ancienne clé de `wg0`, conserve son historique comme révoqué, puis active la nouvelle clé avec la même adresse. Une nouvelle installation reçoit en revanche une adresse jamais attribuée auparavant dans le tenant.
+- `disable` retire le pair de `wg0` sans libérer son adresse et autorise sa
+  réactivation après renouvellement de l'abonnement.
 - `revoke` retire immédiatement la clé de `wg0`. Une clé révoquée ne peut jamais être réactivée.
 - `POST /v1/peers/list` expose l'état réel `connected`, `disconnected` ou `revoked` ainsi que la date du dernier handshake.
 

@@ -41,6 +41,10 @@ Routes principales :
 - `GET /v1/saas/services/access`
 - `POST /v1/saas/vpn/bootstrap`
 - `POST /v1/saas/vpn/peers`
+- `POST /v1/saas/devices/register`
+- `GET /v1/saas/devices`
+- `POST /v1/saas/devices/heartbeat`
+- `POST /v1/saas/devices/revoke`
 - `POST /v1/saas/migrate-license`
 - `GET /v1/saas/team`
 - `POST /v1/saas/team/members`
@@ -106,6 +110,18 @@ le jeton d'activation et la preuve cryptographique de l'appareil. L'identifiant
 interne du tenant est l'identifiant de licence, ce qui permet aux PC autorisés
 d'une même organisation de rejoindre le même réseau isolé. Aucun jeton WireGuard
 administrateur ou tenant n'est renvoyé à l'application.
+
+Les installations desktop SaaS sont persistées dans SQLite avec un
+`installation_id` idempotent. La table `organization_vpn_peers` conserve la
+clé publique, l'IP allouée, la version de clé et les états `desired/applied` ;
+elle ne contient jamais la clé privée. Une boucle de réconciliation applique
+ces états au hub chaque minute et peut être déclenchée manuellement par
+`POST /v1/admin/vpn/reconcile` avec le jeton maître.
+
+Un abonnement payé reste actif pendant sa grâce de sept jours. Après cette
+grâce, les peers desktop sont `disabled` sans révoquer leur identité. Un
+renouvellement réactive donc la même clé et la même IP. La route de révocation
+d'un appareil utilise au contraire l'état définitif `revoked`.
 
 ## Comptes propriétaires initiaux
 
@@ -201,6 +217,26 @@ Le revendeur ne reçoit jamais les comptes, jetons d’appareil, identifiants de
 ## Créer une offre
 
 `POST /v1/admin/plans` utilise une session `owner` ou `admin`. Pour une offre revendeur, ajouter `"is_reseller": true`.
+
+Pour un forfait SaaS, `device_limit_mode` vaut `limited` ou `unlimited`. En mode
+`limited`, `max_devices` est obligatoire. En mode `unlimited`, l'API renvoie
+`max_devices: null`; chaque PC garde malgré tout sa propre identité et sa propre
+adresse WireGuard.
+
+```json
+{
+  "id": "business-unlimited",
+  "code": "BUSINESS-UNLIMITED",
+  "name": "Business Illimité",
+  "router_limit": 50,
+  "device_limit_mode": "unlimited",
+  "duration_days": 30,
+  "price_cfa": 50000,
+  "billing_period": "monthly",
+  "is_reseller": false,
+  "is_active": true
+}
+```
 
 ```bash
 curl -X POST https://license.ticketpro.example/v1/admin/plans \

@@ -4,9 +4,12 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import {
+  isIdempotentActivePeer,
+  isPeerLimitReached,
   revokeDuplicateActivePeers,
   selectActivePeersToReplace
 } from "./peer-lifecycle.mjs";
+import { buildTenantFirewallCommands } from "./tenant-firewall.mjs";
 
 const execFileAsync = promisify(execFile);
 const port = Number(process.env.HUB_PORT ?? 8788);
@@ -38,6 +41,7 @@ const server = http.createServer(async (request, response) => {
   if (request.method === "GET" && request.url === "/health") {
     try {
       await runWireGuard(["show", interfaceName]);
+      await assertWireGuardInterfaceUp();
       json(response, 200, {
         interface: interfaceName,
         status: "ok",
@@ -56,7 +60,7 @@ const server = http.createServer(async (request, response) => {
       const accountId = requireAccountId(body);
       const tenant = tenants[accountId] ?? createTenant();
       tenant.router_limit = normalizeLimit(body.router_limit, tenant.router_limit ?? 1);
-      tenant.operator_limit = normalizeLimit(body.operator_limit, tenant.operator_limit ?? 1);
+      tenant.operator_limit = normalizeOptionalLimit(body.operator_limit, tenant.operator_limit ?? 1);
       tenants[accountId] = tenant;
       await persistTenants();
       await syncTenantFirewall();
@@ -103,7 +107,7 @@ const server = http.createServer(async (request, response) => {
       if (!tenant) throw new HubError(404, "tenant_not_found");
       requireTenantOrMaster(request, accountId);
       validatePublicKey(body.public_key);
-      if (!["upsert", "revoke", "rotate"].includes(body.action)) {
+      if (!["upsert", "disable", "revoke", "rotate"].includes(body.action)) {
         throw new HubError(400, "invalid_action");
       }
       const result = await withPeerMutationLock(accountId, () =>
@@ -146,7 +150,7 @@ function upgradeTenantData() {
     }
     revokeDuplicateActivePeers(tenant.peers);
     tenant.router_limit = normalizeLimit(tenant.router_limit, 1);
-    tenant.operator_limit = normalizeLimit(tenant.operator_limit, 1);
+    tenant.operator_limit = normalizeOptionalLimit(tenant.operator_limit, 1);
   }
   revokeCrossTenantDuplicateKeys();
 }
@@ -176,6 +180,22 @@ async function mutatePeer(accountId, tenant, body) {
     return { account_id: accountId, public_key: publicKey, resource_id: resourceId, status: "revoked" };
   }
 
+  if (body.action === "disable") {
+    await runWireGuard(["set", interfaceName, "peer", publicKey, "remove"]);
+    if (existing && existing.status !== "revoked") {
+      existing.status = "disabled";
+      existing.disabled_at = new Date().toISOString();
+    }
+    await saveWireGuardConfig();
+    await persistTenants();
+    return {
+      account_id: accountId,
+      public_key: publicKey,
+      resource_id: resourceId,
+      status: existing?.status === "revoked" ? "revoked" : "disabled"
+    };
+  }
+
   if (existing?.status === "revoked") {
     throw new HubError(409, "revoked_key_cannot_be_reactivated");
   }
@@ -185,12 +205,7 @@ async function mutatePeer(accountId, tenant, body) {
   );
   if (usedByAnotherTenant) throw new HubError(409, "public_key_already_registered");
 
-  if (
-    body.action === "rotate"
-    && existing?.status === "active"
-    && existing.peer_type === peerType
-    && existing.resource_id === resourceId
-  ) {
+  if (isIdempotentActivePeer(existing, { peerType, publicKey, resourceId })) {
     return {
       account_id: accountId,
       address_pool: tenant.address_pool,
@@ -244,7 +259,9 @@ async function mutatePeer(accountId, tenant, body) {
     && item.status === "active"
   ).length;
   const limit = peerType === "operator" ? tenant.operator_limit : tenant.router_limit;
-  if (activeOfType >= limit) throw new HubError(409, `${peerType}_peer_limit_reached`);
+  if (isPeerLimitReached(activeOfType, limit)) {
+    throw new HubError(409, `${peerType}_peer_limit_reached`);
+  }
 
   await runWireGuard([
     "set", interfaceName, "peer", publicKey,
@@ -252,6 +269,7 @@ async function mutatePeer(accountId, tenant, body) {
     "persistent-keepalive", String(normalizeKeepalive(body.persistent_keepalive))
   ]);
   peer.status = "active";
+  peer.disabled_at = null;
   peer.revoked_at = null;
   if (!existing) tenant.peers.push(peer);
   await saveWireGuardConfig();
@@ -314,6 +332,9 @@ function peerRuntimeState(peer, latestHandshakes) {
   if (peer.status === "revoked") {
     return { connection_status: "revoked", last_handshake_at: null };
   }
+  if (peer.status !== "active") {
+    return { connection_status: "disconnected", last_handshake_at: null };
+  }
   const timestamp = latestHandshakes.get(peer.public_key) ?? 0;
   const connected = timestamp > 0 && timestamp * 1_000 >= Date.now() - 180_000;
   return {
@@ -363,7 +384,9 @@ function allocatePeerAddress(tenant) {
   const network = parseCidr(tenant.address_pool);
   const used = new Set(
     tenant.peers
-      .filter((peer) => peer.status === "active")
+      // Une adresse reste attachée à l'historique du pair, même révoqué.
+      // Une rotation de clé réutilise explicitement l'adresse du même device,
+      // tandis qu'un nouvel appareil reçoit toujours une IP encore jamais vue.
       .map((peer) => peer.assigned_address)
   );
   const hostCount = 2 ** (32 - network.prefix);
@@ -375,17 +398,16 @@ function allocatePeerAddress(tenant) {
 }
 
 async function syncTenantFirewall() {
-  await runIptables(["-N", "TICKETPRO-WG"], true);
-  await runIptables(["-F", "TICKETPRO-WG"]);
-  for (const tenant of Object.values(tenants)) {
-    await runIptables(["-A", "TICKETPRO-WG", "-s", tenant.address_pool, "-d", tenant.address_pool, "-j", "ACCEPT"]);
-  }
-  await runIptables(["-A", "TICKETPRO-WG", "-j", "DROP"]);
-  const jump = ["FORWARD", "-i", interfaceName, "-o", interfaceName, "-j", "TICKETPRO-WG"];
-  try {
-    await runIptables(["-C", ...jump]);
-  } catch {
-    await runIptables(["-I", ...jump]);
+  for (const command of buildTenantFirewallCommands(tenants, interfaceName)) {
+    if (command.fallbackArgs) {
+      try {
+        await runIptables(command.args);
+      } catch {
+        await runIptables(command.fallbackArgs);
+      }
+    } else {
+      await runIptables(command.args, command.ignoreFailure);
+    }
   }
 }
 
@@ -513,6 +535,21 @@ function intToIpv4(value) {
 
 async function runWireGuard(args) {
   await execFileAsync("wg", args, { timeout: 10_000 });
+}
+
+function normalizeOptionalLimit(value, fallback) {
+  if (value === null) return null;
+  return normalizeLimit(value, fallback === null ? 1 : fallback);
+}
+
+async function assertWireGuardInterfaceUp() {
+  const { stdout } = await execFileAsync(
+    "ip",
+    ["-o", "link", "show", "dev", interfaceName],
+    { timeout: 10_000 }
+  );
+  const flags = stdout.match(/<([^>]*)>/)?.[1]?.split(",") ?? [];
+  if (!flags.includes("UP")) throw new Error("wireguard_interface_down");
 }
 
 async function saveWireGuardConfig() {

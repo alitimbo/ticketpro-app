@@ -50,6 +50,7 @@ import {
   RouterStateReconciliationService,
   WireGuardOperatorRecoveryService
 } from "../../services/recovery";
+import { SecureConnectionPanel } from "./SecureConnectionPanel";
 
 type NetworkForm = {
   name: string;
@@ -109,6 +110,7 @@ export function VpnPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
   const [operation, setOperation] = useState<VpnOperation | null>(null);
+  const [vpnProvider, setVpnProvider] = useState<"EMBEDDED" | "LEGACY">("EMBEDDED");
   const operationRef = useRef<VpnOperation | null>(null);
   const bootstrapAccountRef = useRef<string | null>(null);
   const operatorRecoveryRef = useRef<string | null>(null);
@@ -820,6 +822,8 @@ export function VpnPage() {
       {message ? <div className="notice notice--success">{message}</div> : null}
       {error ? <div className="notice notice--error">{error}</div> : null}
 
+      <SecureConnectionPanel onProviderChange={setVpnProvider} />
+
       <Card
         actions={network ? <Badge status="success">Connecté</Badge> : <Badge status="warning">En attente</Badge>}
         className="vpn-server-card"
@@ -890,7 +894,7 @@ export function VpnPage() {
               </Button>
             </div>
           </Card>
-          <Card className="span-6 vpn-provision-card" title="Ajouter un poste opérateur" description="Le démarrage du tunnel valide automatiquement les routeurs en attente.">
+          {vpnProvider === "LEGACY" ? <Card className="span-6 vpn-provision-card" title="Ajouter un poste opérateur" description="Le démarrage du tunnel valide automatiquement les routeurs en attente.">
             <div className="vpn-provision-card__body">
               <label className="vpn-form-field">
                 <span className="vpn-field-label"><Monitor aria-hidden="true" /> Nom du poste</span>
@@ -909,7 +913,7 @@ export function VpnPage() {
                 {operation?.kind === "create-operator" ? "Création en cours…" : "Créer le profil WireGuard"}
               </Button>
             </div>
-          </Card>
+          </Card> : null}
         </div>
       )}
 

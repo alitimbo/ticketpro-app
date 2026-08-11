@@ -24,6 +24,8 @@ let ipayServer;
 let hubServer;
 const ipayPayments = new Map();
 const hubRequests = [];
+const hubPeerAddresses = new Map();
+let nextHubOperatorAddress = 3;
 
 async function api(pathname, { method = "POST", token, body, headers = {} } = {}) {
   const response = await fetch(`${baseUrl}${pathname}`, {
@@ -143,12 +145,25 @@ before(async () => {
       }));
       return;
     }
+    const resourceId = String(body.resource_id ?? "");
+    let assignedAddress = null;
+    if (!["disable", "revoke"].includes(body.action)) {
+      if (resourceId.startsWith("device:")) {
+        if (!hubPeerAddresses.has(resourceId)) {
+          hubPeerAddresses.set(resourceId, `10.250.7.${nextHubOperatorAddress}/32`);
+          nextHubOperatorAddress += 1;
+        }
+        assignedAddress = hubPeerAddresses.get(resourceId);
+      } else {
+        assignedAddress = "10.250.7.2/32";
+      }
+    }
     response.end(JSON.stringify({
       account_id: body.account_id,
       address_pool: "10.250.7.0/24",
-      assigned_address: body.action === "revoke" ? null : "10.250.7.2/32",
+      assigned_address: assignedAddress,
       public_key: body.public_key,
-      status: body.action === "revoke" ? "revoked" : "active"
+      status: body.action === "revoke" ? "revoked" : body.action === "disable" ? "disabled" : "active"
     }));
   });
   await new Promise((resolve) => hubServer.listen(hubPort, "127.0.0.1", resolve));
@@ -808,6 +823,149 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
   assert.equal(hubRequests.at(-1).body.account_id, completion.payload.organization.id);
   assert.equal(hubRequests.at(-1).body.router_limit, plan.router_limit);
 
+  const desktopInstallationId = "123e4567-e89b-42d3-a456-426614174000";
+  const desktopPublicKey = "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE=";
+  const registeredDesktop = await api("/v1/saas/devices/register", {
+    token: sessionToken,
+    body: {
+      installation_id: desktopInstallationId,
+      public_key: desktopPublicKey,
+      name: "HP EliteBook Integration",
+      platform: "windows",
+      os_version: "Windows 11",
+      app_version: "0.2.3"
+    }
+  });
+  assert.equal(registeredDesktop.status, 200);
+  assert.equal(registeredDesktop.payload.vpn.address, "10.250.7.3/32");
+  assert.equal(registeredDesktop.payload.vpn.endpoint, "vpn.integration.test");
+  assert.deepEqual(registeredDesktop.payload.vpn.allowed_ips, ["10.250.7.0/24"]);
+  assert.equal(hubRequests.at(-1).body.peer_type, "operator");
+  assert.match(hubRequests.at(-1).body.resource_id, /^device:/);
+  assert.ok(hubRequests.some((entry) =>
+    entry.url === "/v1/peers"
+    && entry.body.action === "revoke"
+    && entry.body.resource_id === "operator:pc-recupere"
+  ));
+
+  const registeredDesktopAgain = await api("/v1/saas/devices/register", {
+    token: sessionToken,
+    body: {
+      installation_id: desktopInstallationId,
+      public_key: desktopPublicKey,
+      name: "HP EliteBook Integration",
+      platform: "windows",
+      os_version: "Windows 11",
+      app_version: "0.2.3"
+    }
+  });
+  assert.equal(registeredDesktopAgain.status, 200);
+  assert.equal(registeredDesktopAgain.payload.device.id, registeredDesktop.payload.device.id);
+
+  const deviceLimitReached = await api("/v1/saas/devices/register", {
+    token: sessionToken,
+    body: {
+      installation_id: "223e4567-e89b-42d3-a456-426614174111",
+      public_key: "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG=",
+      name: "Deuxième PC refusé",
+      platform: "windows",
+      app_version: "0.2.4"
+    }
+  });
+  assert.equal(deviceLimitReached.status, 409);
+  assert.equal(deviceLimitReached.payload.details.code, "DEVICE_LIMIT_REACHED");
+  assert.equal(deviceLimitReached.payload.details.max_devices, 1);
+
+  const changedDesktopKey = await api("/v1/saas/devices/register", {
+    token: sessionToken,
+    body: {
+      installation_id: desktopInstallationId,
+      public_key: "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF=",
+      name: "HP EliteBook Integration",
+      platform: "windows",
+      app_version: "0.2.3"
+    }
+  });
+  assert.equal(changedDesktopKey.status, 409);
+  assert.equal(changedDesktopKey.payload.details.code, "DEVICE_KEY_ROTATION_REQUIRED");
+
+  const rotatedDesktopKey = await api("/v1/saas/devices/rotate-key", {
+    token: sessionToken,
+    body: {
+      installation_id: desktopInstallationId,
+      previous_public_key: desktopPublicKey,
+      public_key: "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF="
+    }
+  });
+  assert.equal(rotatedDesktopKey.status, 200);
+  assert.equal(rotatedDesktopKey.payload.device.vpn.key_version, 2);
+  assert.equal(rotatedDesktopKey.payload.device.vpn.config_version, 2);
+  assert.equal(hubRequests.at(-1).body.action, "rotate");
+
+  const retriedDesktopRotation = await api("/v1/saas/devices/rotate-key", {
+    token: sessionToken,
+    body: {
+      installation_id: desktopInstallationId,
+      previous_public_key: desktopPublicKey,
+      public_key: "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF="
+    }
+  });
+  assert.equal(retriedDesktopRotation.status, 200);
+  assert.equal(retriedDesktopRotation.payload.device.vpn.key_version, 2);
+
+  const deviceHeartbeat = await api("/v1/saas/devices/heartbeat", {
+    token: sessionToken,
+    body: {
+      installation_id: desktopInstallationId,
+      app_version: "0.2.3"
+    }
+  });
+  assert.equal(deviceHeartbeat.status, 200);
+
+  const devicesBeforeRevocation = await api("/v1/saas/devices", {
+    method: "GET",
+    token: sessionToken
+  });
+  assert.equal(devicesBeforeRevocation.status, 200);
+  assert.equal(devicesBeforeRevocation.payload.devices.length, 1);
+  assert.equal(devicesBeforeRevocation.payload.active_count, 1);
+  assert.equal(devicesBeforeRevocation.payload.max_devices, 1);
+  assert.equal(devicesBeforeRevocation.payload.devices[0].vpn.key_version, 2);
+  assert.equal(devicesBeforeRevocation.payload.devices[0].vpn.applied_state, "enabled");
+  assert.equal("public_key" in devicesBeforeRevocation.payload.devices[0].vpn, false);
+
+  const replacementDesktop = await api("/v1/saas/devices/register", {
+    token: sessionToken,
+    body: {
+      installation_id: "223e4567-e89b-42d3-a456-426614174111",
+      public_key: "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG=",
+      replacement_device_id: registeredDesktop.payload.device.id,
+      name: "PC de remplacement",
+      platform: "windows",
+      os_version: "Windows 11",
+      app_version: "0.2.4"
+    }
+  });
+  assert.equal(replacementDesktop.status, 200, JSON.stringify(replacementDesktop.payload));
+  assert.equal(replacementDesktop.payload.active_device_count, 1);
+  assert.equal(replacementDesktop.payload.max_devices, 1);
+
+  const revokedDesktop = await api("/v1/saas/devices/revoke", {
+    token: sessionToken,
+    body: { device_id: replacementDesktop.payload.device.id }
+  });
+  assert.equal(revokedDesktop.status, 200);
+  assert.equal(hubRequests.at(-1).body.action, "revoke");
+
+  const devicesAfterRevocation = await api("/v1/saas/devices", {
+    method: "GET",
+    token: sessionToken
+  });
+  assert.equal(devicesAfterRevocation.status, 200);
+  assert.equal(devicesAfterRevocation.payload.devices[0].status, "revoked");
+  assert.equal(devicesAfterRevocation.payload.devices[0].vpn.applied_state, "disabled");
+  assert.equal(devicesAfterRevocation.payload.devices[1].status, "revoked");
+
   const saasPeer = await api("/v1/saas/vpn/peers", {
     token: sessionToken,
     body: {
@@ -887,6 +1045,46 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
   });
   assert.equal(loginAfterReset.status, 200);
 
+  const renewalDesktopPublicKey = "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH=";
+  const renewalDesktop = await api("/v1/saas/devices/register", {
+    token: loginAfterReset.payload.session.token,
+    body: {
+      installation_id: "223e4567-e89b-42d3-a456-426614174000",
+      public_key: renewalDesktopPublicKey,
+      name: "PC renouvellement",
+      platform: "windows",
+      app_version: "0.2.3"
+    }
+  });
+  assert.equal(renewalDesktop.status, 200, JSON.stringify(renewalDesktop.payload));
+
+  const unlimitedDb = new DatabaseSync(databasePath);
+  unlimitedDb.prepare(`
+    UPDATE organization_subscriptions
+    SET device_limit_mode = 'unlimited', updated_at = ?
+    WHERE organization_id = ? AND status = 'active'
+  `).run(new Date().toISOString(), completion.payload.organization.id);
+  unlimitedDb.close();
+
+  const unlimitedDesktop = await api("/v1/saas/devices/register", {
+    token: loginAfterReset.payload.session.token,
+    body: {
+      installation_id: "323e4567-e89b-42d3-a456-426614174222",
+      public_key: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII=",
+      name: "PC supplémentaire illimité",
+      platform: "windows",
+      app_version: "0.2.5"
+    }
+  });
+  assert.equal(unlimitedDesktop.status, 200, JSON.stringify(unlimitedDesktop.payload));
+  assert.equal(unlimitedDesktop.payload.device_limit_mode, "unlimited");
+  assert.equal(unlimitedDesktop.payload.max_devices, null);
+  assert.equal(unlimitedDesktop.payload.active_device_count, 2);
+  assert.equal(
+    hubRequests.findLast((entry) => entry.url === "/v1/tenants")?.body.operator_limit,
+    null
+  );
+
   const integrationDb = new DatabaseSync(databasePath);
   integrationDb.prepare(`
     UPDATE organization_subscriptions
@@ -914,6 +1112,17 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
   assert.equal(graceAccount.payload.subscription.is_active, true);
   assert.equal(graceAccount.payload.subscription.grace_days_remaining, 7);
 
+  const graceReconciliation = await api("/v1/admin/vpn/reconcile", {
+    token: masterToken,
+    body: {}
+  });
+  assert.equal(graceReconciliation.status, 200);
+  assert.ok(hubRequests.some((item) =>
+    item.url === "/v1/peers"
+    && item.body.public_key === renewalDesktopPublicKey
+    && item.body.action === "upsert"
+  ));
+
   const expiredDb = new DatabaseSync(databasePath);
   expiredDb.prepare(`
     UPDATE organization_subscriptions
@@ -932,6 +1141,30 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
   });
   assert.equal(expiredServices.status, 402);
   assert.equal(expiredServices.payload.details.code, "SUBSCRIPTION_REQUIRED");
+
+  const expiredReconciliation = await api("/v1/admin/vpn/reconcile", {
+    token: masterToken,
+    body: {}
+  });
+  assert.equal(expiredReconciliation.status, 200);
+  assert.ok(hubRequests.some((item) =>
+    item.url === "/v1/peers"
+    && item.body.public_key === renewalDesktopPublicKey
+    && item.body.action === "disable"
+  ));
+
+  const suspendedDevices = await api("/v1/saas/devices", {
+    method: "GET",
+    token: loginAfterReset.payload.session.token
+  });
+  assert.equal(suspendedDevices.status, 200);
+  const suspendedDesktop = suspendedDevices.payload.devices.find(
+    (device) => device.id === renewalDesktop.payload.device.id
+  );
+  assert.equal(suspendedDesktop.status, "active");
+  assert.equal(suspendedDesktop.vpn.desired_state, "disabled");
+  assert.equal(suspendedDesktop.vpn.applied_state, "disabled");
+  assert.equal(suspendedDesktop.revoked_at, null);
 
   const expiredAccountStillAccessible = await api("/v1/saas/auth/me", {
     method: "GET",
@@ -1006,6 +1239,24 @@ test("authentification, licences, paiements iPay et crédits revendeur restent c
     }
   });
   assert.equal(organizationPlan.status, 200);
+
+  const unlimitedOrganizationPlan = await api("/v1/admin/plans", {
+    token: adminToken,
+    body: {
+      id: "integration-organization-unlimited",
+      code: "INTEGRATION-ORG-UNLIMITED",
+      name: "Organisation illimitée",
+      router_limit: 20,
+      device_limit_mode: "unlimited",
+      duration_days: 30,
+      price_cfa: 25000,
+      billing_period: "monthly",
+      is_reseller: false
+    }
+  });
+  assert.equal(unlimitedOrganizationPlan.status, 200);
+  assert.equal(unlimitedOrganizationPlan.payload.plan.device_limit_mode, "unlimited");
+  assert.equal(unlimitedOrganizationPlan.payload.plan.max_devices, null);
 
   const invalidPricelessPlan = await api("/v1/admin/plans", {
     token: adminToken,

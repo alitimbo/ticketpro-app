@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "architecture": "x86_64",
+  "wireguardWindows": {
+    "repository": "https://git.zx2c4.com/wireguard-windows",
+    "commit": "4e6726c23ae9c5cb58e0c9910f3b7515621d133d",
+    "component": "embeddable-dll-service/tunnel.dll",
+    "sha256": "439D93D593170C6B81C92F4627CFC9B4788C53C01A71658E5215BB1CE300D8BE",
+    "signed": false
+  },
+  "wireguardNt": {
+    "version": "1.1",
+    "download": "https://download.wireguard.com/wireguard-nt/wireguard-nt-1.1.zip",
+    "archiveSha256": "DCEB30A9BC4BE48CCE0F74160FC88A585A2C2627366E8F846FC6658F9038DACE",
+    "component": "bin/amd64/wireguard.dll",
+    "sha256": "B1B85E072C45D81358BE29D94C599DC76652F912BE8C0F0A41E2D5D89A6461D3",
+    "authenticodeSigner": "WireGuard LLC"
+  }
+}

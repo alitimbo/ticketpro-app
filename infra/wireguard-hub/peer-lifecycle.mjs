@@ -13,6 +13,20 @@ export function selectActivePeersToReplace(
   );
 }
 
+export function isIdempotentActivePeer(existing, { peerType, publicKey, resourceId }) {
+  return Boolean(
+    existing
+    && existing.status === "active"
+    && existing.peer_type === peerType
+    && existing.public_key === publicKey
+    && existing.resource_id === resourceId
+  );
+}
+
+export function isPeerLimitReached(activePeerCount, limit) {
+  return limit !== null && activePeerCount >= limit;
+}
+
 export function revokeDuplicateActivePeers(peers, revokedAt = new Date().toISOString()) {
   const activePeers = peers
     .filter((peer) => peer.status === "active")

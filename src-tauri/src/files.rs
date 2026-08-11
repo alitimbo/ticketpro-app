@@ -47,7 +47,10 @@ fn managed_path(app: &AppHandle, relative_path: &str) -> Result<(PathBuf, String
 
     if path.is_absolute()
         || path.components().any(|component| {
-            matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_))
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
         })
     {
         return Err("Chemin de fichier invalide.".to_string());
@@ -94,10 +97,7 @@ pub fn file_write_bytes(
 }
 
 #[tauri::command]
-pub fn file_metadata(
-    app: AppHandle,
-    relative_path: String,
-) -> Result<ManagedFileMetadata, String> {
+pub fn file_metadata(app: AppHandle, relative_path: String) -> Result<ManagedFileMetadata, String> {
     let (path, normalized) = managed_path(&app, &relative_path)?;
     let metadata = fs::metadata(&path).ok();
 
@@ -161,7 +161,10 @@ pub fn file_export_to_downloads(
         return Err("Fichier introuvable.".to_string());
     }
 
-    let downloads = app.path().download_dir().map_err(|error| error.to_string())?;
+    let downloads = app
+        .path()
+        .download_dir()
+        .map_err(|error| error.to_string())?;
     let export_directory = downloads.join("TicketPro");
     fs::create_dir_all(&export_directory).map_err(|error| error.to_string())?;
     let original_name = source
