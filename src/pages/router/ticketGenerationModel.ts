@@ -273,8 +273,42 @@ export function createBatchId(): string {
   return `batch-${crypto.randomUUID()}`;
 }
 
-export function buildFileName(batchId: string): string {
-  return `tickets-${batchId}.pdf`;
+export function buildFileName(input: {
+  batchId: string;
+  generatedAt?: Date;
+  planName: string;
+  priceCfa: number | null;
+  quantity: number;
+  routerName: string;
+}): string {
+  const generatedAt = input.generatedAt ?? new Date();
+  const timestamp = generatedAt
+    .toISOString()
+    .replace(/[-:]/g, "")
+    .replace("T", "-")
+    .slice(0, 15);
+  const batchSuffix = sanitizeFileSegment(input.batchId.replace(/^batch-/, "")).slice(0, 8) || "lot";
+  const price = input.priceCfa === null ? "prix-non-defini" : `${Math.max(0, Math.round(input.priceCfa))}CFA`;
+
+  return [
+    sanitizeFileSegment(input.routerName) || "Routeur",
+    sanitizeFileSegment(input.planName) || "Plan",
+    price,
+    `${Math.max(1, Math.round(input.quantity))}tickets`,
+    timestamp,
+    batchSuffix
+  ].join("-") + ".pdf";
+}
+
+function sanitizeFileSegment(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/[-_.]{2,}/g, "-")
+    .replace(/^[-_.]+|[-_.]+$/g, "")
+    .slice(0, 48);
 }
 
 export function buildTicketPdfInput(input: {

@@ -45,7 +45,7 @@ import {
   type PrintPaperFormat,
   type PrintSettings
 } from "../../services/printing";
-import { Badge, Button, Card, FilterButton, PageHeader, StatCard } from "../../shared/ui";
+import { AsyncStateCard, Badge, Button, Card, FilterButton, PageHeader, StatCard } from "../../shared/ui";
 import type { AppStatus, IconComponent } from "../../shared/ui";
 import {
   buildFileName,
@@ -92,6 +92,8 @@ const stepLabels = [
   "Résultat"
 ] as const;
 
+type RouterCatalogStatus = "loading" | "ready" | "error";
+
 export function TicketGenerationPage() {
   const { routerId = "routeur-demo" } = useParams();
   const { session } = useAuth();
@@ -109,7 +111,7 @@ export function TicketGenerationPage() {
   const [ownerPhone, setOwnerPhone] = useState<string | null>(null);
   const [displaySettings, setDisplaySettings] = useState<TicketDisplaySettings>(defaultTicketDisplaySettings);
   const [isGenerating, setIsGenerating] = useState(false);
-  const [isCatalogLoading, setIsCatalogLoading] = useState(false);
+  const [catalogStatus, setCatalogStatus] = useState<RouterCatalogStatus>("loading");
   const [printers, setPrinters] = useState<LocalPrinter[]>([]);
   const [printSettings, setPrintSettings] = useState<PrintSettings>({
     economical: true,
@@ -242,6 +244,7 @@ export function TicketGenerationPage() {
     void prepareRouterService().catch((preparationError) => {
       if (mounted) {
         setPersistedRouterService(null);
+        setCatalogStatus("error");
         setError(preparationError instanceof Error ? preparationError.message : "Connexion au routeur indisponible.");
       }
     });
@@ -252,13 +255,14 @@ export function TicketGenerationPage() {
   }, [connectionRepository, isInitialized, isPersistent, routerId, routerRepository, session]);
 
   const refreshRouterCatalog = async () => {
-    setIsCatalogLoading(true);
+    setCatalogStatus("loading");
     setError(null);
+    setMessage(null);
     let catalogService: RouterService;
     try {
       catalogService = await getRouterServiceForAction();
     } catch (connectionError) {
-      setIsCatalogLoading(false);
+      setCatalogStatus("error");
       setError(connectionError instanceof Error ? connectionError.message : "Connexion au routeur indisponible.");
       return;
     }
@@ -321,13 +325,13 @@ export function TicketGenerationPage() {
             : serverStillExists ? current.selectedServerName : ""
         };
       });
+      setCatalogStatus("ready");
       setMessage(`${enabledServers.length} serveur(s) et ${livePlans.length} profil(s) relus depuis RouterOS.`);
     } catch (catalogError) {
+      setCatalogStatus("error");
       setError(catalogError instanceof Error
         ? `Impossible d'actualiser le catalogue RouterOS : ${catalogError.message}`
         : "Impossible d'actualiser le catalogue RouterOS.");
-    } finally {
-      setIsCatalogLoading(false);
     }
   };
 
@@ -436,6 +440,13 @@ export function TicketGenerationPage() {
   const goNext = () => {
     if (state.step === 5) {
       void generateTickets();
+      return;
+    }
+
+    if ((state.step === 1 || state.step === 2) && catalogStatus !== "ready") {
+      setError(catalogStatus === "loading"
+        ? "TicketPro lit encore les serveurs et profils Hotspot sur RouterOS."
+        : "Le catalogue RouterOS doit être rechargé avant de continuer.");
       return;
     }
 
@@ -687,7 +698,13 @@ export function TicketGenerationPage() {
         serverName: selectedRemoteServer,
         syncStatus
       });
-      const fileName = buildFileName(batchId);
+      const fileName = buildFileName({
+        batchId,
+        planName: selectedPlan.name,
+        priceCfa: selectedPlan.priceHint,
+        quantity: requestedQuantity,
+        routerName: selectedRouter.name
+      });
 
       if (isPersistent) await batchRepository.updateState(batch.id, batch.account_id, batch.status, syncStatus);
 
@@ -962,12 +979,24 @@ export function TicketGenerationPage() {
       {message ? <p className="form-error form-error--success">{message}</p> : null}
       {error ? <p className="form-error">{error}</p> : null}
 
-      {state.step === 1 ? (
+      {(state.step === 1 || state.step === 2) && catalogStatus !== "ready" ? (
+        <AsyncStateCard
+          description="TicketPro vérifie directement les serveurs et profils Hotspot disponibles sur le MikroTik."
+          errorDescription="Vérifiez la connexion au routeur, puis relancez la lecture."
+          errorTitle="Catalogue RouterOS indisponible"
+          loadingDescription="Récupération des serveurs Hotspot et des profils. Le formulaire apparaîtra dès que les données seront confirmées."
+          loadingTitle="Lecture de RouterOS en cours…"
+          status={catalogStatus}
+          onRetry={() => void refreshRouterCatalog()}
+          title="Préparation de la génération"
+        />
+      ) : null}
+
+      {state.step === 1 && catalogStatus === "ready" ? (
         <StepRouter routers={routers} selectedRouterId={state.selectedRouterId} onSelect={(selectedRouterId) => updateState({ selectedRouterId })} />
       ) : null}
-      {state.step === 2 ? (
+      {state.step === 2 && catalogStatus === "ready" ? (
         <StepPlan
-          isLoading={isCatalogLoading}
           onRefresh={() => void refreshRouterCatalog()}
           onSelect={(selectedPlanId) => updateState({ selectedPlanId })}
           onServerSelect={(selectedServerName) => updateState({ selectedServerName })}
@@ -1018,8 +1047,17 @@ export function TicketGenerationPage() {
           Retour
         </Button>
         {state.step < 6 ? (
-          <Button disabled={isGenerating} icon={state.step === 5 ? Ticket : ChevronRight} onClick={goNext} variant="primary">
-            {isGenerating ? "Création en cours..." : primaryActionLabel}
+          <Button
+            disabled={isGenerating || ((state.step === 1 || state.step === 2) && catalogStatus !== "ready")}
+            icon={state.step === 5 ? Ticket : ChevronRight}
+            onClick={goNext}
+            variant="primary"
+          >
+            {isGenerating
+              ? "Création en cours..."
+              : catalogStatus === "loading" && (state.step === 1 || state.step === 2)
+                ? "Lecture RouterOS…"
+                : primaryActionLabel}
           </Button>
         ) : (
           <Button
@@ -1072,27 +1110,35 @@ function StepRouter({
   return (
     <Card title="Choisir le routeur actif" description="Le lot sera créé sur le routeur sélectionné.">
       <div className="choice-grid">
-        {routers.map((router) => (
-          <button
-            className={`choice-card ${router.id === selectedRouterId ? "choice-card--selected" : ""}`}
-            key={router.id}
-            onClick={() => onSelect(router.id)}
-            type="button"
-          >
-            <strong>{router.name}</strong>
-            <span>{router.host}</span>
-            <Badge status={router.isReachable ? "success" : "offline"}>
-              {router.isReachable ? "Connecté" : "Hors ligne"}
-            </Badge>
-          </button>
-        ))}
+        {routers.map((router) => {
+          const isSelected = router.id === selectedRouterId;
+          return (
+            <button
+              aria-pressed={isSelected}
+              className={`choice-card ticket-selection-card ${isSelected ? "choice-card--selected" : ""}`}
+              key={router.id}
+              onClick={() => onSelect(router.id)}
+              type="button"
+            >
+              {isSelected ? (
+                <span className="ticket-selection-card__check" title="Routeur sélectionné">
+                  <CheckCircle2 aria-hidden="true" />
+                </span>
+              ) : null}
+              <strong>{router.name}</strong>
+              <span>{router.host}</span>
+              <Badge status={router.isReachable ? "success" : "offline"}>
+                {router.isReachable ? "Connecté" : "Hors ligne"}
+              </Badge>
+            </button>
+          );
+        })}
       </div>
     </Card>
   );
 }
 
 function StepPlan({
-  isLoading,
   onRefresh,
   onSelect,
   onServerSelect,
@@ -1101,7 +1147,6 @@ function StepPlan({
   selectedServerName,
   servers
 }: {
-  isLoading: boolean;
   onRefresh: () => void;
   onSelect: (planId: string) => void;
   onServerSelect: (serverName: string) => void;
@@ -1113,7 +1158,7 @@ function StepPlan({
   const enabledServers = servers.filter((server) => server.isEnabled);
   return (
     <Card
-      actions={<Button disabled={isLoading} icon={RefreshCw} onClick={onRefresh}>{isLoading ? "Actualisation…" : "Actualiser RouterOS"}</Button>}
+      actions={<Button icon={RefreshCw} onClick={onRefresh}>Actualiser RouterOS</Button>}
       title="Choisir le serveur et le profil"
       description="La liste provient directement du MikroTik. TicketPro la revérifiera avant la création."
     >
@@ -1139,25 +1184,34 @@ function StepPlan({
         </div>
       </div>
       <div className="choice-grid">
-        {plans.map((plan) => (
-          <button
-            className={`choice-card ${plan.id === selectedPlanId ? "choice-card--selected" : ""}`}
-            disabled={plan.status !== "active"}
-            key={plan.id}
-            onClick={() => onSelect(plan.id)}
-            type="button"
-          >
-            <strong>{plan.name}</strong>
-            <span>Profil : {plan.profileName}</span>
-            <span>{formatPlanDurationLabel(plan.durationMinutes)} · validité {formatPlanDurationLabel(plan.validityMinutes ?? plan.durationMinutes)}</span>
-            <span>Débit {plan.downloadLimit ?? "∞"} / {plan.uploadLimit ?? "∞"} · {plan.dataLimitMb ? `${plan.dataLimitMb} MB` : "Volume illimité"}</span>
-            <span>{plan.sharedUsers} appareil(s) autorisé(s)</span>
-            <span>{plan.priceHint ? `${plan.priceHint} CFA` : "Prix non défini"}</span>
-            <Badge status={plan.status === "active" ? "success" : "offline"}>
-              {plan.status === "active" ? "Actif" : "Inactif"}
-            </Badge>
-          </button>
-        ))}
+        {plans.map((plan) => {
+          const isSelected = plan.id === selectedPlanId;
+          return (
+            <button
+              aria-pressed={isSelected}
+              className={`choice-card ticket-selection-card ${isSelected ? "choice-card--selected" : ""}`}
+              disabled={plan.status !== "active"}
+              key={plan.id}
+              onClick={() => onSelect(plan.id)}
+              type="button"
+            >
+              {isSelected ? (
+                <span className="ticket-selection-card__check" title="Plan sélectionné">
+                  <CheckCircle2 aria-hidden="true" />
+                </span>
+              ) : null}
+              <strong>{plan.name}</strong>
+              <span>Profil : {plan.profileName}</span>
+              <span>{formatPlanDurationLabel(plan.durationMinutes)} · validité {formatPlanDurationLabel(plan.validityMinutes ?? plan.durationMinutes)}</span>
+              <span>Débit {plan.downloadLimit ?? "∞"} / {plan.uploadLimit ?? "∞"} · {plan.dataLimitMb ? `${plan.dataLimitMb} MB` : "Volume illimité"}</span>
+              <span>{plan.sharedUsers} appareil(s) autorisé(s)</span>
+              <span>{plan.priceHint ? `${plan.priceHint} CFA` : "Prix non défini"}</span>
+              <Badge status={plan.status === "active" ? "success" : "offline"}>
+                {plan.status === "active" ? "Actif" : "Inactif"}
+              </Badge>
+            </button>
+          );
+        })}
       </div>
     </Card>
   );
@@ -1172,16 +1226,31 @@ function StepQuantity({
 }) {
   return (
     <Card title="Choisir la quantité" description="Les quantités rapides permettent de créer un lot en quelques secondes.">
-      <div className="filter-row">
+      <div className="ticket-quantity-grid">
         {quickQuantities.map((quantity) => (
-          <FilterButton key={quantity} onClick={() => onChange({ quantity, customQuantity: String(quantity) })}>
-            {quantity}
+          <FilterButton
+            active={state.quantity === quantity}
+            aria-pressed={state.quantity === quantity}
+            className="ticket-quantity-option"
+            key={quantity}
+            onClick={() => onChange({ quantity, customQuantity: String(quantity) })}
+          >
+            <strong>{quantity}</strong>
+            <span>tickets</span>
           </FilterButton>
         ))}
-        <FilterButton onClick={() => onChange({ quantity: "custom" })}>Personnalisé</FilterButton>
+        <FilterButton
+          active={state.quantity === "custom"}
+          aria-pressed={state.quantity === "custom"}
+          className="ticket-quantity-option"
+          onClick={() => onChange({ quantity: "custom" })}
+        >
+          <strong>Autre</strong>
+          <span>quantité</span>
+        </FilterButton>
       </div>
-      <label className="form-field ticket-custom-quantity">
-        Quantité personnalisée
+      <label className={`form-field ticket-custom-quantity ${state.quantity === "custom" ? "ticket-custom-quantity--active" : ""}`}>
+        <span>Quantité personnalisée</span>
         <input
           disabled={state.quantity !== "custom"}
           inputMode="numeric"
@@ -1190,6 +1259,7 @@ function StepQuantity({
           value={state.customQuantity}
           onChange={(event) => onChange({ customQuantity: event.target.value, quantity: "custom" })}
         />
+        <small>Entre 1 et 500 tickets par lot.</small>
       </label>
     </Card>
   );

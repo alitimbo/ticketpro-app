@@ -3,6 +3,7 @@ import { protectTicketPassword, resolveTicketPasswordValue } from "../tickets";
 import {
   buildVoucherExpirationScript,
   buildVoucherLifecycleComment,
+  mergeHotspotLoginBy,
   mergeVoucherLifecycleOnLogin,
   MikroTikRouterAdapter,
   normalizeMikroTikError
@@ -16,6 +17,20 @@ class MockRouterOsTransport implements RouterOsApiTransport {
 
   async call(request: RouterOsApiRequest): Promise<RouterOsApiRow[]> {
     this.calls.push(request);
+    const hotspotRemovalTargets: Record<string, string> = {
+      "/ip/hotspot/active/remove": "/ip/hotspot/active/print",
+      "/ip/hotspot/cookie/remove": "/ip/hotspot/cookie/print",
+      "/ip/hotspot/user/profile/remove": "/ip/hotspot/user/profile/print",
+      "/ip/hotspot/user/remove": "/ip/hotspot/user/print"
+    };
+    const hotspotPrintCommand = hotspotRemovalTargets[request.command];
+    if (hotspotPrintCommand) {
+      const rows = this.responses[hotspotPrintCommand] ?? [];
+      const itemId = String(request.params?.numbers ?? "");
+      const index = rows.findIndex((row) => row[".id"] === itemId || row.id === itemId);
+      if (index >= 0) rows.splice(index, 1);
+      return [];
+    }
     if (request.command === "/ip/hotspot/ip-binding/add") {
       const rows = this.responses["/ip/hotspot/ip-binding/print"] ??= [];
       rows.push({ ".id": `*TP${rows.length + 1}`, ...request.params });
@@ -41,6 +56,7 @@ class MockRouterOsTransport implements RouterOsApiTransport {
     }
     if (
       request.command === "/ip/firewall/filter/remove"
+      || request.command === "/ip/firewall/mangle/remove"
       || request.command === "/ipv6/firewall/filter/remove"
     ) {
       const printCommand = request.command.replace(/\/remove$/, "/print");
@@ -71,7 +87,14 @@ describe("MikroTikRouterAdapter", () => {
       "/ip/hotspot/user/profile/print": [{
         ".id": "*P1",
         name: "forfait-1h",
-        "on-login": ":log info \"script-existant\";"
+        "on-login": ":log info \"script-existant\";",
+        "session-timeout": "1h"
+      }],
+      "/ip/hotspot/print": [{ name: "ticketpro-hotspot", profile: "ticketpro-hotspot-profile" }],
+      "/ip/hotspot/profile/print": [{
+        ".id": "*HP1",
+        "login-by": "http-chap,cookie",
+        name: "ticketpro-hotspot-profile"
       }],
       "/system/clock/print": [{
         date: "2026-07-30",
@@ -88,7 +111,7 @@ describe("MikroTikRouterAdapter", () => {
 
     await expect(adapter.ensureVoucherLifecycleEngine()).resolves.toEqual({
       clockReady: true,
-      engineVersion: 1,
+      engineVersion: 3,
       managedProfileCount: 1,
       schedulerEnabled: true
     });
@@ -111,6 +134,58 @@ describe("MikroTikRouterAdapter", () => {
     );
     expect(profileSource).toContain("script-existant");
     expect(profileSource.match(/TICKETPRO-LIFECYCLE-BEGIN/g)).toHaveLength(1);
+    expect(
+      transport.calls.find((call) => call.command === "/ip/hotspot/user/profile/set")?.params
+    ).toMatchObject({
+      "add-mac-cookie": "yes",
+      "mac-cookie-timeout": "1h"
+    });
+    expect(
+      transport.calls.find((call) => call.command === "/ip/hotspot/profile/set")?.params
+    ).toEqual({
+      "login-by": "http-chap,cookie,mac-cookie",
+      numbers: "*HP1"
+    });
+  });
+
+  it("met à niveau le script déjà installé sans créer de doublon", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/user/profile/print": [],
+      "/system/clock/print": [{ date: "2026-08-11", time: "12:00:00" }],
+      "/system/ntp/client/print": [{ enabled: "true", status: "synchronized" }],
+      "/system/ntp/client/servers/print": [{ address: "time.cloudflare.com" }],
+      "/system/resource/print": [{ version: "7.20.1" }],
+      "/system/scheduler/print": [{
+        ".id": "*S1",
+        comment: "TicketPro managed voucher lifecycle v1",
+        disabled: "no",
+        interval: "1m",
+        name: "ticketpro-voucher-expiration-v1",
+        "on-event": "ticketpro-voucher-expiration-v1",
+        policy: "read,write,policy,test",
+        "start-time": "startup"
+      }],
+      "/system/script/print": [{
+        ".id": "*SC1",
+        comment: "TicketPro managed voucher lifecycle v1",
+        name: "ticketpro-voucher-expiration-v1",
+        policy: "read,write,policy,test",
+        source: ":log info \"ancienne version\";"
+      }]
+    });
+
+    await createAdapter(transport).ensureVoucherLifecycleEngine();
+
+    expect(transport.calls.filter((call) => call.command === "/system/script/add")).toHaveLength(0);
+    expect(transport.calls.find((call) => call.command === "/system/script/set")?.params).toMatchObject({
+      comment: "TicketPro managed voucher lifecycle v3",
+      numbers: "*SC1",
+      source: expect.stringContaining("/ip hotspot user remove $tpId")
+    });
+    expect(transport.calls.find((call) => call.command === "/system/scheduler/set")?.params).toMatchObject({
+      comment: "TicketPro managed voucher lifecycle v3",
+      numbers: "*S1"
+    });
   });
 
   it("encode la validite et remplace seulement le bloc TicketPro", () => {
@@ -125,7 +200,21 @@ describe("MikroTikRouterAdapter", () => {
     expect(
       mergeVoucherLifecycleOnLogin("ancien-script", new Set(["ancien-script"]))
     ).toContain('/system script run "ancien-script";');
-    expect(buildVoucherExpirationScript()).toContain("state=expired");
+    const expirationScript = buildVoucherExpirationScript();
+    expect(expirationScript).toContain("/ip hotspot active remove");
+    expect(expirationScript).toContain("/ip hotspot cookie remove");
+    expect(expirationScript).toContain("/ip hotspot user remove $tpId");
+    expect(expirationScript).toContain("time-consumed");
+    expect(expirationScript).toContain("quota-consumed");
+    expect(expirationScript).not.toContain("disabled=yes");
+  });
+
+  it("active cookie et mac-cookie sans retirer les méthodes Hotspot existantes", () => {
+    expect(mergeHotspotLoginBy("http-pap,cookie")).toBe("http-pap,cookie,mac-cookie");
+    expect(mergeHotspotLoginBy("mac-cookie")).toBe("mac-cookie,cookie,http-chap");
+    expect(mergeHotspotLoginBy("http-chap,cookie,mac-cookie")).toBe(
+      "http-chap,cookie,mac-cookie"
+    );
   });
 
   it("met à jour le DNS du profil utilisé par le Hotspot existant", async () => {
@@ -417,34 +506,42 @@ describe("MikroTikRouterAdapter", () => {
     ]);
   });
 
-  it("liste puis déconnecte une session Hotspot avec son identifiant RouterOS", async () => {
+  it("liste puis déconnecte toutes les sessions du voucher sans toucher aux autres", async () => {
     const transport = new MockRouterOsTransport({
-      "/ip/hotspot/active/print": [{
-        ".id": "*A",
-        address: "192.168.88.20",
-        "bytes-in": "1024",
-        "bytes-out": "4096",
-        "mac-address": "AA:BB:CC:DD:EE:01",
-        uptime: "12m",
-        user: "voucher-1"
-      }],
+      "/ip/hotspot/active/print": [
+        {
+          ".id": "*A1",
+          address: "192.168.88.20",
+          "bytes-in": "1024",
+          "bytes-out": "4096",
+          "mac-address": "AA:BB:CC:DD:EE:01",
+          uptime: "12m",
+          user: "voucher-1"
+        },
+        { ".id": "*A2", address: "192.168.88.21", user: "voucher-1" },
+        { ".id": "*A3", address: "192.168.88.22", user: "autre-voucher" }
+      ],
       "/ip/hotspot/active/remove": []
     });
     const adapter = createAdapter(transport);
 
-    await expect(adapter.listActiveUsers()).resolves.toEqual([
+    await expect(adapter.listActiveUsers()).resolves.toEqual(expect.arrayContaining([
       expect.objectContaining({
         downloadedBytes: 4096,
-        id: "*A",
+        id: "*A1",
         uploadedBytes: 1024,
         username: "voucher-1"
       })
-    ]);
+    ]));
     await expect(adapter.disconnectActiveUser("voucher-1")).resolves.toBeUndefined();
-    expect(transport.calls[transport.calls.length - 1]).toMatchObject({
-      command: "/ip/hotspot/active/remove",
-      params: { numbers: "*A" }
-    });
+    expect(
+      transport.calls
+        .filter((call) => call.command === "/ip/hotspot/active/remove")
+        .map((call) => call.params?.numbers)
+    ).toEqual(["*A1", "*A2"]);
+    await expect(adapter.listActiveUsers()).resolves.toEqual([
+      expect.objectContaining({ id: "*A3", username: "autre-voucher" })
+    ]);
   });
 
   it("efface explicitement les anciennes limites lors du passage à un plan illimité", async () => {
@@ -513,13 +610,60 @@ describe("MikroTikRouterAdapter", () => {
     )?.params;
 
     expect(addParams).toMatchObject({ name: "forfait-1h" });
-    expect(addParams).toMatchObject({ "rate-limit": "2M/5M" });
+    expect(addParams).toMatchObject({
+      "add-mac-cookie": "yes",
+      "mac-cookie-timeout": "3h",
+      "rate-limit": "2M/5M"
+    });
     expect(addParams).not.toHaveProperty("comment");
     expect(addParams).not.toHaveProperty("disabled");
-    expect(updateParams).toMatchObject({ numbers: "*P1" });
-    expect(updateParams).toMatchObject({ "rate-limit": "2M/5M" });
+    expect(updateParams).toMatchObject({
+      "add-mac-cookie": "yes",
+      "mac-cookie-timeout": "3h",
+      numbers: "*P1",
+      "rate-limit": "2M/5M"
+    });
     expect(updateParams).not.toHaveProperty("comment");
     expect(updateParams).not.toHaveProperty("disabled");
+  });
+
+  it("supprime uniquement un profil sans utilisateur et confirme sa disparition", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/user/print": [],
+      "/ip/hotspot/user/profile/print": [{
+        ".id": "*P1",
+        name: "forfait-vide",
+        "session-timeout": "1h",
+        "shared-users": "1"
+      }]
+    });
+    const adapter = createAdapter(transport);
+
+    await expect(adapter.deleteHotspotPlan("forfait-vide")).resolves.toBeUndefined();
+    expect(
+      transport.calls.find((call) => call.command === "/ip/hotspot/user/profile/remove")?.params
+    ).toEqual({ numbers: "*P1" });
+    await expect(adapter.getHotspotPlans()).resolves.toEqual([]);
+  });
+
+  it("refuse de supprimer un profil encore utilisé par un voucher RouterOS", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/user/print": [{ ".id": "*U1", name: "123456", profile: "forfait-actif" }],
+      "/ip/hotspot/user/profile/print": [{
+        ".id": "*P1",
+        name: "forfait-actif",
+        "session-timeout": "1h",
+        "shared-users": "1"
+      }]
+    });
+    const adapter = createAdapter(transport);
+
+    await expect(adapter.deleteHotspotPlan("forfait-actif")).rejects.toMatchObject({
+      code: "router_rejected"
+    });
+    expect(
+      transport.calls.some((call) => call.command === "/ip/hotspot/user/profile/remove")
+    ).toBe(false);
   });
 
   it("traduit les erreurs RouterOS en codes internes", () => {
@@ -570,6 +714,41 @@ describe("MikroTikRouterAdapter", () => {
       chain: "input",
       "in-interface": "ticketpro-vpn"
     });
+  });
+
+  it("supprime la session, les cookies et le compte Hotspot puis vérifie leur absence", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/active/print": [
+        { ".id": "*A1", user: "voucher-1" },
+        { ".id": "*A2", user: "autre-voucher" }
+      ],
+      "/ip/hotspot/cookie/print": [
+        { ".id": "*C1", user: "voucher-1" },
+        { ".id": "*C2", user: "autre-voucher" }
+      ],
+      "/ip/hotspot/user/print": [
+        { ".id": "*U1", name: "voucher-1", profile: "plan-1h" },
+        { ".id": "*U2", name: "autre-voucher", profile: "plan-1h" }
+      ]
+    });
+    const adapter = createAdapter(transport);
+
+    await expect(adapter.removeHotspotUser("voucher-1")).resolves.toBeUndefined();
+
+    const removalCalls = transport.calls
+      .filter((call) => call.command.endsWith("/remove"))
+      .map((call) => ({ command: call.command, numbers: call.params?.numbers }));
+    expect(removalCalls).toEqual([
+      { command: "/ip/hotspot/active/remove", numbers: "*A1" },
+      { command: "/ip/hotspot/cookie/remove", numbers: "*C1" },
+      { command: "/ip/hotspot/user/remove", numbers: "*U1" }
+    ]);
+    expect(await adapter.listHotspotUsers()).toEqual([
+      expect.objectContaining({ username: "autre-voucher" })
+    ]);
+    expect(await adapter.listActiveUsers()).toEqual([
+      expect.objectContaining({ username: "autre-voucher" })
+    ]);
   });
 
   it("protège immédiatement le vrai mot de passe lu lors d'une récupération RouterOS", async () => {
@@ -800,6 +979,7 @@ describe("MikroTikRouterAdapter", () => {
           comment: "Règle installateur"
         }
       ],
+      "/ip/firewall/mangle/print": [],
       "/ipv6/firewall/filter/print": [{
         ".id": "*V0",
         action: "accept",
@@ -820,25 +1000,20 @@ describe("MikroTikRouterAdapter", () => {
     });
 
     expect(
-      transport.calls.find((call) =>
-        call.command === "/ip/firewall/filter/set"
-      )?.params
-    ).toMatchObject({
-      comment: "TicketPro anti-tethering:IPv4 TTL 63",
-      hotspot: "auth",
-      numbers: "*TP63",
-      ttl: "63"
-    });
+      transport.calls.find((call) => call.command === "/ip/firewall/filter/remove")?.params
+    ).toEqual({ numbers: "*TP63" });
     expect(
       transport.calls.find((call) =>
-        call.command === "/ip/firewall/filter/add"
+        call.command === "/ip/firewall/mangle/add"
       )?.params
     ).toMatchObject({
-      action: "drop",
-      comment: "TicketPro anti-tethering:IPv4 TTL 127",
-      hotspot: "auth",
-      "place-before": "*F0",
-      ttl: "127"
+      action: "change-ttl",
+      chain: "postrouting",
+      comment: "TicketPro anti-tethering:IPv4 client TTL ether1",
+      hotspot: "to-client",
+      "new-ttl": "set:1",
+      "out-interface": "ether1",
+      passthrough: "no"
     });
     expect(
       transport.calls.find((call) =>
@@ -854,21 +1029,15 @@ describe("MikroTikRouterAdapter", () => {
       transport.calls.filter((call) =>
         call.command === "/ip/hotspot/user/profile/set"
       )
-    ).toEqual([
-      expect.objectContaining({
-        params: {
-          numbers: "*P1",
-          "shared-users": "1"
-        }
-      })
-    ]);
+    ).toHaveLength(0);
   });
 
   it("lit l'état réel des protections et des bypass TicketPro", async () => {
     const transport = new MockRouterOsTransport({
-      "/ip/firewall/filter/print": [{
-        ".id": "*TP63",
-        comment: "TicketPro anti-tethering:IPv4 TTL 63",
+      "/ip/firewall/filter/print": [],
+      "/ip/firewall/mangle/print": [{
+        ".id": "*TP4",
+        comment: "TicketPro anti-tethering:IPv4 client TTL ether1",
         disabled: "false"
       }],
       "/ipv6/firewall/filter/print": [{
@@ -906,9 +1075,8 @@ describe("MikroTikRouterAdapter", () => {
     }]);
   });
 
-  it("reprend automatiquement la syntaxe TTL des anciennes versions RouterOS", async () => {
-    const calls: RouterOsApiRequest[] = [];
-    const responses: Record<string, RouterOsApiRow[]> = {
+  it("ne change pas la limite d'appareils des profils Hotspot", async () => {
+    const transport = new MockRouterOsTransport({
       "/ip/hotspot/print": [{
         ".id": "*HS1",
         disabled: "false",
@@ -916,21 +1084,12 @@ describe("MikroTikRouterAdapter", () => {
         name: "ticketpro-hotspot"
       }],
       "/ip/firewall/filter/print": [],
+      "/ip/firewall/mangle/print": [],
       "/ipv6/firewall/filter/print": [],
-      "/ip/hotspot/user/profile/print": []
-    };
-    const transport: RouterOsApiTransport = {
-      async call(request) {
-        calls.push(request);
-        if (
-          request.command === "/ip/firewall/filter/add"
-          && /^\d+$/.test(String(request.params?.ttl ?? ""))
-        ) {
-          throw new Error("router rejected: invalid value for argument ttl");
-        }
-        return responses[request.command] ?? [];
-      }
-    };
+      "/ip/hotspot/user/profile/print": [
+        { ".id": "*P1", name: "famille", "shared-users": "5" }
+      ]
+    });
     const adapter = createAdapter(transport);
 
     await adapter.configureHotspotAntiTethering({
@@ -940,10 +1099,11 @@ describe("MikroTikRouterAdapter", () => {
     });
 
     expect(
-      calls
-        .filter((call) => call.command === "/ip/firewall/filter/add")
-        .map((call) => call.params?.ttl)
-    ).toEqual(["63", "equal:63", "127", "equal:127"]);
+      transport.calls.some((call) =>
+        call.command === "/ip/hotspot/user/profile/print"
+        || call.command === "/ip/hotspot/user/profile/set"
+      )
+    ).toBe(false);
   });
 
   it("retire seulement les règles anti-partage gérées par TicketPro", async () => {
@@ -961,6 +1121,11 @@ describe("MikroTikRouterAdapter", () => {
           comment: "Blocage manuel TTL"
         }
       ],
+      "/ip/firewall/mangle/print": [{
+        ".id": "*TP4",
+        chain: "postrouting",
+        comment: "TicketPro anti-tethering:IPv4 client TTL ether1"
+      }],
       "/ipv6/firewall/filter/print": [{
         ".id": "*TPV6",
         chain: "forward",
@@ -979,7 +1144,7 @@ describe("MikroTikRouterAdapter", () => {
       transport.calls
         .filter((call) => call.command.endsWith("/remove"))
         .map((call) => call.params?.numbers)
-    ).toEqual(["*TP63", "*TPV6"]);
+    ).toEqual(["*TP63", "*TP4", "*TPV6"]);
   });
 
   it("retire réellement les règles TTL quand la case IPv4 est décochée", async () => {

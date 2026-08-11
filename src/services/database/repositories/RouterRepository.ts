@@ -15,12 +15,13 @@ export class RouterRepository {
     assertAccountProfileOwnership(input.account_id, input.created_by_profile_id);
     await this.database.execute(
       `INSERT INTO routers (
-        id, account_id, zone_id, name, label, model, board_name, serial_number, routeros_version,
+        id, cloud_router_id, account_id, zone_id, name, label, model, board_name, serial_number, routeros_version,
         local_ip, hotspot_address, notes, api_port, api_ssl_port, username, encrypted_password, connection_mode,
         status, last_seen_at, subscription_counted, created_by_profile_id, sync_status
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)`,
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)`,
       [
         input.id,
+        input.cloud_router_id ?? input.id,
         input.account_id,
         input.zone_id,
         input.name,
@@ -69,7 +70,12 @@ export class RouterRepository {
 
   async update(input: CreateRouterInput): Promise<RouterRecord> {
     assertAccountProfileOwnership(input.account_id, input.created_by_profile_id);
-    const existing = input.hotspot_address === undefined ? await this.findById(input.id) : null;
+    const existing = input.hotspot_address === undefined || input.cloud_router_id === undefined
+      ? await this.findById(input.id)
+      : null;
+    const cloudRouterId = input.cloud_router_id === undefined
+      ? existing?.cloud_router_id ?? input.id
+      : input.cloud_router_id;
     const hotspotAddress = input.hotspot_address === undefined
       ? existing?.hotspot_address ?? null
       : input.hotspot_address;
@@ -77,6 +83,7 @@ export class RouterRepository {
     await this.database.transaction([
       {
         params: [
+          cloudRouterId,
           input.name,
           input.label,
           input.model,
@@ -100,12 +107,12 @@ export class RouterRepository {
           input.account_id
         ],
         sql: `UPDATE routers SET
-          name = ?1, label = ?2, model = ?3, board_name = ?4, serial_number = ?5,
-          routeros_version = ?6, local_ip = ?7, hotspot_address = ?8, notes = ?9, api_port = ?10,
-          api_ssl_port = ?11, username = ?12, encrypted_password = ?13, connection_mode = ?14,
-          status = ?15, last_seen_at = ?16, subscription_counted = ?17, sync_status = ?18,
-          updated_at = ?19
-        WHERE id = ?20 AND account_id = ?21`
+          cloud_router_id = ?1, name = ?2, label = ?3, model = ?4, board_name = ?5, serial_number = ?6,
+          routeros_version = ?7, local_ip = ?8, hotspot_address = ?9, notes = ?10, api_port = ?11,
+          api_ssl_port = ?12, username = ?13, encrypted_password = ?14, connection_mode = ?15,
+          status = ?16, last_seen_at = ?17, subscription_counted = ?18, sync_status = ?19,
+          updated_at = ?20
+        WHERE id = ?21 AND account_id = ?22`
       },
       {
         params: [input.local_ip, input.api_port, updatedAt, input.id],
@@ -227,6 +234,18 @@ export class RouterRepository {
     );
   }
 
+  async findByCloudId(accountId: string, cloudRouterId: string): Promise<RouterRecord | null> {
+    const routers = await this.listByAccount(accountId);
+    return routers.find((router) => (router.cloud_router_id ?? router.id) === cloudRouterId) ?? null;
+  }
+
+  async setCloudId(accountId: string, routerId: string, cloudRouterId: string): Promise<void> {
+    await this.database.execute(
+      "UPDATE routers SET cloud_router_id = ?1, updated_at = ?2 WHERE id = ?3 AND account_id = ?4",
+      [cloudRouterId, new Date().toISOString(), routerId, accountId]
+    );
+  }
+
   async countSubscriptionRoutersByAccount(accountId: string): Promise<number> {
     const rows = await this.database.query<{ count: number }>(
       "SELECT COUNT(*) as count FROM routers WHERE account_id = ?1 AND subscription_counted = 1 AND deleted_at IS NULL",
@@ -239,6 +258,7 @@ export class RouterRepository {
     return {
       params: [
         input.id,
+        input.cloud_router_id ?? input.id,
         input.account_id,
         input.zone_id,
         input.name,
@@ -262,10 +282,10 @@ export class RouterRepository {
         input.sync_status ?? "local"
       ],
       sql: `INSERT INTO routers (
-        id, account_id, zone_id, name, label, model, board_name, serial_number, routeros_version,
+        id, cloud_router_id, account_id, zone_id, name, label, model, board_name, serial_number, routeros_version,
         local_ip, hotspot_address, notes, api_port, api_ssl_port, username, encrypted_password, connection_mode,
         status, last_seen_at, subscription_counted, created_by_profile_id, sync_status
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)`
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)`
     };
   }
 

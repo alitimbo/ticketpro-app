@@ -6,6 +6,7 @@ import {
   Eye,
   FileText,
   ListChecks,
+  LoaderCircle,
   Plus,
   RotateCw,
   Save,
@@ -19,6 +20,7 @@ import {
   deleteRemotePlanIdempotently,
   FakeRouterAdapter,
   RouterService,
+  synchronizePlanVouchers,
   updateRemotePlanIdempotently,
   type RouterActionLog
 } from "../../services/router";
@@ -65,6 +67,7 @@ export function PlansPage() {
   const [persistedService, setPersistedService] = useState<RouterService | null>(null);
   const [selectedPlan, setSelectedPlan] = useState<PlanViewModel | null>(null);
   const [syncingPlanId, setSyncingPlanId] = useState<string | null>(null);
+  const [formOperation, setFormOperation] = useState<"create" | "edit" | null>(null);
   const planRepository = useMemo(() => new HotspotPlanRepository(database), [database]);
   const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
@@ -286,7 +289,7 @@ export function PlansPage() {
   };
 
   const submitForm = async () => {
-    if (!formState) {
+    if (!formState || formOperation) {
       return;
     }
 
@@ -297,62 +300,90 @@ export function PlansPage() {
       return;
     }
 
-    const draft = formValuesToPlanDraft(formState.values);
+    const submittedForm = formState;
+    setFormOperation(submittedForm.mode);
+    setMessage(null);
 
-    if (formState.mode === "create") {
-      const planId = `plan-${crypto.randomUUID()}`;
-      const localRecord = planRecordFromDraft(draft, routerId, planId, isPersistent ? "pending" : "local");
-      const storedRecord = isPersistent ? await planRepository.create(localRecord) : null;
-      let syncStatus: PlanViewModel["syncStatus"] = isPersistent ? "pending" : "synced";
+    try {
+      const draft = formValuesToPlanDraft(submittedForm.values);
 
-      if (isPersistent) {
-        try {
-          await createRemotePlanIdempotently(await getPersistedService(), draft);
-          syncStatus = "synced";
-          await planRepository.update({ ...localRecord, sync_status: syncStatus });
-        } catch {
-          setMessage("Plan enregistré localement ; synchronisation à reprendre.");
+      if (submittedForm.mode === "create") {
+        const planId = `plan-${crypto.randomUUID()}`;
+        const localRecord = planRecordFromDraft(draft, routerId, planId, isPersistent ? "pending" : "local");
+        const storedRecord = isPersistent ? await planRepository.create(localRecord) : null;
+        let syncStatus: PlanViewModel["syncStatus"] = isPersistent ? "pending" : "synced";
+
+        if (isPersistent) {
+          try {
+            await createRemotePlanIdempotently(await getPersistedService(), draft);
+            syncStatus = "synced";
+            await planRepository.update({ ...localRecord, sync_status: syncStatus });
+          } catch {
+            setMessage("Plan enregistré localement ; synchronisation à reprendre.");
+          }
         }
+
+        const created = isPersistent
+          ? planFromRecord({ ...storedRecord!, sync_status: syncStatus })
+          : planFromHotspotPlan(await service.createHotspotPlan(draft), 0);
+        const viewModel = created;
+
+        setPlans((current) => [viewModel, ...current]);
+        if (isPersistent) await backupRouterSnapshot();
+        setMessage(
+          syncStatus === "synced"
+            ? `${viewModel.name} créé et synchronisé.`
+            : `${viewModel.name} créé localement ; synchronisation RouterOS à reprendre.`
+        );
+      } else if (submittedForm.plan) {
+        let syncStatus: PlanViewModel["syncStatus"] = isPersistent ? "pending" : "synced";
+        let updatedRouterUsers = 0;
+        const localRecord = planRecordFromDraft(draft, routerId, submittedForm.plan.id, isPersistent ? "pending" : "local");
+        const storedRecord = isPersistent ? await planRepository.update(localRecord) : null;
+
+        if (isPersistent) {
+          try {
+            const activeService = await getPersistedService();
+            await updateRemotePlanIdempotently(
+              activeService,
+              submittedForm.plan.profileName,
+              draft
+            );
+            const voucherSync = await synchronizePlanVouchers({
+              draft,
+              localPlanId: submittedForm.plan.id,
+              localTickets: await ticketRepository.listByRouter(routerId),
+              service: activeService
+            });
+            updatedRouterUsers = voucherSync.updatedRouterUsers;
+            syncStatus = "synced";
+            await planRepository.update({ ...localRecord, sync_status: syncStatus });
+          } catch {
+            setMessage("Plan modifié localement ; synchronisation à reprendre.");
+          }
+        }
+
+        const updated = isPersistent
+          ? planFromRecord({ ...storedRecord!, sync_status: syncStatus }, submittedForm.plan.linkedTickets)
+          : planFromHotspotPlan(await service.updateHotspotPlan(submittedForm.plan.id, draft), submittedForm.plan.linkedTickets);
+        const viewModel = updated;
+
+        setPlans((current) => current.map((plan) => (plan.id === viewModel.id ? viewModel : plan)));
+        if (isPersistent) await backupRouterSnapshot();
+        setMessage(
+          syncStatus === "synced"
+            ? `${viewModel.name} modifié ; ${updatedRouterUsers} voucher(s) encore présent(s) sur RouterOS mis à jour.`
+            : `${viewModel.name} modifié localement ; synchronisation RouterOS à reprendre.`
+        );
       }
 
-      const created = isPersistent
-        ? planFromRecord({ ...storedRecord!, sync_status: syncStatus })
-        : planFromHotspotPlan(await service.createHotspotPlan(draft), 0);
-      const viewModel = created;
-
-      setPlans((current) => [viewModel, ...current]);
-      if (isPersistent) await backupRouterSnapshot();
-      setMessage(`${viewModel.name} créé.`);
-    } else if (formState.plan) {
-      let syncStatus: PlanViewModel["syncStatus"] = isPersistent ? "pending" : "synced";
-      const localRecord = planRecordFromDraft(draft, routerId, formState.plan.id, isPersistent ? "pending" : "local");
-      const storedRecord = isPersistent ? await planRepository.update(localRecord) : null;
-
-      if (isPersistent) {
-        try {
-          await updateRemotePlanIdempotently(
-            await getPersistedService(),
-            formState.plan.profileName,
-            draft
-          );
-          syncStatus = "synced";
-          await planRepository.update({ ...localRecord, sync_status: syncStatus });
-        } catch {
-          setMessage("Plan modifié localement ; synchronisation à reprendre.");
-        }
-      }
-
-      const updated = isPersistent
-        ? planFromRecord({ ...storedRecord!, sync_status: syncStatus }, formState.plan.linkedTickets)
-        : planFromHotspotPlan(await service.updateHotspotPlan(formState.plan.id, draft), formState.plan.linkedTickets);
-      const viewModel = updated;
-
-      setPlans((current) => current.map((plan) => (plan.id === viewModel.id ? viewModel : plan)));
-      if (isPersistent) await backupRouterSnapshot();
-      setMessage(`${viewModel.name} modifié.`);
+      setFormState(null);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "L'enregistrement du plan a échoué.";
+      setFormState((current) => current ? { ...current, error: errorMessage } : current);
+    } finally {
+      setFormOperation(null);
     }
-
-    setFormState(null);
   };
 
   const duplicate = async (plan: PlanViewModel) => {
@@ -426,7 +457,10 @@ export function PlansPage() {
 
   const remove = async (plan: PlanViewModel) => {
     if (plan.linkedTickets > 0) {
-      setMessage("Suppression impossible : des tickets utilisent ce plan.");
+      setMessage(
+        `Suppression protégée : ${plan.linkedTickets} ticket(s) utilisent ce plan. `
+        + "Désactivez le plan pour interdire les nouvelles générations sans couper les clients existants."
+      );
       return;
     }
 
@@ -531,6 +565,7 @@ export function PlansPage() {
       <PlanFormDialog
         canSubmit={canManagePlans && userCan("router.plans.read")}
         formState={formState}
+        isSubmitting={formOperation !== null}
         onCancel={() => setFormState(null)}
         onChange={(values) => formState && setFormState({ ...formState, error: null, values })}
         onSubmit={() => void submitForm()}
@@ -680,12 +715,13 @@ function PlanDetailLine({ label, value }: { label: string; value: string }) {
 type PlanFormDialogProps = {
   canSubmit: boolean;
   formState: PlanFormState | null;
+  isSubmitting: boolean;
   onCancel: () => void;
   onChange: (values: PlanFormValues) => void;
   onSubmit: () => void;
 };
 
-function PlanFormDialog({ canSubmit, formState, onCancel, onChange, onSubmit }: PlanFormDialogProps) {
+function PlanFormDialog({ canSubmit, formState, isSubmitting, onCancel, onChange, onSubmit }: PlanFormDialogProps) {
   if (!formState) {
     return null;
   }
@@ -706,7 +742,8 @@ function PlanFormDialog({ canSubmit, formState, onCancel, onChange, onSubmit }: 
           </div>
         </header>
 
-        <div className="router-form-grid">
+        <fieldset className="plan-form-fields" disabled={isSubmitting}>
+          <div className="router-form-grid">
           <label className="form-field">
             Nom du plan
             <input value={values.name} onChange={(event) => update({ name: event.target.value })} />
@@ -767,16 +804,25 @@ function PlanFormDialog({ canSubmit, formState, onCancel, onChange, onSubmit }: 
               <option value="disabled">Inactif</option>
             </select>
           </label>
-        </div>
+          </div>
+        </fieldset>
 
         {formState.error ? <p className="form-error">{formState.error}</p> : null}
 
         <div className="confirm-dialog__actions">
-          <Button onClick={onCancel} variant="ghost">
+          <Button disabled={isSubmitting} onClick={onCancel} variant="ghost">
             Annuler
           </Button>
-          <Button disabled={!canSubmit} icon={Save} onClick={onSubmit} variant="primary">
-            Enregistrer
+          <Button
+            className={isSubmitting ? "button--loading" : ""}
+            disabled={!canSubmit || isSubmitting}
+            icon={isSubmitting ? LoaderCircle : Save}
+            onClick={onSubmit}
+            variant="primary"
+          >
+            {isSubmitting
+              ? formState.mode === "create" ? "Création…" : "Enregistrement…"
+              : formState.mode === "create" ? "Créer le plan" : "Enregistrer"}
           </Button>
         </div>
       </section>

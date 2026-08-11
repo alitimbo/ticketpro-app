@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildFileName,
   buildTicketBatch,
   createInitialTicketGenerationState,
   defaultTicketGenerationOptions,
@@ -38,6 +39,31 @@ const servers = [
 ];
 
 describe("ticketGenerationModel", () => {
+  it("nomme le PDF avec le routeur, le plan, le prix et la quantité", () => {
+    expect(buildFileName({
+      batchId: "batch-a1b2c3d4-e5f6",
+      generatedAt: new Date("2026-08-11T15:25:30.000Z"),
+      planName: "6 h / 2 Go",
+      priceCfa: 100,
+      quantity: 5,
+      routerName: "TicketPro Lab Niamey"
+    })).toBe("TicketPro-Lab-Niamey-6-h-2-Go-100CFA-5tickets-20260811-152530-a1b2c3d4.pdf");
+  });
+
+  it("produit un nom Windows valide lorsque le prix n'est pas défini", () => {
+    const fileName = buildFileName({
+      batchId: "batch-test",
+      generatedAt: new Date("2026-08-11T15:25:30.000Z"),
+      planName: "Journée: VIP?",
+      priceCfa: null,
+      quantity: 20,
+      routerName: "Routeur Démo / Boutique"
+    });
+
+    expect(fileName).toBe("Routeur-Demo-Boutique-Journee-VIP-prix-non-defini-20tickets-20260811-152530-test.pdf");
+    expect(fileName).not.toMatch(/[<>:"/\\|?*]/);
+  });
+
   it("désactive le QR code par défaut", () => {
     expect(defaultTicketGenerationOptions.generateQrCode).toBe(false);
   });

@@ -81,6 +81,8 @@ type RouterFormState = {
   values: RouterFormValues;
 };
 
+type RouterFormOperation = "testing" | "saving" | null;
+
 export function RoutersPage() {
   const navigate = useNavigate();
   const { accountSession, saasAccount, session, userCan } = useAuth();
@@ -98,6 +100,7 @@ export function RoutersPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [logs, setLogs] = useState<RouterActionLog[]>([]);
   const [formState, setFormState] = useState<RouterFormState | null>(null);
+  const [formOperation, setFormOperation] = useState<RouterFormOperation>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [connectingRouterIds, setConnectingRouterIds] = useState<Set<string>>(() => new Set());
   const connectionAttemptsRef = useRef<Set<string>>(new Set());
@@ -164,7 +167,7 @@ export function RoutersPage() {
     const scopedRouters = listRoutersForAccount(routers, accountId);
     if (!saasAccount || saasAccount.user.router_access.mode === "all") return scopedRouters;
     const allowed = new Set(saasAccount.user.router_access.router_ids);
-    return scopedRouters.filter((router) => allowed.has(router.id));
+    return scopedRouters.filter((router) => allowed.has(router.cloudRouterId ?? router.id));
   }, [accountId, routers, saasAccount]);
   useEffect(() => {
     routersForHealthCheckRef.current = accountRouters;
@@ -202,6 +205,7 @@ export function RoutersPage() {
       setMessage(quotaMessage);
       return;
     }
+    setFormOperation(null);
     setFormState({
       detectedInfo: null,
       error: null,
@@ -220,6 +224,7 @@ export function RoutersPage() {
       setMessage(permissionError instanceof AuthorizationError ? permissionError.message : "Vous n'avez pas la permission de modifier ce routeur.");
       return;
     }
+    setFormOperation(null);
     setFormState({
       detectedInfo: {
         architecture: "",
@@ -348,18 +353,27 @@ export function RoutersPage() {
   };
 
   const submitForm = async () => {
-    if (!formState) return;
+    if (!formState || formOperation) return;
     const validationError = validateRouterForm(formState);
     if (validationError) {
       setFormState({ ...formState, error: validationError });
       return;
     }
 
-    const encryptedPassword = formState.values.password.trim()
-      ? await encryptLocalSecret(formState.values.password)
-      : formState.router?.encryptedPassword ?? "";
     if (!session || !accountId) {
       setFormState({ ...formState, error: "Session du compte ou du profil interne introuvable." });
+      return;
+    }
+
+    setFormOperation("saving");
+    let encryptedPassword: string;
+    try {
+      encryptedPassword = formState.values.password.trim()
+        ? await encryptLocalSecret(formState.values.password)
+        : formState.router?.encryptedPassword ?? "";
+    } catch {
+      setFormState({ ...formState, error: "Le mot de passe du routeur n'a pas pu être protégé localement." });
+      setFormOperation(null);
       return;
     }
 
@@ -398,6 +412,8 @@ export function RoutersPage() {
         setFormState(null);
       } catch (error) {
         setFormState({ ...formState, error: error instanceof Error ? error.message : "Le routeur n'a pas pu être enregistré." });
+      } finally {
+        setFormOperation(null);
       }
       return;
     }
@@ -451,37 +467,51 @@ export function RoutersPage() {
       setFormState(null);
     } catch (error) {
       setFormState({ ...formState, error: error instanceof Error ? error.message : "Le routeur n'a pas pu être mis à jour." });
+    } finally {
+      setFormOperation(null);
     }
   };
 
   const testFormConnection = async () => {
-    if (!formState) return;
+    if (!formState || formOperation) return;
     const validationError = validateRouterFormForTest(formState.values);
     if (validationError) {
       setFormState({ ...formState, error: validationError });
       return;
     }
+    setFormOperation("testing");
     setFormState({ ...formState, error: null, testMessage: "Test de connexion en cours…" });
-    const result = await runRouterConnectionTest({
-      apiPort: Number(formState.values.apiPort),
-      encryptedPassword: formState.router?.encryptedPassword,
-      ipAddress: formState.values.ipAddress,
-      mode: formState.values.preferredMode,
-      password: formState.values.password,
-      remoteHost: formState.values.remoteHost,
-      remotePort: formState.values.remotePort,
-      remoteUseSsl: formState.values.remoteUseSsl,
-      statusHint: formState.router?.status,
-      username: formState.values.username
-    });
-    setFormState({
-      ...formState,
-      detectedInfo: result.systemInfo ?? null,
-      error: null,
-      testMessage: result.message,
-      testStatus: result.status,
-      values: formState.values
-    });
+    try {
+      const result = await runRouterConnectionTest({
+        apiPort: Number(formState.values.apiPort),
+        encryptedPassword: formState.router?.encryptedPassword,
+        ipAddress: formState.values.ipAddress,
+        mode: formState.values.preferredMode,
+        password: formState.values.password,
+        remoteHost: formState.values.remoteHost,
+        remotePort: formState.values.remotePort,
+        remoteUseSsl: formState.values.remoteUseSsl,
+        statusHint: formState.router?.status,
+        username: formState.values.username
+      });
+      setFormState({
+        ...formState,
+        detectedInfo: result.systemInfo ?? null,
+        error: null,
+        testMessage: result.message,
+        testStatus: result.status,
+        values: formState.values
+      });
+    } catch {
+      setFormState({
+        ...formState,
+        error: "Le test de connexion a échoué de manière inattendue. Réessayez.",
+        testMessage: routerTestMessage("timeout"),
+        testStatus: "timeout"
+      });
+    } finally {
+      setFormOperation(null);
+    }
   };
 
   const upsertFormHotspotDns = async (state: RouterFormState) => {
@@ -556,13 +586,13 @@ export function RoutersPage() {
 
   const confirmDeleteRouter = async () => {
     const router = routerToDelete;
-    if (!router) return;
+    if (!router || isDeleting) return;
     setIsDeleting(true);
     try {
       requireProfilePermission(session, "global.routers.delete");
       if (isPersistent) {
         if (!accountId) throw new Error("Compte actif introuvable.");
-        await removeSaasRouterRecoverySnapshot(router.id);
+        await removeSaasRouterRecoverySnapshot(router.cloudRouterId ?? router.id);
         await routerRepository.remove(accountId, router.id);
       }
       setRouters((current) => current.filter((item) => item.id !== router.id));
@@ -702,8 +732,10 @@ export function RoutersPage() {
             </strong>
             <span>Compte connecté : {accountSession?.email ?? "non renseigné"}</span>
           </div>
-          <Badge status={subscriptionOverview.canAddRouter ? "success" : "warning"}>
-            {subscriptionOverview.canAddRouter ? "Ajout disponible" : "Limite atteinte"}
+          <Badge status={!canAddRouter ? "active" : subscriptionOverview.canAddRouter ? "success" : "warning"}>
+            {!canAddRouter
+              ? "Accès aux routeurs autorisés"
+              : subscriptionOverview.canAddRouter ? "Ajout disponible" : "Limite atteinte"}
           </Badge>
         </div>
         {quotaMessage ? (
@@ -774,10 +806,13 @@ export function RoutersPage() {
       <RouterFormDialog
         formState={formState}
         logsCount={logs.length}
-        onCancel={() => setFormState(null)}
+        onCancel={() => {
+          if (!formOperation) setFormState(null);
+        }}
         onChange={updateFormValues}
         onSubmit={() => void submitForm()}
         onTest={() => void testFormConnection()}
+        operation={formOperation}
       />
       <DeleteRouterDialog
         isDeleting={isDeleting}
@@ -970,7 +1005,8 @@ function RouterFormDialog({
   onCancel,
   onChange,
   onSubmit,
-  onTest
+  onTest,
+  operation
 }: {
   formState: RouterFormState | null;
   logsCount: number;
@@ -978,19 +1014,21 @@ function RouterFormDialog({
   onChange: (values: RouterFormValues) => void;
   onSubmit: () => void;
   onTest: () => void;
+  operation: RouterFormOperation;
 }) {
   if (!formState) return null;
   const values = formState.values;
+  const isBusy = operation !== null;
   const remoteMode = isRemoteConnectionMode(values.preferredMode);
   const update = (partial: Partial<RouterFormValues>) => onChange({ ...values, ...partial });
   return (
     <div className="dialog-backdrop" role="presentation">
-      <section aria-modal="true" className="router-form-dialog" role="dialog">
+      <section aria-busy={isBusy} aria-modal="true" className="router-form-dialog" role="dialog">
         <header className="connection-dialog__header">
           <div className="router-card__icon"><Router aria-hidden="true" /></div>
           <div><h2>{formState.mode === "add" ? "Ajouter routeur" : "Modifier routeur"}</h2><p>Testez obligatoirement la configuration avant de l'enregistrer.</p></div>
         </header>
-        <div className="router-form-grid">
+        <fieldset className="router-form-grid router-form-fieldset" disabled={isBusy}>
           <label className="form-field">Nom du routeur<input value={values.name} onChange={(event) => update({ name: event.target.value })} /></label>
           <label className="form-field">
             Hotspot (DNS)
@@ -1045,7 +1083,7 @@ function RouterFormDialog({
             </>
           ) : null}
           <label className="form-field router-form-notes">Notes internes<textarea value={values.notes} onChange={(event) => update({ notes: event.target.value })} /></label>
-        </div>
+        </fieldset>
         {remoteMode ? <div className="form-error"><AlertTriangle aria-hidden="true" /><span>{remoteSecurityWarnings.join(" ")}</span></div> : null}
         {formState.detectedInfo ? (
           <div className="router-form-result"><Badge status="success">Infos récupérées</Badge><span>{formState.detectedInfo.model} · {formState.detectedInfo.boardName} · RouterOS {formState.detectedInfo.routerOsVersion}</span></div>
@@ -1056,9 +1094,26 @@ function RouterFormDialog({
         </div>
         {formState.error ? <p className="form-error">{formState.error}</p> : null}
         <div className="confirm-dialog__actions">
-          <Button onClick={onCancel} variant="ghost">Annuler</Button>
-          <Button icon={Search} onClick={onTest}>Tester la connexion</Button>
-          <Button disabled={formState.testStatus !== "connected"} icon={Save} onClick={onSubmit} variant="primary">Enregistrer</Button>
+          <Button disabled={isBusy} onClick={onCancel} variant="ghost">Annuler</Button>
+          <Button
+            className={operation === "testing" ? "button--loading" : ""}
+            disabled={isBusy}
+            icon={operation === "testing" ? LoaderCircle : Search}
+            onClick={onTest}
+          >
+            {operation === "testing" ? "Test en cours…" : "Tester la connexion"}
+          </Button>
+          <Button
+            className={operation === "saving" ? "button--loading" : ""}
+            disabled={isBusy || formState.testStatus !== "connected"}
+            icon={operation === "saving" ? LoaderCircle : Save}
+            onClick={onSubmit}
+            variant="primary"
+          >
+            {operation === "saving"
+              ? formState.mode === "add" ? "Ajout en cours…" : "Modification en cours…"
+              : formState.mode === "add" ? "Ajouter le routeur" : "Enregistrer les modifications"}
+          </Button>
         </div>
       </section>
     </div>
@@ -1079,15 +1134,32 @@ function DeleteRouterDialog({
   if (!router) return null;
   return (
     <div className="dialog-backdrop" role="presentation">
-      <section aria-modal="true" className="connection-dialog" role="dialog">
+      <section aria-busy={isDeleting} aria-modal="true" className="connection-dialog" role="alertdialog">
         <header className="connection-dialog__header">
           <div className="router-card__icon"><Trash2 aria-hidden="true" /></div>
-          <div><h2>Supprimer {router.zoneName} ?</h2><p>Les tickets historiques sont conservés. Les connexions du routeur seront désactivées.</p></div>
+          <div>
+            <h2>Supprimer {router.zoneName} ?</h2>
+            <p>{router.routerName || router.model} · {router.ipAddress}</p>
+          </div>
         </header>
-        <div className="form-error"><AlertTriangle aria-hidden="true" /><span>Un pair VPN actif doit être révoqué avant la suppression.</span></div>
+        <div className="form-error">
+          <AlertTriangle aria-hidden="true" />
+          <span>
+            Cette action retire le routeur de TicketPro et du coffre de restauration VPS.
+            Les tickets historiques restent archivés. Un pair VPN actif doit être révoqué avant la suppression.
+          </span>
+        </div>
         <div className="confirm-dialog__actions">
           <Button disabled={isDeleting} onClick={onCancel} variant="ghost">Annuler</Button>
-          <Button disabled={isDeleting} icon={Trash2} onClick={onConfirm} variant="danger">{isDeleting ? "Suppression…" : "Supprimer"}</Button>
+          <Button
+            className={isDeleting ? "button--loading" : ""}
+            disabled={isDeleting}
+            icon={isDeleting ? LoaderCircle : Trash2}
+            onClick={onConfirm}
+            variant="danger"
+          >
+            {isDeleting ? "Suppression en cours…" : "Confirmer la suppression"}
+          </Button>
         </div>
       </section>
     </div>

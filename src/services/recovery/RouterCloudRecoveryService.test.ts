@@ -15,28 +15,41 @@ describe("RouterCloudRecoveryService", () => {
     const database = new InMemoryDatabaseClient();
     await database.initialize();
     const snapshot = recoverySnapshot();
+    const cloud = {
+      bootstrapVpn: vi.fn(async () => ({
+        address_pool: "10.250.0.0/24",
+        server_endpoint: "vpn.autoticket-ne.com",
+        server_port: 51820,
+        server_public_key: "server-public-key"
+      })),
+      getSnapshots: vi.fn(async () => [snapshot]),
+      saveSnapshot: vi.fn(async (router: SaasRouterRecoverySnapshot) => router)
+    };
     const service = new RouterCloudRecoveryService(
       database,
       "account-recovery",
       "account-recovery:profile-admin",
-      {
-        bootstrapVpn: vi.fn(async () => ({
-          address_pool: "10.250.0.0/24",
-          server_endpoint: "vpn.autoticket-ne.com",
-          server_port: 51820,
-          server_public_key: "server-public-key"
-        })),
-        getSnapshots: vi.fn(async () => [snapshot]),
-        saveSnapshot: vi.fn(async (router) => router)
-      }
+      cloud
+    );
+    const concurrentService = new RouterCloudRecoveryService(
+      database,
+      "account-recovery",
+      "account-recovery:profile-admin",
+      cloud
     );
 
-    const result = await service.restoreMissingRouters();
+    const [result, concurrentResult] = await Promise.all([
+      service.restoreMissingRouters(),
+      concurrentService.restoreMissingRouters()
+    ]);
 
     expect(result).toEqual({
       restoredRouterIds: ["router-cloud-1"],
       skippedRouterIds: []
     });
+    expect(concurrentResult).toEqual(result);
+    expect(cloud.getSnapshots).toHaveBeenCalledTimes(1);
+    expect(cloud.bootstrapVpn).toHaveBeenCalledTimes(1);
     const router = await new RouterRepository(database).findById("router-cloud-1");
     expect(router).toMatchObject({
       hotspot_address: "wifi.client.test",
@@ -71,6 +84,52 @@ describe("RouterCloudRecoveryService", () => {
       restoredRouterIds: [],
       skippedRouterIds: ["router-cloud-1"]
     });
+  });
+
+  it("restaure le mÃªme routeur cloud dans deux comptes locaux sans collision d'identifiants", async () => {
+    const database = new InMemoryDatabaseClient();
+    await database.initialize();
+    const snapshot = recoverySnapshot();
+    const cloud = {
+      bootstrapVpn: vi.fn(async () => ({
+        address_pool: "10.250.0.0/24",
+        server_endpoint: "vpn.autoticket-ne.com",
+        server_port: 51820,
+        server_public_key: "server-public-key"
+      })),
+      getSnapshots: vi.fn(async () => [snapshot]),
+      saveSnapshot: vi.fn(async (router: SaasRouterRecoverySnapshot) => router)
+    };
+
+    await new RouterCloudRecoveryService(
+      database,
+      "account-owner",
+      "account-owner:profile-admin",
+      cloud
+    ).restoreMissingRouters();
+    const operatorResult = await new RouterCloudRecoveryService(
+      database,
+      "account-operator",
+      "account-operator:profile-operator",
+      cloud
+    ).restoreMissingRouters();
+
+    expect(operatorResult.restoredRouterIds).toHaveLength(1);
+    expect(operatorResult.restoredRouterIds[0]).not.toBe(snapshot.id);
+    const operatorRouter = await new RouterRepository(database).findById(
+      operatorResult.restoredRouterIds[0]
+    );
+    expect(operatorRouter).toMatchObject({
+      account_id: "account-operator",
+      cloud_router_id: snapshot.id,
+      name: snapshot.name
+    });
+    expect(await new HotspotPlanRepository(database).listByRouter(operatorRouter?.id ?? "")).toEqual([
+      expect.objectContaining({
+        mikrotik_profile_name: "6h",
+        router_id: operatorRouter?.id
+      })
+    ]);
   });
 });
 

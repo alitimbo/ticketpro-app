@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  ChevronDown,
   Copy,
   Download,
   FileDown,
@@ -445,14 +446,17 @@ export function FilesPage() {
           </label>
           <label className="date-field">
             Type
-            <select value={filters.fileType} onChange={(event) => updateFilters({ fileType: event.target.value as FileFilters["fileType"] })}>
-              <option value="">Tous</option>
-              {fileTypes.map((type) => (
-                <option key={type} value={type}>
-                  {fileTypeLabel(type)}
-                </option>
-              ))}
-            </select>
+            <div className="files-select-control">
+              <select value={filters.fileType} onChange={(event) => updateFilters({ fileType: event.target.value as FileFilters["fileType"] })}>
+                <option value="">Tous les types</option>
+                {fileTypes.map((type) => (
+                  <option key={type} value={type}>
+                    {fileTypeLabel(type)}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown aria-hidden="true" />
+            </div>
           </label>
           <Button icon={Filter} onClick={() => setFiltersOpen((current) => !current)}>
             Filtres
@@ -629,36 +633,45 @@ function FilesFilterPanel({
     <div className="files-filter-panel">
       <label className="form-field">
         Plan
-        <select value={filters.planId} onChange={(event) => onChange({ planId: event.target.value })}>
-          <option value="">Tous les plans</option>
-          {options.plans.map((plan) => (
-            <option key={plan.id} value={plan.id}>
-              {plan.name}
-            </option>
-          ))}
-        </select>
+        <div className="files-select-control">
+          <select value={filters.planId} onChange={(event) => onChange({ planId: event.target.value })}>
+            <option value="">Tous les plans</option>
+            {options.plans.map((plan) => (
+              <option key={plan.id} value={plan.id}>
+                {plan.name}
+              </option>
+            ))}
+          </select>
+          <ChevronDown aria-hidden="true" />
+        </div>
       </label>
       <label className="form-field">
         Profil
-        <select value={filters.operatorProfile} onChange={(event) => onChange({ operatorProfile: event.target.value })}>
-          <option value="">Tous les profils</option>
-          {options.operators.map((operator) => (
-            <option key={operator} value={operator}>
-              {profileLabel(operator)}
-            </option>
-          ))}
-        </select>
+        <div className="files-select-control">
+          <select value={filters.operatorProfile} onChange={(event) => onChange({ operatorProfile: event.target.value })}>
+            <option value="">Tous les profils</option>
+            {options.operators.map((operator) => (
+              <option key={operator} value={operator}>
+                {profileLabel(operator)}
+              </option>
+            ))}
+          </select>
+          <ChevronDown aria-hidden="true" />
+        </div>
       </label>
       <label className="form-field">
         Routeur
-        <select value={filters.routerId} onChange={(event) => onChange({ routerId: event.target.value })}>
-          <option value="">Tous les routeurs</option>
-          {options.routers.map((router) => (
-            <option key={router.id} value={router.id}>
-              {router.name}
-            </option>
-          ))}
-        </select>
+        <div className="files-select-control">
+          <select value={filters.routerId} onChange={(event) => onChange({ routerId: event.target.value })}>
+            <option value="">Tous les routeurs</option>
+            {options.routers.map((router) => (
+              <option key={router.id} value={router.id}>
+                {router.name}
+              </option>
+            ))}
+          </select>
+          <ChevronDown aria-hidden="true" />
+        </div>
       </label>
       <div className="files-filter-panel__actions">
         <Button onClick={onReset} variant="ghost">

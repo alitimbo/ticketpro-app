@@ -170,6 +170,7 @@ const tableColumns: Record<LocalTableName, string[]> = {
   ],
   routers: [
     "id",
+    "cloud_router_id",
     "account_id",
     "zone_id",
     "name",

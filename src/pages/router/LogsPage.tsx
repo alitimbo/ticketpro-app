@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
   Clipboard,
   Download,
   Eye,
@@ -153,6 +154,7 @@ export function LogsPage() {
   ).length;
   const infoCount = scopedLogs.filter((log) => log.level === "info").length;
   const canClean = session?.permissions.includes("router.logs.clean") ?? false;
+  const activeFilterCount = Object.values(filters).filter((value) => Boolean(value)).length;
 
   useEffect(() => {
     setPage(1);
@@ -376,18 +378,29 @@ export function LogsPage() {
       </div>
 
       <Card>
-        <div className="logs-toolbar">
+        <div className="logs-filter-header">
           <div className="tickets-count">
-            <strong>Articles ({filteredLogs.length})</strong>
+            <strong>{filteredLogs.length} journal(aux)</strong>
             <span>
               {lastRefreshedAt
                 ? `Actualisé ${formatLogDate(lastRefreshedAt)}`
                 : "Détails techniques masqués par défaut"}
             </span>
           </div>
-          <label className="date-field">
-            Recherche
-            <div className="input-with-icon">
+          <div className="logs-filter-header__actions">
+            {activeFilterCount > 0 ? (
+              <Badge status="active">{activeFilterCount} filtre(s) actif(s)</Badge>
+            ) : null}
+            <Button icon={Filter} onClick={() => setFiltersOpen((current) => !current)}>
+              {filtersOpen ? "Masquer les filtres" : "Filtres avancés"}
+            </Button>
+          </div>
+        </div>
+
+        <div className="logs-filter-primary">
+          <label className="logs-filter-field logs-filter-field--search">
+            <span>Recherche</span>
+            <div className="logs-search-control">
               <Search aria-hidden="true" />
               <input
                 placeholder="Action, message, routeur…"
@@ -396,41 +409,45 @@ export function LogsPage() {
               />
             </div>
           </label>
-          <label className="date-field">
-            Depuis
-            <input
-              type="date"
-              value={filters.dateFrom}
-              onChange={(event) => updateFilters({ dateFrom: event.target.value })}
-            />
+
+          <div className="logs-date-range">
+            <label className="logs-filter-field">
+              <span>Depuis</span>
+              <input
+                type="date"
+                value={filters.dateFrom}
+                onChange={(event) => updateFilters({ dateFrom: event.target.value })}
+              />
+            </label>
+            <label className="logs-filter-field">
+              <span>À</span>
+              <input
+                type="date"
+                value={filters.dateTo}
+                onChange={(event) => updateFilters({ dateTo: event.target.value })}
+              />
+            </label>
+          </div>
+
+          <label className="logs-filter-field">
+            <span>Niveau</span>
+            <div className="logs-select-control">
+              <select
+                value={filters.level}
+                onChange={(event) =>
+                  updateFilters({ level: event.target.value as LogFilters["level"] })
+                }
+              >
+                <option value="">Tous les niveaux</option>
+                {logLevels.map((level) => (
+                  <option key={level} value={level}>
+                    {levelLabel(level)}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown aria-hidden="true" />
+            </div>
           </label>
-          <label className="date-field">
-            À
-            <input
-              type="date"
-              value={filters.dateTo}
-              onChange={(event) => updateFilters({ dateTo: event.target.value })}
-            />
-          </label>
-          <label className="date-field">
-            Niveau
-            <select
-              value={filters.level}
-              onChange={(event) =>
-                updateFilters({ level: event.target.value as LogFilters["level"] })
-              }
-            >
-              <option value="">Tous</option>
-              {logLevels.map((level) => (
-                <option key={level} value={level}>
-                  {levelLabel(level)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <Button icon={Filter} onClick={() => setFiltersOpen((current) => !current)}>
-            {filtersOpen ? "Masquer filtres" : "Filtres"}
-          </Button>
         </div>
 
         {filtersOpen ? (
@@ -506,21 +523,24 @@ export function LogsPage() {
           description="Cette politique est persistée et vérifiée automatiquement au démarrage de session, au maximum une fois par jour."
           title="Conservation des journaux"
         >
-          <div className="logs-toolbar">
-            <label className="date-field">
-              Conserver
-              <select
-                value={retentionDays}
-                onChange={(event) =>
-                  void updateRetentionPolicy(Number(event.target.value))
-                }
-              >
-                {allowedLogRetentionDays.map((days) => (
-                  <option key={days} value={days}>
-                    {days === 365 ? "1 an" : `${days} jours`}
-                  </option>
-                ))}
-              </select>
+          <div className="logs-retention-toolbar">
+            <label className="logs-filter-field">
+              <span>Durée de conservation</span>
+              <div className="logs-select-control">
+                <select
+                  value={retentionDays}
+                  onChange={(event) =>
+                    void updateRetentionPolicy(Number(event.target.value))
+                  }
+                >
+                  {allowedLogRetentionDays.map((days) => (
+                    <option key={days} value={days}>
+                      {days === 365 ? "1 an" : `${days} jours`}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown aria-hidden="true" />
+              </div>
             </label>
             <div className="tickets-count">
               <strong>{eligibleForCleanup} éligible(s)</strong>
@@ -562,55 +582,70 @@ function LogsFilterPanel({
 }) {
   return (
     <div className="logs-filter-panel">
-      <label className="date-field">
-        Catégorie
-        <select
-          value={filters.category}
-          onChange={(event) =>
-            onChange({ category: event.target.value as LogFilters["category"] })
-          }
-        >
-          <option value="">Toutes</option>
-          {logCategories.map((category) => (
-            <option key={category} value={category}>
-              {categoryLabel(category)}
-            </option>
-          ))}
-        </select>
+      <div className="logs-filter-panel__heading">
+        <div>
+          <strong>Filtres avancés</strong>
+          <span>Affinez les journaux par origine et par utilisateur.</span>
+        </div>
+      </div>
+      <label className="logs-filter-field">
+        <span>Catégorie</span>
+        <div className="logs-select-control">
+          <select
+            value={filters.category}
+            onChange={(event) =>
+              onChange({ category: event.target.value as LogFilters["category"] })
+            }
+          >
+            <option value="">Toutes les catégories</option>
+            {logCategories.map((category) => (
+              <option key={category} value={category}>
+                {categoryLabel(category)}
+              </option>
+            ))}
+          </select>
+          <ChevronDown aria-hidden="true" />
+        </div>
       </label>
-      <label className="date-field">
-        Routeur
-        <select
-          value={filters.routerId}
-          onChange={(event) => onChange({ routerId: event.target.value })}
-        >
-          <option value="">Tous</option>
-          {options.routers.map((router) => (
-            <option key={router.id} value={router.id}>
-              {router.name}
-            </option>
-          ))}
-        </select>
+      <label className="logs-filter-field">
+        <span>Routeur</span>
+        <div className="logs-select-control">
+          <select
+            value={filters.routerId}
+            onChange={(event) => onChange({ routerId: event.target.value })}
+          >
+            <option value="">Tous les routeurs</option>
+            {options.routers.map((router) => (
+              <option key={router.id} value={router.id}>
+                {router.name}
+              </option>
+            ))}
+          </select>
+          <ChevronDown aria-hidden="true" />
+        </div>
       </label>
-      <label className="date-field">
-        Profil
-        <select
-          value={filters.userProfile}
-          onChange={(event) =>
-            onChange({ userProfile: event.target.value as LogFilters["userProfile"] })
-          }
-        >
-          <option value="">Tous</option>
-          {options.profiles.map((profile) => (
-            <option key={profile} value={profile}>
-              {profileLabel(profile)}
-            </option>
-          ))}
-        </select>
+      <label className="logs-filter-field">
+        <span>Profil</span>
+        <div className="logs-select-control">
+          <select
+            value={filters.userProfile}
+            onChange={(event) =>
+              onChange({ userProfile: event.target.value as LogFilters["userProfile"] })
+            }
+          >
+            <option value="">Tous les profils</option>
+            {options.profiles.map((profile) => (
+              <option key={profile} value={profile}>
+                {profileLabel(profile)}
+              </option>
+            ))}
+          </select>
+          <ChevronDown aria-hidden="true" />
+        </div>
       </label>
-      <div className="files-filter-panel__actions">
+      <div className="logs-filter-panel__actions">
         <Button icon={RotateCcw} onClick={onReset} variant="ghost">
-          Réinitialiser
+          Tout réinitialiser
         </Button>
       </div>
     </div>

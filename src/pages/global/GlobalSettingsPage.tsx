@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useLocation } from "react-router-dom";
 import {
   ArchiveRestore,
   Clock3,
@@ -62,6 +63,7 @@ const fallbackMetadata: AppMetadata = {
 };
 
 export function GlobalSettingsPage() {
+  const location = useLocation();
   const { saasAccount, session } = useAuth();
   const { database, isInitialized, isPersistent } = useAppDatabase();
   const accountId = session?.account_id ?? "";
@@ -81,6 +83,7 @@ export function GlobalSettingsPage() {
   const [updateBusy, setUpdateBusy] = useState<"checking" | "installing" | null>(null);
   const [updateChecked, setUpdateChecked] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<number | null>(null);
+  const updateSectionRef = useRef<HTMLDivElement>(null);
   const appSettingsRepository = useMemo(
     () => new AppSettingsRepository(database),
     [database]
@@ -101,6 +104,19 @@ export function GlobalSettingsPage() {
       mounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (location.hash !== "#mise-a-jour") return;
+
+    const animationFrame = window.requestAnimationFrame(() => {
+      const section = updateSectionRef.current;
+      if (!section) return;
+      section.scrollIntoView({ behavior: "smooth", block: "center" });
+      section.focus({ preventScroll: true });
+    });
+
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [location.hash, location.key]);
 
   useEffect(() => {
     if (!isPersistent || !isInitialized) return;
@@ -554,7 +570,12 @@ export function GlobalSettingsPage() {
         </div>
       </Card>
 
-      <div id="mise-a-jour">
+      <div
+        className="settings-update-section"
+        id="mise-a-jour"
+        ref={updateSectionRef}
+        tabIndex={-1}
+      >
         <Card
           title="Mise à jour de TicketPro"
           description="Contrôle signé, sauvegarde automatique de la base locale, puis installation silencieuse."

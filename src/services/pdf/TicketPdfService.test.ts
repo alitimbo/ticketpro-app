@@ -7,14 +7,14 @@ import {
 } from "./TicketPdfService";
 
 describe("TicketPdfService", () => {
-  it("génère un PDF A4 lisible avec 28 tickets par page", () => {
-    const input = buildPdfInput(41);
+  it("génère un PDF A4 lisible avec 40 tickets par page", () => {
+    const input = buildPdfInput(40);
     const pdf = generateTicketPdf(input);
     const text = new TextDecoder().decode(pdf);
 
     expect(text.startsWith("%PDF-1.4")).toBe(true);
     expect(text).toContain("/MediaBox [0 0 595.28 841.89]");
-    expect(text).toContain("/Count 2");
+    expect(text).toContain("/Count 1");
     expect(text).toContain("(Zone Centre)");
     expect(text).toContain("(LOGIN)");
     expect(text).toContain("(123001)");
@@ -22,6 +22,9 @@ describe("TicketPdfService", () => {
     expect(text).toContain("(Portail wifi.ticketpro.local)");
     expect(text).toContain("(Contact +227 90 12 34 56)");
     expect(text).not.toContain("(Lot ");
+
+    const overflowText = new TextDecoder().decode(generateTicketPdf(buildPdfInput(41)));
+    expect(overflowText).toContain("/Count 2");
   });
 
   it("prépare l'enregistrement generated_files du lot", () => {

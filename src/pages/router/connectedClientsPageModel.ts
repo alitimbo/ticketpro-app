@@ -34,6 +34,11 @@ export type ConnectedClientViewModel = {
   username: string;
 };
 
+export type ConnectedClientPlanOption = {
+  id: string;
+  name: string;
+};
+
 export const emptyConnectedClientFilters: ConnectedClientFilters = {
   code: "",
   duration: "",
@@ -49,19 +54,25 @@ export function buildConnectedClientViewModels(
   router: { id: string; name: string }
 ): ConnectedClientViewModel[] {
   const ticketsByUsername = new Map(hotspotUsers.map((user) => [user.username, user]));
-  const plansById = new Map(plans.map((plan) => [plan.id, plan]));
 
   return activeUsers.map((activeUser) => {
     const ticket = ticketsByUsername.get(activeUser.username);
-    const plan = ticket ? plansById.get(ticket.planId) : undefined;
+    const plan = ticket
+      ? plans.find((candidate) =>
+          candidate.id === ticket.planId
+          || candidate.profileName === ticket.planId
+          || candidate.profileName === ticket.profileName
+          || candidate.name === ticket.planId
+        )
+      : undefined;
 
     return {
       downloadedBytes: activeUser.downloadedBytes,
       id: activeUser.id,
       ipAddress: activeUser.ipAddress,
       macAddress: activeUser.macAddress,
-      planId: ticket?.planId ?? null,
-      planName: plan?.name ?? "Plan non identifié",
+      planId: plan?.id ?? ticket?.planId ?? null,
+      planName: plan?.name ?? ticket?.profileName ?? ticket?.planId ?? "Plan non identifié",
       routerId: router.id,
       routerName: router.name,
       sessionTimeLeft: activeUser.sessionTimeLeft,
@@ -87,11 +98,16 @@ export function buildCachedConnectedClientViewModels(
   router: { id: string; name: string }
 ): ConnectedClientViewModel[] {
   const ticketsByUsername = new Map(tickets.map((ticket) => [ticket.username, ticket]));
-  const plansById = new Map(plans.map((plan) => [plan.id, plan]));
 
   return cachedUsers.map((cachedUser) => {
     const ticket = ticketsByUsername.get(cachedUser.username);
-    const plan = ticket ? plansById.get(ticket.plan_id) : null;
+    const plan = ticket
+      ? plans.find((candidate) =>
+          candidate.id === ticket.plan_id
+          || candidate.mikrotik_profile_name === ticket.plan_id
+          || candidate.name === ticket.plan_id
+        ) ?? null
+      : null;
     const downloadedBytes = cachedUser.downloaded_bytes;
     const uploadedBytes = cachedUser.uploaded_bytes;
     const uptime = cachedUser.uptime ?? "0s";
@@ -101,8 +117,8 @@ export function buildCachedConnectedClientViewModels(
       id: cachedUser.id,
       ipAddress: cachedUser.ip_address ?? "",
       macAddress: cachedUser.mac_address ?? "",
-      planId: ticket?.plan_id ?? null,
-      planName: plan?.name ?? "Plan non identifié",
+      planId: plan?.id ?? ticket?.plan_id ?? null,
+      planName: plan?.name ?? ticket?.plan_id ?? "Plan non identifié",
       routerId: router.id,
       routerName: router.name,
       sessionTimeLeft: cachedUser.session_time_left ?? "Non disponible",
@@ -158,16 +174,27 @@ export function filterConnectedClients(
   });
 }
 
-export function getConnectedClientPlanOptions(clients: ConnectedClientViewModel[]) {
+export function getConnectedClientPlanOptions(
+  clients: ConnectedClientViewModel[],
+  catalog: ConnectedClientPlanOption[] = []
+) {
   const options = new Map<string, string>();
 
+  catalog.forEach((plan) => {
+    if (plan.id && plan.name) {
+      options.set(plan.id, plan.name);
+    }
+  });
+
   clients.forEach((client) => {
-    if (client.planId) {
+    if (client.planId && !options.has(client.planId)) {
       options.set(client.planId, client.planName);
     }
   });
 
-  return Array.from(options.entries()).map(([id, name]) => ({ id, name }));
+  return Array.from(options.entries())
+    .map(([id, name]) => ({ id, name }))
+    .sort((left, right) => left.name.localeCompare(right.name, "fr"));
 }
 
 export function formatClientBytes(bytes: number): string {

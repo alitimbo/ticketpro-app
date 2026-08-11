@@ -59,15 +59,19 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
     return this.delegate.listHotspotUsers();
   }
 
-  updateHotspotUser(username: string, planId: string) {
+  updateHotspotUser(
+    username: string,
+    planId: string,
+    limits?: import("../../domain/router").HotspotUserLimits
+  ) {
     const plan = this.findPlan(planId);
     return this.delegate.updateHotspotUser(
       username,
       this.resolveProfileReference(planId),
-      plan ? {
+      limits ?? (plan ? {
         limitBytesTotal: dataLimitMbToBytes(plan?.data_limit_mb),
         limitUptime: durationMinutesToRouterOs(plan?.duration_minutes)
-      } : undefined
+      } : undefined)
     );
   }
 

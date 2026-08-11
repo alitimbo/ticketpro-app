@@ -122,6 +122,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "ticket_runtime_tracking",
         include_str!("../migrations/023_ticket_runtime_tracking.sql"),
     ),
+    (
+        24,
+        "router_cloud_identity",
+        include_str!("../migrations/024_router_cloud_identity.sql"),
+    ),
 ];
 
 const DATABASE_FILE_NAME: &str = "hotspot-manager.sqlite";

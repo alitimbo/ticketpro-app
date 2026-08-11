@@ -12,7 +12,6 @@ import {
   HardDrive,
   ListChecks,
   RefreshCw,
-  Router,
   ServerCog,
   Upload,
   Users,
@@ -34,7 +33,7 @@ import {
   RouterSnapshotRepository
 } from "../../services/database/repositories";
 import { DatabaseRouterActionLogger } from "../../services/logging";
-import { Badge, Button, Card, EmptyState, PageHeader, StatCard, StatusDot } from "../../shared/ui";
+import { AsyncStateCard, Badge, Button, Card, EmptyState, PageHeader, StatCard } from "../../shared/ui";
 import type { IconComponent } from "../../shared/ui";
 import {
   buildMonitoringViewModel,
@@ -51,7 +50,7 @@ export function MonitoringPage() {
   const [model, setModel] = useState<MonitoringViewModel | null>(null);
   const [logs, setLogs] = useState<RouterActionLog[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   const [showTechnicalLogs, setShowTechnicalLogs] = useState(false);
 
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
@@ -193,9 +192,26 @@ export function MonitoringPage() {
         title="Monitoring"
       />
 
-      {error ? <p className="form-error">{error}</p> : null}
-
-      {model ? (
+      {isLoading ? (
+        <AsyncStateCard
+          description="TicketPro vérifie les services et les mesures directement sur le MikroTik."
+          errorDescription="La lecture du routeur n’a pas pu être terminée."
+          errorTitle="État réseau indisponible"
+          loadingDescription="Lecture de l’API, du Hotspot, du trafic, des ressources, des clients et des profils RouterOS."
+          loadingTitle="Analyse du réseau en cours…"
+          status="loading"
+          title="Préparation de l’état réseau"
+        />
+      ) : error ? (
+        <AsyncStateCard
+          description="TicketPro doit relire le MikroTik pour afficher un état réseau fiable."
+          errorDescription={error}
+          errorTitle="Impossible de lire l’état du routeur"
+          onRetry={() => void refresh()}
+          status="error"
+          title="État réseau indisponible"
+        />
+      ) : model ? (
         <>
           <Card className={`monitoring-health monitoring-health--${model.overallStatus}`}>
             <div className="monitoring-health__main">
@@ -300,18 +316,14 @@ export function MonitoringPage() {
           </div>
         </>
       ) : (
-        <Card>
-          <EmptyState
-            action={
-              <Button disabled={isLoading} icon={RefreshCw} onClick={() => void refresh()} variant="primary">
-                Rafraîchir
-              </Button>
-            }
-            description="Les informations du routeur ne sont pas encore chargées."
-            icon={Router}
-            title="Monitoring en attente"
-          />
-        </Card>
+        <AsyncStateCard
+          description="Aucune mesure RouterOS n’est disponible pour le moment."
+          errorDescription="Relancez la lecture pour récupérer l’état réel du routeur."
+          errorTitle="Monitoring en attente"
+          onRetry={() => void refresh()}
+          status="error"
+          title="État réseau indisponible"
+        />
       )}
     </div>
   );

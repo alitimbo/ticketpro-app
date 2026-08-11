@@ -26,6 +26,7 @@ export type RouterConnectionTestStatus =
 
 export type RouterCardData = {
   accountId: string;
+  cloudRouterId?: string | null;
   createdByProfileId: string | null;
   hotspotAddress?: string | null;
   id: string;
@@ -224,6 +225,7 @@ export function routerCardFromRecord(
 
   return {
     accountId: record.account_id,
+    cloudRouterId: record.cloud_router_id ?? record.id,
     apiPort: record.api_port,
     apiSslPort: record.api_ssl_port,
     boardName: record.board_name ?? "Non détecté",
@@ -260,6 +262,7 @@ export function routerRecordFromCard(router: RouterCardData): CreateRouterInput 
     api_port: router.apiPort,
     api_ssl_port: router.apiSslPort,
     board_name: router.boardName,
+    cloud_router_id: router.cloudRouterId ?? router.id,
     connection_mode: router.preferredMode,
     created_by_profile_id: router.createdByProfileId ?? "",
     encrypted_password: router.encryptedPassword,

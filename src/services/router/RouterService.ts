@@ -154,8 +154,16 @@ export class RouterService {
     return this.run("listHotspotUsers", () => this.adapter.listHotspotUsers());
   }
 
-  updateHotspotUser(username: string, planId: string) {
-    return this.run("updateHotspotUser", () => this.adapter.updateHotspotUser(username, planId), "router.tickets.generate");
+  updateHotspotUser(
+    username: string,
+    planId: string,
+    limits?: import("../../domain/router").HotspotUserLimits
+  ) {
+    return this.run(
+      "updateHotspotUser",
+      () => this.adapter.updateHotspotUser(username, planId, limits),
+      "router.tickets.generate"
+    );
   }
 
   createHotspotUser(user: HotspotUserDraft) {

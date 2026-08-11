@@ -59,6 +59,7 @@ import {
   formatClientBytes,
   getConnectedClientPlanOptions,
   type ConnectedClientFilters,
+  type ConnectedClientPlanOption,
   type ConnectedClientViewModel
 } from "./connectedClientsPageModel";
 
@@ -91,6 +92,7 @@ export function ConnectedClientsPage() {
   const [lastRefreshAt, setLastRefreshAt] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [selectedClient, setSelectedClient] = useState<ConnectedClientViewModel | null>(null);
+  const [availablePlans, setAvailablePlans] = useState<ConnectedClientPlanOption[]>([]);
 
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
   const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
@@ -202,7 +204,9 @@ export function ConnectedClientsPage() {
           }
         }
       }
-      applyClients(buildConnectedClientViewModels(activeUsers, hotspotUsers, plans, router));
+      const liveClients = buildConnectedClientViewModels(activeUsers, hotspotUsers, plans, router);
+      setAvailablePlans(plans.map((plan) => ({ id: plan.id, name: plan.name })));
+      applyClients(liveClients);
       setDataSource("live");
       setLastRefreshAt(formatRefreshDate(new Date()));
     } catch (error) {
@@ -215,6 +219,7 @@ export function ConnectedClientsPage() {
         ]);
 
         if (router && router.account_id === session?.account_id && cachedUsers.length > 0) {
+          setAvailablePlans(planRecords.map((plan) => ({ id: plan.id, name: plan.name })));
           applyClients(
             buildCachedConnectedClientViewModels(
               cachedUsers,
@@ -247,7 +252,10 @@ export function ConnectedClientsPage() {
   }, [accessPolicyService, activeSessionCacheRepository, bindingService, canManageDeviceBinding, connectionRepository, database, isInitialized, isPersistent, planRepository, routerId, routerRepository, session, ticketRepository]);
 
   const filteredClients = useMemo(() => filterConnectedClients(clients, filters), [clients, filters]);
-  const planOptions = useMemo(() => getConnectedClientPlanOptions(clients), [clients]);
+  const planOptions = useMemo(
+    () => getConnectedClientPlanOptions(clients, availablePlans),
+    [availablePlans, clients]
+  );
   const totalDownload = filteredClients.reduce((total, client) => total + client.downloadedBytes, 0);
   const totalUpload = filteredClients.reduce((total, client) => total + client.uploadedBytes, 0);
   const hasActiveFilters =
@@ -429,7 +437,7 @@ export function ConnectedClientsPage() {
           <label className="form-field">
             Plan
             <select value={filters.planId} onChange={(event) => updateFilters({ planId: event.target.value })}>
-              <option value="">Tous</option>
+              <option value="">Tous les plans</option>
               {planOptions.map((plan) => (
                 <option key={plan.id} value={plan.id}>
                   {plan.name}

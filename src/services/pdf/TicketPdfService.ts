@@ -68,7 +68,7 @@ const pageSizes: Record<TicketPdfFormat, PageSize> = {
 };
 
 const grids: Record<TicketPdfFormat, TicketGrid> = {
-  a4: { columns: 4, margin: 36, rows: 7 },
+  a4: { columns: 5, margin: 18, rows: 8 },
   a5: { columns: 2, margin: 24, rows: 4 },
   thermal58: { columns: 1, margin: 8, rows: 1 },
   thermal80: { columns: 1, margin: 10, rows: 1 }
@@ -228,7 +228,8 @@ function drawTicket(
     return;
   }
 
-  const padding = isThermal ? 8 : 6;
+  const isCompactA4 = input.format === "a4";
+  const padding = isCompactA4 ? 5 : 6;
   const centerX = x + cellWidth / 2;
   const top = y + cellHeight - padding;
   const password = resolveTicketPdfPassword(ticket);
@@ -246,74 +247,80 @@ function drawTicket(
   }
 
   const contentWidth = cellWidth - padding * 2;
-  const titleSize = fitTextSize(input.zoneName, contentWidth, isThermal ? 11 : 8.4, isThermal ? 8 : 6);
+  const titleSize = fitTextSize(input.zoneName, contentWidth, isCompactA4 ? 7.2 : 8.4, isCompactA4 ? 4.8 : 6);
   if (settings?.showZoneName !== false || settings?.showLogo) {
     const header = [settings?.showLogo ? "TICKETPRO" : null, settings?.showZoneName !== false ? input.zoneName : null]
       .filter(Boolean)
       .join(" · ");
-    page.text(header, centerX, top - 8, { align: "center", font: "bold", size: fitTextSize(header, contentWidth, titleSize, isThermal ? 7 : 5.2) });
+    page.text(header, centerX, top - (isCompactA4 ? 7 : 8), {
+      align: "center",
+      font: "bold",
+      size: fitTextSize(header, contentWidth, titleSize, isCompactA4 ? 4.5 : 5.2)
+    });
   }
-  page.text(`TICKET ${index}`, centerX, top - (isThermal ? 20 : 17), {
-    align: "center",
-    size: isThermal ? 6.4 : 4.2
-  });
+  if (!isCompactA4) {
+    page.text(`TICKET ${index}`, centerX, top - 17, {
+      align: "center",
+      size: 4.2
+    });
+  }
 
-  const credentialTop = top - (isThermal ? 27 : 21);
-  const credentialHeight = isSingleCode ? (isThermal ? 34 : 25) : (isThermal ? 58 : 38);
+  const credentialTop = top - (isCompactA4 ? 14 : 21);
+  const credentialHeight = isSingleCode ? (isCompactA4 ? 23 : 25) : (isCompactA4 ? 34 : 38);
   const credentialBottom = credentialTop - credentialHeight;
   const credentialX = x + padding;
   page.rect(credentialX, credentialBottom, contentWidth, credentialHeight);
 
-  const credentialLabelSize = isThermal ? 6.2 : 4.2;
+  const credentialLabelSize = isCompactA4 ? 3.8 : 4.2;
   if (isSingleCode) {
-    page.text("LOGIN", centerX, credentialTop - (isThermal ? 10 : 8), {
+    page.text("LOGIN", centerX, credentialTop - (isCompactA4 ? 7 : 8), {
       align: "center",
       font: "bold",
       size: credentialLabelSize
     });
-    page.text(showUsername ? ticket.username : "", centerX, credentialTop - (isThermal ? 27 : 21), {
+    page.text(showUsername ? ticket.username : "", centerX, credentialTop - (isCompactA4 ? 18 : 21), {
       align: "center",
       font: "bold",
-      size: fitTextSize(ticket.username, contentWidth - 8, isThermal ? 15 : 11, isThermal ? 9 : 7)
+      size: fitTextSize(ticket.username, contentWidth - 8, isCompactA4 ? 8.5 : 11, isCompactA4 ? 5.8 : 7)
     });
   } else {
     const dividerY = credentialTop - credentialHeight / 2;
     page.line(credentialX, dividerY, credentialX + contentWidth, dividerY);
-    page.text("LOGIN", centerX, credentialTop - (isThermal ? 8 : 6), {
+    page.text("LOGIN", centerX, credentialTop - (isCompactA4 ? 5 : 6), {
       align: "center",
       font: "bold",
       size: credentialLabelSize
     });
-    page.text(showUsername ? ticket.username : "", centerX, credentialTop - (isThermal ? 21 : 16), {
+    page.text(showUsername ? ticket.username : "", centerX, credentialTop - (isCompactA4 ? 14 : 16), {
       align: "center",
       font: "bold",
-      size: fitTextSize(ticket.username, contentWidth - 8, isThermal ? 12 : 8.5, isThermal ? 8 : 5.8)
+      size: fitTextSize(ticket.username, contentWidth - 8, isCompactA4 ? 7 : 8.5, isCompactA4 ? 4.8 : 5.8)
     });
-    page.text("MOT DE PASSE", centerX, dividerY - (isThermal ? 9 : 7), {
+    page.text("MOT DE PASSE", centerX, dividerY - (isCompactA4 ? 5 : 7), {
       align: "center",
       font: "bold",
       size: credentialLabelSize
     });
-    page.text(password, centerX, dividerY - (isThermal ? 23 : 17), {
+    page.text(password, centerX, dividerY - (isCompactA4 ? 14 : 17), {
       align: "center",
       font: "bold",
-      size: fitTextSize(password, contentWidth - 8, isThermal ? 12 : 8.5, isThermal ? 8 : 5.8)
+      size: fitTextSize(password, contentWidth - 8, isCompactA4 ? 7 : 8.5, isCompactA4 ? 4.8 : 5.8)
     });
   }
 
-  const smallSize = isThermal ? 7 : 4.5;
-  const lineGap = isThermal ? 10 : 6.2;
-  let lineY = credentialBottom - (isThermal ? 11 : 8);
+  const smallSize = isCompactA4 ? 3.8 : 4.5;
+  const lineGap = isCompactA4 ? 5.4 : 6.2;
+  let lineY = credentialBottom - (isCompactA4 ? 6 : 8);
   page.text(input.planName, centerX, lineY, {
     align: "center",
     font: "bold",
-    size: fitTextSize(input.planName, contentWidth, isThermal ? 10 : 6.6, isThermal ? 7 : 4.5)
+    size: fitTextSize(input.planName, contentWidth, isCompactA4 ? 5.6 : 6.6, isCompactA4 ? 3.8 : 4.5)
   });
   lineY -= lineGap;
   const allowanceLabel = [settings?.showDuration === false ? null : `Duree ${input.durationLabel}`, settings?.showDataLimit === false ? null : input.dataLimitLabel].filter(Boolean).join(" - ");
   page.text(allowanceLabel, centerX, lineY, {
     align: "center",
-    size: fitTextSize(allowanceLabel, contentWidth, smallSize, isThermal ? 5.2 : 3.5)
+    size: fitTextSize(allowanceLabel, contentWidth, smallSize, isCompactA4 ? 3.1 : 3.5)
   });
 
   if (input.priceLabel && settings?.showPrice !== false) {
@@ -329,7 +336,7 @@ function drawTicket(
     page.text("Expiration apres activation", centerX, lineY, { align: "center", size: smallSize });
   }
 
-  const qrSize = isThermal ? 42 : 28;
+  const qrSize = isCompactA4 ? 22 : 28;
   if (showQr && cellWidth > 85) {
     drawQrPattern(
       page,
@@ -340,24 +347,24 @@ function drawTicket(
     );
   }
 
-  const footerSize = isThermal ? 6.2 : 3.9;
+  const footerSize = isCompactA4 ? 3.5 : 3.9;
   const footerCenterX = showQr
     ? x + padding + (cellWidth - padding * 3 - qrSize) / 2
     : centerX;
   const footerWidth = showQr ? cellWidth - padding * 3 - qrSize : cellWidth - padding * 2;
   if (settings?.showInstructions !== false) {
     const hotspotLabel = `Portail ${input.hotspotAddress}`;
-    page.text(hotspotLabel, footerCenterX, y + padding + 8, {
+    page.text(hotspotLabel, footerCenterX, y + padding + (isCompactA4 ? 5 : 8), {
       align: "center",
       font: "bold",
-      size: fitTextSize(hotspotLabel, footerWidth, isThermal ? 7 : 4.6, isThermal ? 4.8 : 3.2)
+      size: fitTextSize(hotspotLabel, footerWidth, isCompactA4 ? 3.9 : 4.6, isCompactA4 ? 2.9 : 3.2)
     });
   }
   if (settings?.showContact !== false) {
     const ownerPhoneLabel = `Contact ${input.ownerPhone}`;
-    page.text(ownerPhoneLabel, footerCenterX, y + padding + 2, {
+    page.text(ownerPhoneLabel, footerCenterX, y + padding + (isCompactA4 ? -1 : 2), {
       align: "center",
-      size: fitTextSize(ownerPhoneLabel, footerWidth, footerSize, isThermal ? 4.8 : 3.1)
+      size: fitTextSize(ownerPhoneLabel, footerWidth, footerSize, isCompactA4 ? 2.9 : 3.1)
     });
   }
 }

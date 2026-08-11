@@ -83,8 +83,11 @@ doit être placé dans l'application Windows ou la landing page.
 accepte l'invitation sans changer son mot de passe. Une nouvelle identité crée
 son mot de passe pendant l'acceptation.
 
-Le lien expire après 30 minutes et son utilisation révoque toutes les anciennes
-sessions du compte. Un propriétaire peut vérifier la configuration avec
+Le lien d'invitation expire après 24 heures par défaut (durée configurable avec
+`SAAS_INVITATION_TTL_HOURS`). Un renvoi invalide immédiatement tous les anciens
+liens du membre. Une modification de rôle, de périmètre ou de statut révoque ses
+sessions actives afin que les nouveaux droits s'appliquent sans délai. Un
+propriétaire peut vérifier la configuration avec
 `POST /v1/admin/email/test`.
 
 ## Démarrage VPS

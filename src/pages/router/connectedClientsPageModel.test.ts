@@ -201,6 +201,29 @@ describe("connectedClientsPageModel", () => {
     expect(formatClientBytes(2048)).toBe("2.0 Ko");
   });
 
+  it("associe le nom de profil RouterOS à l'identifiant interne du plan", () => {
+    const remotePlans = [{
+      ...plans[0],
+      id: "*P1",
+      name: "Forfait 1 heure",
+      profileName: "plan-1h"
+    }];
+    const clients = buildConnectedClientViewModels(
+      [activeUsers[0]],
+      [hotspotUsers[0]],
+      remotePlans,
+      { id: "routeur-demo", name: "Routeur démo" }
+    );
+
+    expect(clients[0]).toMatchObject({
+      planId: "*P1",
+      planName: "Forfait 1 heure"
+    });
+    expect(getConnectedClientPlanOptions(clients, remotePlans)).toEqual([
+      { id: "*P1", name: "Forfait 1 heure" }
+    ]);
+  });
+
   it("comprend les semaines RouterOS pour le filtre de durée", () => {
     const clients = buildConnectedClientViewModels(
       [{ ...activeUsers[0], id: "active-week", uptime: "1w2d3h", username: "weekly" }],

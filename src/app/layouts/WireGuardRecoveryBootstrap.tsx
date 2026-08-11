@@ -14,10 +14,14 @@ export function WireGuardRecoveryBootstrap() {
   const { accountSession, saasAccount, session } = useAuth();
   const { database, isInitialized } = useAppDatabase();
   const accountId = accountSession?.accountId ?? session?.account_id ?? null;
-  const canUseVpn = Boolean(session?.permissions.includes("global.vpn"));
+  // Le tunnel est une condition technique pour joindre les routeurs autorises.
+  // Il ne donne pas le droit d'administrer les pairs VPN.
+  const canUseSecureConnection = Boolean(
+    session?.permissions.includes("global.routers.select")
+  );
 
   useEffect(() => {
-    if (!accountId || !session || !isInitialized || !canUseVpn) return;
+    if (!accountId || !session || !isInitialized || !canUseSecureConnection) return;
     const recoveryKey = `${accountId}:${saasAccount?.organization.id ?? "legacy"}`;
     if (recoveredAccounts.has(recoveryKey)) return;
     const scopedAccountId = accountId;
@@ -69,7 +73,7 @@ export function WireGuardRecoveryBootstrap() {
       if (heartbeatTimer !== null) window.clearInterval(heartbeatTimer);
       recoveredAccounts.delete(recoveryKey);
     };
-  }, [accountId, canUseVpn, database, isInitialized, saasAccount?.organization.id, session?.account_id]);
+  }, [accountId, canUseSecureConnection, database, isInitialized, saasAccount?.organization.id, session?.account_id]);
 
   return null;
 }

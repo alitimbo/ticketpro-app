@@ -9,6 +9,8 @@ export {
   deleteRemotePlanIdempotently,
   updateRemotePlanIdempotently
 } from "./RemoteHotspotPlanSync";
+export { synchronizePlanVouchers } from "./HotspotPlanVoucherSync";
+export type { PlanVoucherSyncResult } from "./HotspotPlanVoucherSync";
 export { createPersistedRouterService } from "./PersistedRouterService";
 export { PreparedRemoteConnectionProvider, remoteSecurityWarnings } from "./RemoteConnectionProvider";
 export { RouterAdapterError, isRouterAdapterError } from "./RouterAdapterError";

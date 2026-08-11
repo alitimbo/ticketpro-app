@@ -234,6 +234,52 @@ describe("RouterTicketSyncService", () => {
       [],
       []
     );
-    expect(archived.updates[0]?.status).toBe("archivé");
+    expect(archived.updates[0]).toMatchObject({
+      archivedAt: "2026-08-01T10:00:00.000Z",
+      status: "archivé",
+      syncStatus: "router_synced"
+    });
+    expect(archived.summary.routerMissing).toBe(0);
+  });
+
+  it("archive localement un voucher supprimé automatiquement après son expiration", () => {
+    const report = compareLocalAndRouterTickets(
+      [{
+        ...localTickets[0],
+        activatedAt: "2026-08-01T10:00:00.000Z",
+        expiresAt: "2026-08-01T11:00:00.000Z",
+        planValidityMinutes: 60,
+        status: "activé"
+      }],
+      [],
+      []
+    );
+
+    expect(report.updates[0]).toMatchObject({
+      archivedAt: expect.any(String),
+      completedAt: "2026-08-01T11:00:00.000Z",
+      routerDeletedAt: expect.any(String),
+      status: "archivé",
+      syncStatus: "router_synced"
+    });
+    expect(report.logs[0]).toMatchObject({ level: "info" });
+    expect(report.summary).toMatchObject({ routerMissing: 0, routerSynced: 1 });
+  });
+
+  it("ne recrée pas un voucher terminal déjà nettoyé par RouterOS", async () => {
+    let createCalls = 0;
+    const service = new RouterTicketSyncService({
+      createHotspotUser: async () => {
+        createCalls += 1;
+        return routerUsers[0];
+      },
+      listActiveUsers: async () => [],
+      listHotspotUsers: async () => []
+    });
+
+    const report = await service.resyncTicket({ ...localTickets[0], status: "expiré" });
+
+    expect(createCalls).toBe(0);
+    expect(report.updates[0]).toMatchObject({ status: "archivé", syncStatus: "router_synced" });
   });
 });

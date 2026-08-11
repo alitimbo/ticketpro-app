@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
   CheckCircle2,
+  LoaderCircle,
   LockKeyhole,
   Mail,
   Plus,
@@ -58,6 +60,16 @@ const roleDescriptions: Record<UserRole, string> = {
   guest: "Consultation uniquement."
 };
 
+type MemberOperation =
+  | { kind: "save" }
+  | { kind: "remove" | "resend" | "status"; memberId: string }
+  | null;
+
+type MemberConfirmation = {
+  kind: "remove" | "suspend";
+  member: SaasOrganizationUser;
+} | null;
+
 const roleGuide: Array<{
   accessLabel: string;
   allowed: string[];
@@ -113,15 +125,17 @@ export function TeamPage() {
   const [members, setMembers] = useState<SaasOrganizationUser[]>([]);
   const [routers, setRouters] = useState<Array<{ id: string; name: string }>>([]);
   const [form, setForm] = useState<MemberForm | null>(null);
+  const [confirmation, setConfirmation] = useState<MemberConfirmation>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [isSaving, setIsSaving] = useState(false);
+  const [operation, setOperation] = useState<MemberOperation>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const isOwner = saasAccount?.user.role === "owner";
+  const isBusy = operation !== null;
 
-  const refresh = async () => {
+  const refresh = async (clearCurrentError = true) => {
     setIsLoading(true);
-    setError(null);
+    if (clearCurrentError) setError(null);
     try {
       setMembers(await listSaasTeam());
     } catch (loadError) {
@@ -138,7 +152,10 @@ export function TeamPage() {
   useEffect(() => {
     if (!isInitialized || !accountSession) return;
     void routerRepository.listByAccount(accountSession.accountId).then((records) => {
-      setRouters(records.map((router) => ({ id: router.id, name: router.name })));
+      setRouters(records.map((router) => ({
+        id: router.cloud_router_id ?? router.id,
+        name: router.name
+      })));
     });
   }, [accountSession, isInitialized, routerRepository]);
 
@@ -157,21 +174,20 @@ export function TeamPage() {
   };
 
   const save = async () => {
-    if (!form) return;
+    if (!form || isBusy) return;
     setError(null);
     setMessage(null);
     if (!form.name.trim() || !form.email.includes("@")) {
       setError("Renseignez le nom et un email valide.");
       return;
     }
-    setIsSaving(true);
+    setOperation({ kind: "save" });
     try {
       if (form.id) {
         const current = members.find((member) => member.id === form.id);
         if (!current) throw new Error("Employé introuvable.");
         await updateSaasTeamMember({
           userId: form.id,
-          name: form.name.trim(),
           appRole: form.appRole,
           status: current.status,
           routerAccessMode: form.appRole === "admin" ? "all" : form.routerAccessMode,
@@ -187,54 +203,77 @@ export function TeamPage() {
           routerAccessMode: form.appRole === "admin" ? "all" : form.routerAccessMode,
           routerIds: form.routerIds
         });
-        setMessage(result.message);
+        if (result.invitation_delivery === "sent") {
+          setMessage(result.message);
+        } else {
+          setError(result.message);
+        }
       }
       setForm(null);
-      await refresh();
+      await refresh(false);
     } catch (saveError) {
       setError(errorMessage(saveError, "Impossible d'enregistrer l'employé."));
     } finally {
-      setIsSaving(false);
+      setOperation(null);
     }
   };
 
-  const toggleStatus = async (member: SaasOrganizationUser) => {
+  const changeStatus = async (member: SaasOrganizationUser) => {
+    if (isBusy) return;
     setError(null);
+    setMessage(null);
+    setOperation({ kind: "status", memberId: member.id });
     try {
       await updateSaasTeamMember({
         userId: member.id,
-        name: member.name,
         appRole: member.app_role,
         status: member.status === "active" ? "disabled" : "active",
         routerAccessMode: member.router_access.mode,
         routerIds: member.router_access.router_ids
       });
       setMessage(member.status === "active" ? "Employé suspendu." : "Employé réactivé.");
-      await refresh();
+      setConfirmation(null);
+      await refresh(false);
     } catch (statusError) {
       setError(errorMessage(statusError, "Modification impossible."));
+    } finally {
+      setOperation(null);
     }
   };
 
   const remove = async (member: SaasOrganizationUser) => {
-    if (!window.confirm(`Supprimer définitivement le compte de ${member.name} ?`)) return;
+    if (isBusy) return;
     setError(null);
+    setMessage(null);
+    setOperation({ kind: "remove", memberId: member.id });
     try {
       await removeSaasTeamMember(member.id);
       setMessage("Employé supprimé.");
-      await refresh();
+      setConfirmation(null);
+      await refresh(false);
     } catch (removeError) {
       setError(errorMessage(removeError, "Suppression impossible."));
+    } finally {
+      setOperation(null);
     }
   };
 
   const resendInvitation = async (member: SaasOrganizationUser) => {
+    if (isBusy) return;
     setError(null);
+    setMessage(null);
+    setOperation({ kind: "resend", memberId: member.id });
     try {
       const result = await resendSaasTeamInvitation(member.id);
-      setMessage(result.message);
+      if (result.invitation_delivery === "sent") {
+        setMessage(result.message);
+      } else {
+        setError(result.message);
+      }
     } catch (invitationError) {
       setError(errorMessage(invitationError, "Envoi impossible."));
+    } finally {
+      setOperation(null);
     }
   };
 
@@ -242,7 +281,16 @@ export function TeamPage() {
     <div className="page-stack">
       <PageHeader
         actions={
-          <Button icon={Plus} onClick={() => setForm({ ...emptyForm })} variant="primary">
+          <Button
+            disabled={isBusy}
+            icon={Plus}
+            onClick={() => {
+              setError(null);
+              setMessage(null);
+              setForm({ ...emptyForm });
+            }}
+            variant="primary"
+          >
             Ajouter un employé
           </Button>
         }
@@ -292,7 +340,11 @@ export function TeamPage() {
         title="Membres de l'organisation"
         description="Chaque personne se connecte avec son propre email et son propre mot de passe."
       >
-        {isLoading ? <p>Chargement de l'équipe…</p> : null}
+        {isLoading ? (
+          <p aria-live="polite" className="team-loading-state">
+            <LoaderCircle aria-hidden="true" /> Chargement de l'équipe…
+          </p>
+        ) : null}
         {!isLoading && members.length === 0 ? (
           <EmptyState
             description="Ajoutez votre premier employé pour lui attribuer un accès sécurisé."
@@ -304,8 +356,11 @@ export function TeamPage() {
           {members.map((member) => {
             const isProtectedOwner = member.role === "owner";
             const canManageMember = !isProtectedOwner && (isOwner || member.app_role !== "admin");
+            const statusBusy = operation?.kind === "status" && operation.memberId === member.id;
+            const resendBusy = operation?.kind === "resend" && operation.memberId === member.id;
+            const removeBusy = operation?.kind === "remove" && operation.memberId === member.id;
             return (
-              <article className="internal-profile-card" key={member.id}>
+              <article aria-busy={statusBusy || resendBusy || removeBusy} className="internal-profile-card" key={member.id}>
                 <div className="internal-profile-card__header">
                   <div className="internal-profile-card__title">
                     <ShieldCheck aria-hidden="true" />
@@ -316,7 +371,7 @@ export function TeamPage() {
                   </div>
                   <Badge status={member.status === "active" ? "success" : "offline"}>
                     {member.invitation_pending
-                      ? "Invitation en attente"
+                      ? member.status === "active" ? "Invitation en attente" : "Invitation suspendue"
                       : member.status === "active"
                         ? "Actif"
                         : "Suspendu"}
@@ -333,21 +388,40 @@ export function TeamPage() {
                 <p className="login-panel__text">{roleDescriptions[member.app_role]}</p>
                 {canManageMember ? (
                   <div className="internal-profile-card__actions">
-                    <Button onClick={() => openEdit(member)} variant="ghost">Modifier</Button>
+                    <Button disabled={isBusy} onClick={() => openEdit(member)} variant="ghost">
+                      Gérer les accès
+                    </Button>
                     {member.invitation_pending ? (
-                      <Button icon={Mail} onClick={() => void resendInvitation(member)} variant="ghost">
-                        Renvoyer l'invitation
+                      <Button
+                        className={resendBusy ? "button--loading" : ""}
+                        disabled={isBusy || member.status !== "active"}
+                        icon={resendBusy ? LoaderCircle : Mail}
+                        onClick={() => void resendInvitation(member)}
+                        title={member.status !== "active" ? "Réactivez ce membre avant de renvoyer son invitation." : undefined}
+                        variant="ghost"
+                      >
+                        {resendBusy ? "Envoi…" : "Renvoyer l'invitation"}
                       </Button>
                     ) : null}
                     <Button
-                      icon={member.status === "active" ? UserX : UserCheck}
-                      onClick={() => void toggleStatus(member)}
+                      className={statusBusy ? "button--loading" : ""}
+                      disabled={isBusy}
+                      icon={statusBusy ? LoaderCircle : member.status === "active" ? UserX : UserCheck}
+                      onClick={() => member.status === "active"
+                        ? setConfirmation({ kind: "suspend", member })
+                        : void changeStatus(member)}
                       variant="ghost"
                     >
-                      {member.status === "active" ? "Suspendre" : "Réactiver"}
+                      {statusBusy ? "Application…" : member.status === "active" ? "Suspendre" : "Réactiver"}
                     </Button>
-                    <Button icon={Trash2} onClick={() => void remove(member)} variant="danger">
-                      Supprimer
+                    <Button
+                      className={removeBusy ? "button--loading" : ""}
+                      disabled={isBusy}
+                      icon={removeBusy ? LoaderCircle : Trash2}
+                      onClick={() => setConfirmation({ kind: "remove", member })}
+                      variant="danger"
+                    >
+                      {removeBusy ? "Suppression…" : "Supprimer"}
                     </Button>
                   </div>
                 ) : null}
@@ -360,21 +434,25 @@ export function TeamPage() {
       {form ? (
         <div className="dialog-backdrop" role="presentation">
           <section aria-modal="true" className="confirm-dialog team-dialog" role="dialog">
-            <h2 className="confirm-dialog__title">{form.id ? "Modifier l'employé" : "Ajouter un employé"}</h2>
+            <h2 className="confirm-dialog__title">{form.id ? "Gérer les accès du membre" : "Ajouter un employé"}</h2>
             <p className="confirm-dialog__description">
               {form.id
-                ? "Les nouvelles permissions seront appliquées à sa prochaine action."
+                ? "Les nouvelles permissions prennent effet immédiatement et ses sessions actives seront fermées."
                 : "Un email sécurisé lui permettra de définir son mot de passe."}
             </p>
             <div className="form-grid">
               <label className="form-field">
                 Nom complet
-                <input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
+                <input
+                  disabled={Boolean(form.id) || isBusy}
+                  value={form.name}
+                  onChange={(event) => setForm({ ...form, name: event.target.value })}
+                />
               </label>
               <label className="form-field">
                 Email
                 <input
-                  disabled={Boolean(form.id)}
+                  disabled={Boolean(form.id) || isBusy}
                   type="email"
                   value={form.email}
                   onChange={(event) => setForm({ ...form, email: event.target.value })}
@@ -382,11 +460,16 @@ export function TeamPage() {
               </label>
               <label className="form-field">
                 Téléphone
-                <input value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} />
+                <input
+                  disabled={Boolean(form.id) || isBusy}
+                  value={form.phone}
+                  onChange={(event) => setForm({ ...form, phone: event.target.value })}
+                />
               </label>
               <label className="form-field">
                 Rôle
                 <select
+                  disabled={isBusy}
                   value={form.appRole}
                   onChange={(event) => {
                     const appRole = event.target.value as UserRole;
@@ -407,6 +490,7 @@ export function TeamPage() {
                 <label className="form-field">
                   Portée des routeurs
                   <select
+                    disabled={isBusy}
                     value={form.routerAccessMode}
                     onChange={(event) => setForm({
                       ...form,
@@ -427,6 +511,7 @@ export function TeamPage() {
                   <label className="toggle-option" key={router.id}>
                     <input
                       checked={form.routerIds.includes(router.id)}
+                      disabled={isBusy}
                       onChange={(event) => setForm({
                         ...form,
                         routerIds: event.target.checked
@@ -442,10 +527,53 @@ export function TeamPage() {
             ) : null}
 
             {error ? <p className="form-error">{error}</p> : null}
+            <div aria-busy={operation?.kind === "save"} className="confirm-dialog__actions">
+              <Button disabled={isBusy} onClick={() => setForm(null)} variant="ghost">Annuler</Button>
+              <Button
+                className={operation?.kind === "save" ? "button--loading" : ""}
+                disabled={isBusy}
+                icon={operation?.kind === "save" ? LoaderCircle : form.id ? RefreshCw : Plus}
+                onClick={() => void save()}
+                variant="primary"
+              >
+                {operation?.kind === "save" ? "Enregistrement…" : form.id ? "Enregistrer" : "Envoyer l'invitation"}
+              </Button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {confirmation ? (
+        <div className="dialog-backdrop" role="presentation">
+          <section
+            aria-describedby="team-confirmation-description"
+            aria-modal="true"
+            className="confirm-dialog team-confirmation-dialog"
+            role="alertdialog"
+          >
+            <div className="team-confirmation-dialog__icon"><AlertTriangle aria-hidden="true" /></div>
+            <h2 className="confirm-dialog__title">
+              {confirmation.kind === "remove" ? "Supprimer ce membre ?" : "Suspendre cet accès ?"}
+            </h2>
+            <p className="confirm-dialog__description" id="team-confirmation-description">
+              {confirmation.kind === "remove"
+                ? `${confirmation.member.name} perdra immédiatement l'accès à cette organisation. Son identité TicketPro restera disponible s'il appartient à une autre organisation.`
+                : `${confirmation.member.name} sera déconnecté et ne pourra plus utiliser les routeurs de cette organisation avant sa réactivation.`}
+            </p>
             <div className="confirm-dialog__actions">
-              <Button onClick={() => setForm(null)} variant="ghost">Annuler</Button>
-              <Button disabled={isSaving} icon={form.id ? RefreshCw : Plus} onClick={() => void save()} variant="primary">
-                {isSaving ? "Enregistrement…" : form.id ? "Enregistrer" : "Envoyer l'invitation"}
+              <Button disabled={isBusy} onClick={() => setConfirmation(null)} variant="ghost">Annuler</Button>
+              <Button
+                className={isBusy ? "button--loading" : ""}
+                disabled={isBusy}
+                icon={isBusy ? LoaderCircle : confirmation.kind === "remove" ? Trash2 : UserX}
+                onClick={() => confirmation.kind === "remove"
+                  ? void remove(confirmation.member)
+                  : void changeStatus(confirmation.member)}
+                variant="danger"
+              >
+                {isBusy
+                  ? "Application…"
+                  : confirmation.kind === "remove" ? "Supprimer définitivement" : "Suspendre l'accès"}
               </Button>
             </div>
           </section>

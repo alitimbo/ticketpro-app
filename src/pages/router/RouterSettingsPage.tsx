@@ -1092,10 +1092,11 @@ export function RouterSettingsPage() {
                 <Network aria-hidden="true" />
               </span>
               <span className="anti-sharing-option-card__content">
-                <strong>Blocage du partage IPv4 par TTL</strong>
+                <strong>Empêcher le partage de connexion IPv4</strong>
                 <small>
-                  MikroTik bloque les TTL 63 et 127 couramment produits lorsqu’un téléphone
-                  partage sa connexion à d’autres appareils.
+                  Le téléphone qui a validé le voucher garde Internet. MikroTik limite les
+                  réponses à ce téléphone afin qu’elles ne puissent pas être retransmises aux
+                  appareils connectés à son point d’accès.
                 </small>
                 <em>{accessPolicy.antiSharingMode === "strict" ? "Protection disponible" : "Nécessite le mode strict"}</em>
               </span>
@@ -1120,10 +1121,11 @@ export function RouterSettingsPage() {
                 <Network aria-hidden="true" />
               </span>
               <span className="anti-sharing-option-card__content">
-                <strong>Blocage IPv6 du réseau Hotspot</strong>
+                <strong>Empêcher le contournement par IPv6</strong>
                 <small>
-                  MikroTik coupe le trafic IPv6 transféré depuis le Hotspot pour empêcher
-                  qu’il contourne les protections appliquées en IPv4.
+                  À activer seulement si le Hotspot distribue de l’IPv6. RouterOS bloque alors
+                  l’IPv6 sur ce réseau, car l’authentification Hotspot et la protection TTL sont
+                  appliquées en IPv4.
                 </small>
                 <em>{accessPolicy.antiSharingMode === "strict" ? "Protection disponible" : "Nécessite le mode strict"}</em>
               </span>

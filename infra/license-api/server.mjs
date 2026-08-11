@@ -38,6 +38,10 @@ const SMTP_PASSWORD = String(process.env.SMTP_PASSWORD ?? "");
 const SMTP_FROM_EMAIL = String(process.env.SMTP_FROM_EMAIL ?? SMTP_USER);
 const SMTP_FROM_NAME = String(process.env.SMTP_FROM_NAME ?? "TicketPro");
 const SAAS_EXPOSE_RESET_TOKEN = process.env.SAAS_EXPOSE_RESET_TOKEN === "true";
+const parsedInvitationTtlHours = Number(process.env.SAAS_INVITATION_TTL_HOURS ?? 24);
+const SAAS_INVITATION_TTL_HOURS = Number.isFinite(parsedInvitationTtlHours)
+  ? Math.min(168, Math.max(1, Math.trunc(parsedInvitationTtlHours)))
+  : 24;
 const MAX_BODY_BYTES = 64 * 1024;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = 60;
@@ -916,7 +920,8 @@ const statements = {
   `),
   findOrganizationInvitationToken: db.prepare(`
     SELECT token.*, membership.organization_id, membership.user_id,
-      membership.invitation_status, organization.name AS organization_name,
+      membership.invitation_status, membership.status AS membership_status,
+      organization.name AS organization_name,
       user.email, user.name
     FROM organization_invitation_tokens AS token
     JOIN organization_memberships AS membership ON membership.id = token.membership_id
@@ -925,8 +930,9 @@ const statements = {
     WHERE token.token_hash = ? AND token.used_at IS NULL
     LIMIT 1
   `),
-  consumeOrganizationInvitationToken: db.prepare(`
-    UPDATE organization_invitation_tokens SET used_at = ? WHERE id = ?
+  consumePendingOrganizationInvitationTokens: db.prepare(`
+    UPDATE organization_invitation_tokens SET used_at = ?
+    WHERE membership_id = ? AND used_at IS NULL
   `),
   listOrganizationUsers: db.prepare(`
     SELECT * FROM organization_users
@@ -961,9 +967,6 @@ const statements = {
   `),
   organizationLoginFailed: db.prepare(`
     UPDATE organization_users SET failed_login_count = ?, locked_until = ?, updated_at = ? WHERE id = ?
-  `),
-  updateOrganizationIdentityName: db.prepare(`
-    UPDATE organization_users SET name = ?, updated_at = ? WHERE id = ?
   `),
   updateOrganizationPassword: db.prepare(`
     UPDATE organization_users SET password_hash = ?, failed_login_count = 0,
@@ -2253,6 +2256,13 @@ function requireTeamManager(request) {
     throw new HttpError(403, "Seuls le propriétaire et les administrateurs peuvent gérer l'équipe.");
   }
   return context;
+}
+
+function organizationContextHasPermission(context, permission) {
+  const appRole = context.membership.authority_role === "owner"
+    ? "admin"
+    : normalizeOrganizationAppRole(context.membership.app_role);
+  return (ORGANIZATION_ROLE_PERMISSIONS[appRole] ?? []).includes(permission);
 }
 
 function requireOrganizationPermission(request, permission, options = {}) {
@@ -4030,12 +4040,16 @@ const handlers = [
     const createdAt = nowIso();
     const existingUser = statements.findOrganizationUserByEmail.get(email);
     const userId = existingUser?.id ?? crypto.randomUUID();
+    const requiresPassword = !existingUser
+      || (!existingUser.last_login_at && Boolean(existingUser.invitation_pending));
     if (statements.findOrganizationMembership.get(context.organization.id, userId)) {
       throw new HttpError(409, "Cette personne est déjà membre ou invitée dans cette organisation.");
     }
     const membershipId = crypto.randomUUID();
     const invitationToken = randomToken(32);
-    const invitationExpiresAt = new Date(Date.now() + 24 * 3_600_000).toISOString();
+    const invitationExpiresAt = new Date(
+      Date.now() + SAAS_INVITATION_TTL_HOURS * 3_600_000
+    ).toISOString();
     db.exec("BEGIN IMMEDIATE");
     try {
       if (!existingUser) {
@@ -4071,7 +4085,7 @@ const handlers = [
         crypto.randomUUID(),
         membershipId,
         hash(invitationToken),
-        existingUser ? 0 : 1,
+        requiresPassword ? 1 : 0,
         invitationExpiresAt,
         createdAt
       );
@@ -4085,26 +4099,33 @@ const handlers = [
     }
     const member = statements.findOrganizationUserById.get(userId);
     const membership = statements.findOrganizationMembershipById.get(membershipId);
+    let invitationDelivered = false;
     try {
-      await deliverOrganizationInvitation(
+      invitationDelivered = await deliverOrganizationInvitation(
         member,
         context.organization,
         invitationToken,
         invitationExpiresAt,
-        !existingUser
+        requiresPassword
       );
     } catch (error) {
       console.error("Impossible d'envoyer l'invitation employé:", error.message);
     }
     logEvent(request, null, "organization_member_invited", context.organization.id, null, {
       member_id: userId,
-      app_role: appRole
+      app_role: appRole,
+      invitation_delivery: invitationDelivered ? "sent" : "not_sent",
+      router_access_mode: access.mode,
+      router_count: access.routerIds.length
     });
     return {
       member: organizationUserResponse(member, membership),
-      message: existingUser
-        ? "Invitation envoyée. Le mot de passe actuel de cette personne reste inchangé."
-        : "Invitation envoyée. Cette personne créera son mot de passe en l'acceptant.",
+      invitation_delivery: invitationDelivered ? "sent" : "not_sent",
+      message: invitationDelivered
+        ? requiresPassword
+          ? "Invitation envoyée. Cette personne créera son mot de passe en l'acceptant."
+          : "Invitation envoyée. Le mot de passe actuel de cette personne reste inchangé."
+        : "Le membre a été créé, mais l'email n'a pas pu être envoyé. Utilisez « Renvoyer l'invitation » après avoir vérifié le SMTP.",
       ...(SAAS_EXPOSE_RESET_TOKEN ? { invitation_token: invitationToken } : {})
     };
   }),
@@ -4130,11 +4151,6 @@ const handlers = [
     const updatedAt = nowIso();
     db.exec("BEGIN IMMEDIATE");
     try {
-      statements.updateOrganizationIdentityName.run(
-        body.name ? requireText(body, "name", 200) : member.name,
-        updatedAt,
-        member.id
-      );
       statements.updateOrganizationMembership.run(
         appRole,
         access.mode,
@@ -4144,8 +4160,9 @@ const handlers = [
         context.organization.id
       );
       replaceOrganizationRouterAccess(membership.id, access.routerIds, updatedAt);
-      if (status === "disabled") {
-        statements.revokeOrganizationMembershipSessions.run(updatedAt, membership.id);
+      statements.revokeOrganizationMembershipSessions.run(updatedAt, membership.id);
+      if (status === "disabled" && membership.invitation_status === "pending") {
+        statements.consumePendingOrganizationInvitationTokens.run(updatedAt, membership.id);
       }
       db.exec("COMMIT");
     } catch (error) {
@@ -4155,13 +4172,17 @@ const handlers = [
     logEvent(request, null, "organization_member_updated", context.organization.id, null, {
       member_id: member.id,
       app_role: appRole,
+      router_access_mode: access.mode,
+      router_count: access.routerIds.length,
+      sessions_revoked: true,
       status
     });
     return {
       member: organizationUserResponse(
         statements.findOrganizationUserById.get(member.id),
         statements.findOrganizationMembershipById.get(membership.id)
-      )
+      ),
+      sessions_revoked: true
     };
   }),
 
@@ -4173,20 +4194,51 @@ const handlers = [
     }
     const invitationToken = randomToken(32);
     const createdAt = nowIso();
-    const expiresAt = new Date(Date.now() + 24 * 3_600_000).toISOString();
+    if (membership.status !== "active") {
+      throw new HttpError(400, "Réactivez ce membre avant de renvoyer son invitation.");
+    }
+    const expiresAt = new Date(
+      Date.now() + SAAS_INVITATION_TTL_HOURS * 3_600_000
+    ).toISOString();
     const requiresPassword = !member.last_login_at && member.invitation_pending;
-    statements.insertOrganizationInvitationToken.run(
-      crypto.randomUUID(),
-      membership.id,
-      hash(invitationToken),
-      requiresPassword ? 1 : 0,
-      expiresAt,
-      createdAt
-    );
-    await deliverOrganizationInvitation(member, context.organization, invitationToken, expiresAt, requiresPassword);
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      statements.consumePendingOrganizationInvitationTokens.run(createdAt, membership.id);
+      statements.insertOrganizationInvitationToken.run(
+        crypto.randomUUID(),
+        membership.id,
+        hash(invitationToken),
+        requiresPassword ? 1 : 0,
+        expiresAt,
+        createdAt
+      );
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    let invitationDelivered = false;
+    try {
+      invitationDelivered = await deliverOrganizationInvitation(
+        member,
+        context.organization,
+        invitationToken,
+        expiresAt,
+        requiresPassword
+      );
+    } catch (error) {
+      console.error("Impossible de renvoyer l'invitation employé:", error.message);
+    }
+    logEvent(request, null, "organization_invitation_resent", context.organization.id, null, {
+      invitation_delivery: invitationDelivered ? "sent" : "not_sent",
+      member_id: member.id
+    });
     return {
-      ok: true,
-      message: "Invitation renvoyée.",
+      ok: invitationDelivered,
+      invitation_delivery: invitationDelivered ? "sent" : "not_sent",
+      message: invitationDelivered
+        ? "Invitation renvoyée. L'ancien lien est maintenant inutilisable."
+        : "Un nouveau lien a été créé, mais l'email n'a pas pu être envoyé. Vérifiez la configuration SMTP puis réessayez.",
       ...(SAAS_EXPOSE_RESET_TOKEN ? { invitation_token: invitationToken } : {})
     };
   }),
@@ -4200,10 +4252,21 @@ const handlers = [
     if (membership.app_role === "admin" && context.membership.authority_role !== "owner") {
       throw new HttpError(403, "Seul le propriétaire peut supprimer un administrateur.");
     }
-    statements.revokeOrganizationMembershipSessions.run(nowIso(), membership.id);
-    statements.deleteOrganizationMembership.run(membership.id, context.organization.id);
+    const removedAt = nowIso();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      statements.revokeOrganizationMembershipSessions.run(removedAt, membership.id);
+      statements.consumePendingOrganizationInvitationTokens.run(removedAt, membership.id);
+      statements.deleteOrganizationMembership.run(membership.id, context.organization.id);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
     logEvent(request, null, "organization_member_removed", context.organization.id, null, {
-      member_id: member.id
+      invitation_pending: membership.invitation_status === "pending",
+      member_id: member.id,
+      sessions_revoked: true
     });
     return { ok: true };
   }),
@@ -4215,6 +4278,7 @@ const handlers = [
     const token = requireText(body, "invitation_token", 512);
     const invitation = statements.findOrganizationInvitationToken.get(hash(token));
     if (!invitation || invitation.invitation_status !== "pending"
+      || invitation.membership_status !== "active"
       || Date.parse(invitation.expires_at) <= Date.now()) {
       throw new HttpError(400, "Cette invitation est invalide ou expirée.");
     }
@@ -4235,6 +4299,7 @@ const handlers = [
     const token = requireText(body, "invitation_token", 512);
     const invitation = statements.findOrganizationInvitationToken.get(hash(token));
     if (!invitation || invitation.invitation_status !== "pending"
+      || invitation.membership_status !== "active"
       || Date.parse(invitation.expires_at) <= Date.now()) {
       throw new HttpError(400, "Cette invitation est invalide ou expirée.");
     }
@@ -4261,7 +4326,10 @@ const handlers = [
         acceptedAt,
         invitation.membership_id
       );
-      statements.consumeOrganizationInvitationToken.run(acceptedAt, invitation.id);
+      statements.consumePendingOrganizationInvitationTokens.run(
+        acceptedAt,
+        invitation.membership_id
+      );
       statements.markOrganizationInvitationAccepted.run(acceptedAt, invitation.user_id);
       db.exec("COMMIT");
     } catch (error) {
@@ -5215,7 +5283,7 @@ const handlers = [
 
   route("POST", "/v1/saas/vpn/bootstrap", async (request) => {
     if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. Réessayez plus tard.");
-    const { organization, subscription, user } = requireOrganizationPermission(request, "global.vpn", {
+    const { organization, subscription, user } = requireOrganizationPermission(request, "global.routers.select", {
       requireActiveSubscription: true
     });
     const tenant = await vpnHubRequest("/v1/tenants", {
@@ -5236,9 +5304,10 @@ const handlers = [
 
   route("POST", "/v1/saas/devices/register", async (request, body) => {
     if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. RÃ©essayez plus tard.");
-    const { organization, subscription, user } = requireOrganizationPermission(request, "global.vpn", {
+    const context = requireOrganizationPermission(request, "global.routers.select", {
       requireActiveSubscription: true
     });
+    const { organization, subscription, user } = context;
     const installationId = requireInstallationId(body);
     const publicKey = requireVpnPublicKey(body);
     const name = String(body.name ?? "").trim();
@@ -5277,6 +5346,14 @@ const handlers = [
         if (!replacedDevice || replacedDevice.status === "revoked") {
           throw new HttpError(404, "L'appareil à remplacer est introuvable.", {
             code: "REPLACEMENT_DEVICE_NOT_FOUND"
+          });
+        }
+        if (
+          replacedDevice.registered_by_user_id !== user.id
+          && !organizationContextHasPermission(context, "global.vpn")
+        ) {
+          throw new HttpError(403, "Vous ne pouvez remplacer que l'un de vos propres appareils.", {
+            code: "DEVICE_REPLACEMENT_FORBIDDEN"
           });
         }
         const replacedPeer = statements.findOrganizationVpnPeerByDevice.get(
@@ -5410,7 +5487,7 @@ const handlers = [
   }),
 
   route("POST", "/v1/saas/devices/heartbeat", async (request, body) => {
-    const { organization } = requireOrganizationPermission(request, "global.vpn");
+    const { organization } = requireOrganizationPermission(request, "global.routers.select");
     const installationId = requireInstallationId(body);
     const appVersion = String(body.app_version ?? body.appVersion ?? "").trim();
     if (!appVersion || appVersion.length > 64) {

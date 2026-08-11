@@ -368,7 +368,11 @@ export async function createSaasTeamMember(input: {
   appRole: UserRole;
   routerAccessMode: "all" | "selected";
   routerIds: string[];
-}): Promise<{ member: SaasOrganizationUser; message: string }> {
+}): Promise<{
+  invitation_delivery: "sent" | "not_sent";
+  member: SaasOrganizationUser;
+  message: string;
+}> {
   const token = await requireSessionToken();
   return request("/v1/saas/team/members", {
     name: input.name,
@@ -382,7 +386,6 @@ export async function createSaasTeamMember(input: {
 
 export async function updateSaasTeamMember(input: {
   userId: string;
-  name: string;
   appRole: UserRole;
   status: "active" | "disabled";
   routerAccessMode: "all" | "selected";
@@ -391,7 +394,6 @@ export async function updateSaasTeamMember(input: {
   const token = await requireSessionToken();
   return request("/v1/saas/team/members/update", {
     user_id: input.userId,
-    name: input.name,
     app_role: input.appRole,
     status: input.status,
     router_access_mode: input.routerAccessMode,
@@ -399,7 +401,11 @@ export async function updateSaasTeamMember(input: {
   }, token);
 }
 
-export async function resendSaasTeamInvitation(userId: string): Promise<{ ok: boolean; message: string }> {
+export async function resendSaasTeamInvitation(userId: string): Promise<{
+  invitation_delivery: "sent" | "not_sent";
+  ok: boolean;
+  message: string;
+}> {
   const token = await requireSessionToken();
   return request("/v1/saas/team/members/resend-invitation", { user_id: userId }, token);
 }

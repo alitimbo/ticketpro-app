@@ -37,6 +37,8 @@ const defaultCloudClient: RouterRecoveryCloudClient = {
   saveSnapshot: saveSaasRouterRecoverySnapshot
 };
 
+const activeRecoveryRuns = new Map<string, Promise<RouterRecoveryResult>>();
+
 export class RouterCloudRecoveryService {
   private readonly connections: RouterConnectionRepository;
   private readonly plans: HotspotPlanRepository;
@@ -68,7 +70,7 @@ export class RouterCloudRecoveryService {
       this.vpnPeers.findByRouter(this.accountId, router.id)
     ]);
     const credential = await decryptLocalSecret(router.encrypted_password);
-    return this.cloud.saveSnapshot({
+    const saved = await this.cloud.saveSnapshot({
       api_port: router.api_port,
       api_ssl_port: router.api_ssl_port,
       board_name: router.board_name,
@@ -82,7 +84,7 @@ export class RouterCloudRecoveryService {
       })),
       credential,
       hotspot_address: router.hotspot_address,
-      id: router.id,
+      id: router.cloud_router_id ?? router.id,
       label: router.label,
       last_seen_at: router.last_seen_at,
       local_ip: router.local_ip,
@@ -115,6 +117,10 @@ export class RouterCloudRecoveryService {
           }
         : null
     });
+    if ((router.cloud_router_id ?? router.id) !== saved.id) {
+      await this.routers.setCloudId(this.accountId, router.id, saved.id);
+    }
+    return saved;
   }
 
   async backupAll(): Promise<void> {
@@ -132,10 +138,24 @@ export class RouterCloudRecoveryService {
   }
 
   async restoreMissingRouters(): Promise<RouterRecoveryResult> {
+    const activeRun = activeRecoveryRuns.get(this.accountId);
+    if (activeRun) return activeRun;
+
+    const run = this.restoreMissingRoutersOnce().finally(() => {
+      if (activeRecoveryRuns.get(this.accountId) === run) {
+        activeRecoveryRuns.delete(this.accountId);
+      }
+    });
+    activeRecoveryRuns.set(this.accountId, run);
+    return run;
+  }
+
+  private async restoreMissingRoutersOnce(): Promise<RouterRecoveryResult> {
     const remoteRouters = await this.cloud.getSnapshots();
     const localRouters = await this.routers.listByAccount(this.accountId);
     const localStableIdentities = new Set<string>();
     const localByStableIdentity = new Map<string, (typeof localRouters)[number]>();
+    const localByCloudId = new Map<string, (typeof localRouters)[number]>();
     for (const router of localRouters) {
       const stableIdentity = routerAccessPolicyCloudId(
         router,
@@ -143,6 +163,7 @@ export class RouterCloudRecoveryService {
       );
       localStableIdentities.add(stableIdentity);
       localByStableIdentity.set(stableIdentity, router);
+      localByCloudId.set(router.cloud_router_id ?? router.id, router);
     }
 
     const result: RouterRecoveryResult = {
@@ -155,30 +176,30 @@ export class RouterCloudRecoveryService {
 
     for (const remote of remoteRouters) {
       try {
-        if (
-          localRouters.some((router) => router.id === remote.id)
-          || localStableIdentities.has(remote.stable_identity)
-        ) {
-          const existing = localRouters.find((router) =>
-            router.id === remote.id
-          ) ?? localByStableIdentity.get(remote.stable_identity);
-          if (existing?.id === remote.id) {
-            await this.restoreMissingDependents(remote, vpnNetwork);
-          }
+        const existing = localByCloudId.get(remote.id)
+          ?? localByStableIdentity.get(remote.stable_identity);
+        if (existing) {
+          await this.restoreMissingDependents(remote, existing.id, vpnNetwork);
           result.skippedRouterIds.push(remote.id);
           continue;
         }
 
+        const occupiedGlobalId = await this.routers.findById(remote.id);
+        const localRouterId = occupiedGlobalId
+          ? `router-${crypto.randomUUID()}`
+          : remote.id;
         const encryptedPassword = await encryptLocalSecret(remote.credential);
-        await this.routers.create(routerInputFromRecovery(
+        const restoredRouter = await this.routers.create(routerInputFromRecovery(
           remote,
+          localRouterId,
           this.accountId,
           this.internalProfileId,
           encryptedPassword
         ));
-        await this.restoreMissingDependents(remote, vpnNetwork);
+        await this.restoreMissingDependents(remote, localRouterId, vpnNetwork);
         localStableIdentities.add(remote.stable_identity);
-        result.restoredRouterIds.push(remote.id);
+        localByCloudId.set(remote.id, restoredRouter);
+        result.restoredRouterIds.push(localRouterId);
       } catch (error) {
         throw new Error(
           `Restauration de ${remote.name} interrompue : ${unknownErrorMessage(error)}`
@@ -191,17 +212,18 @@ export class RouterCloudRecoveryService {
 
   private async restoreMissingDependents(
     remote: SaasRouterRecoverySnapshot,
+    localRouterId: string,
     vpnNetwork: Awaited<ReturnType<RouterCloudRecoveryService["ensureVpnNetwork"]>> | null
   ): Promise<void> {
-    const connections = await this.connections.listByRouter(remote.id);
+    const connections = await this.connections.listByRouter(localRouterId);
     if (connections.length === 0) {
       await this.connections.replaceForRouter(
-        remote.id,
-        connectionInputsFromRecovery(remote)
+        localRouterId,
+        connectionInputsFromRecovery(remote, localRouterId)
       );
     }
 
-    const localPlans = await this.plans.listByRouter(remote.id);
+    const localPlans = await this.plans.listByRouter(localRouterId);
     for (const plan of remote.plans) {
       if (!localPlans.some((local) =>
         local.id === plan.id
@@ -210,14 +232,18 @@ export class RouterCloudRecoveryService {
           && local.mikrotik_profile_name === plan.mikrotik_profile_name
         )
       )) {
-        await this.plans.create(planInputFromRecovery(remote.id, plan));
+        const occupiedPlan = await this.plans.findById(plan.id);
+        const localPlanId = occupiedPlan && occupiedPlan.router_id !== localRouterId
+          ? `plan-${crypto.randomUUID()}`
+          : plan.id;
+        await this.plans.create(planInputFromRecovery(localRouterId, localPlanId, plan));
       }
     }
 
     if (
       remote.vpn
       && vpnNetwork
-      && !(await this.vpnPeers.findByRouter(this.accountId, remote.id))
+      && !(await this.vpnPeers.findByRouter(this.accountId, localRouterId))
     ) {
       await this.vpnPeers.create({
         account_id: this.accountId,
@@ -225,7 +251,7 @@ export class RouterCloudRecoveryService {
         assigned_address: remote.vpn.assigned_address,
         endpoint_address: null,
         endpoint_port: null,
-        id: `vpn-peer-recovered-${remote.id}`,
+        id: `vpn-peer-recovered-${localRouterId}`,
         last_handshake_at: null,
         name: remote.name,
         network_id: vpnNetwork.id,
@@ -233,7 +259,7 @@ export class RouterCloudRecoveryService {
         resource_id: remote.id,
         private_key_encrypted: null,
         public_key: remote.vpn.public_key,
-        router_id: remote.id,
+        router_id: localRouterId,
         // Un nouveau PC doit confirmer l'état réel de RouterOS avant
         // de considérer le tunnel récupéré comme actif.
         status: "draft"
@@ -260,7 +286,15 @@ export class RouterCloudRecoveryService {
       await this.vpnNetworks.update(input);
       return { ...existing, ...input };
     }
-    return this.vpnNetworks.create(input);
+    try {
+      return await this.vpnNetworks.create(input);
+    } catch (error) {
+      const concurrentlyCreated = await this.vpnNetworks.findByAccount(this.accountId);
+      if (!concurrentlyCreated) throw error;
+      const reconciled = { ...input, id: concurrentlyCreated.id };
+      await this.vpnNetworks.update(reconciled);
+      return { ...concurrentlyCreated, ...reconciled };
+    }
   }
 }
 
@@ -281,6 +315,7 @@ function unknownErrorMessage(error: unknown): string {
 
 function routerInputFromRecovery(
   remote: SaasRouterRecoverySnapshot,
+  localRouterId: string,
   accountId: string,
   internalProfileId: string,
   encryptedPassword: string
@@ -290,11 +325,12 @@ function routerInputFromRecovery(
     api_port: remote.api_port,
     api_ssl_port: remote.api_ssl_port,
     board_name: remote.board_name,
+    cloud_router_id: remote.id,
     connection_mode: remote.connection_mode,
     created_by_profile_id: internalProfileId,
     encrypted_password: encryptedPassword,
     hotspot_address: remote.hotspot_address,
-    id: remote.id,
+    id: localRouterId,
     label: remote.label,
     last_seen_at: remote.last_seen_at,
     local_ip: remote.local_ip,
@@ -312,7 +348,8 @@ function routerInputFromRecovery(
 }
 
 function connectionInputsFromRecovery(
-  remote: SaasRouterRecoverySnapshot
+  remote: SaasRouterRecoverySnapshot,
+  localRouterId: string
 ): CreateRouterConnectionInput[] {
   const seenModes = new Map<string, number>();
   return remote.connections.map((connection) => {
@@ -321,13 +358,13 @@ function connectionInputsFromRecovery(
     return {
       host: connection.host,
       id: occurrence === 0
-        ? `${remote.id}:${connection.mode}`
-        : `${remote.id}:${connection.mode}:${occurrence + 1}`,
+        ? `${localRouterId}:${connection.mode}`
+        : `${localRouterId}:${connection.mode}:${occurrence + 1}`,
       last_connected_at: null,
       last_error: "État restauré du VPS, vérification réelle en attente.",
       mode: connection.mode,
       port: connection.port,
-      router_id: remote.id,
+      router_id: localRouterId,
       status: "inactive",
       sync_status: "synced",
       use_ssl: connection.use_ssl ? 1 : 0
@@ -337,13 +374,14 @@ function connectionInputsFromRecovery(
 
 function planInputFromRecovery(
   routerId: string,
+  localPlanId: string,
   plan: SaasRouterRecoverySnapshot["plans"][number]
 ): CreateHotspotPlanInput {
   return {
     data_limit_mb: plan.data_limit_mb,
     download_limit: plan.download_limit,
     duration_minutes: plan.duration_minutes,
-    id: plan.id,
+    id: localPlanId,
     mikrotik_profile_name: plan.mikrotik_profile_name,
     name: plan.name,
     price_hint: plan.price_hint,

@@ -51,6 +51,7 @@ import {
   type TicketSyncSummary
 } from '../../services/sync'
 import {
+  AsyncStateCard,
   Badge,
   Button,
   Card,
@@ -133,6 +134,10 @@ export function RouterHomePage () {
   const [syncSummary, setSyncSummary] = useState<TicketSyncSummary | null>(null)
   const [service, setService] = useState<RouterService | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [loadStatus, setLoadStatus] = useState<'loading' | 'ready' | 'error'>(
+    'loading'
+  )
+  const [reloadToken, setReloadToken] = useState(0)
   const actions = session
     ? getRouterQuickActions(session.internal_profile_role, routerId)
     : []
@@ -145,6 +150,9 @@ export function RouterHomePage () {
       if (!routerSession || !routerId || (isPersistent && !isInitialized)) {
         return
       }
+
+      setLoadStatus('loading')
+      setLoadError(null)
 
       try {
         let activeService: RouterService
@@ -237,6 +245,7 @@ export function RouterHomePage () {
         setCpuLoad(health.cpuLoad)
         setConnectionMessage('Routeur connecté')
         setLoadError(null)
+        setLoadStatus('ready')
       } catch (error) {
         if (isMounted) {
           setDashboard(null)
@@ -247,6 +256,7 @@ export function RouterHomePage () {
               ? error.message
               : 'Impossible de charger le routeur.'
           )
+          setLoadStatus('error')
         }
       }
     }
@@ -264,6 +274,7 @@ export function RouterHomePage () {
     isInitialized,
     isPersistent,
     planRepository,
+    reloadToken,
     routerId,
     routerRepository,
     routerSession,
@@ -316,26 +327,31 @@ export function RouterHomePage () {
     return (
       <div className='page-stack'>
         <PageHeader
+          actions={
+            loadStatus === 'error' ? (
+              <Button
+                icon={Router}
+                onClick={() => navigate('/routeurs')}
+                variant='ghost'
+              >
+                Revenir aux routeurs
+              </Button>
+            ) : null
+          }
           description={loadError ?? 'Chargement des informations du routeur.'}
           eyebrow='Routeur'
           title={loadError ? 'Routeur indisponible' : 'Maison routeur'}
         />
-        <Card>
-          {loadError ? (
-            <>
-              <p className='form-error'>{loadError}</p>
-              <Button
-                icon={Router}
-                onClick={() => navigate('/routeurs')}
-                variant='primary'
-              >
-                Revenir aux routeurs
-              </Button>
-            </>
-          ) : (
-            <StatusDot label='Chargement' status='warning' />
-          )}
-        </Card>
+        <AsyncStateCard
+          description='TicketPro interroge le MikroTik avant d’afficher les indicateurs de la maison routeur.'
+          errorDescription={loadError ?? 'Vérifiez la connexion au routeur, puis relancez la lecture.'}
+          errorTitle='Impossible de charger la maison routeur'
+          loadingDescription='Lecture du système, du Hotspot, des vouchers, des plans et de l’état matériel.'
+          loadingTitle='Chargement des données RouterOS…'
+          onRetry={() => setReloadToken(current => current + 1)}
+          status={loadStatus === 'error' ? 'error' : 'loading'}
+          title='Préparation de la maison routeur'
+        />
       </div>
     )
   }

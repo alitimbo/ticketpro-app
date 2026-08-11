@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Building2, CalendarDays, KeyRound, LogOut, Mail, Phone, Router, ShieldCheck, UserRound } from "lucide-react";
+import { Building2, CalendarDays, KeyRound, LoaderCircle, LogOut, Mail, Phone, Router, ShieldCheck, UserRound } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../app/auth/AuthProvider";
 import { AccountRepository, AppLogRepository, RouterRepository, useAppDatabase } from "../../services/database";
@@ -60,6 +60,9 @@ export function AccountPage() {
   const [persistentSecurityLogs, setPersistentSecurityLogs] = useState<MainAccountSecurityLog[]>([]);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isUpdatingDetails, setIsUpdatingDetails] = useState(false);
+  const [isUpdatingPassword, setIsUpdatingPassword] = useState(false);
+  const isAccountActionPending = isUpdatingDetails || isUpdatingPassword;
   const localSecurityLogs = useMemo(
     () => readAccountSecurityLogs().filter((log) => log.accountId === accountSession?.accountId).slice(0, 5),
     [accountSession?.accountId, message]
@@ -136,6 +139,8 @@ export function AccountPage() {
   }
 
   const updateDetails = async () => {
+    if (isAccountActionPending) return;
+
     const validationError = validateAccountDetails({
       ...account,
       companyName: detailsForm.companyName,
@@ -149,42 +154,52 @@ export function AccountPage() {
       return;
     }
 
-    const updated = updateMainAccountDetails({
-      companyName: detailsForm.companyName,
-      displayName: detailsForm.displayName,
-      email: account.email,
-      phone: detailsForm.phone
-    });
-    if (isPersistent) {
-      await accountRepository.updateDetails({
-        companyName: updated.companyName,
-        displayName: updated.displayName,
-        email: updated.email,
-        id: updated.id,
-        phone: updated.phone
-      });
-      await auditLogService.write({
-        accountId: account.id,
-        action: "account.details_updated",
-        category: "authentification",
-        internalProfileId: session?.internal_profile_id ?? null,
-        internalProfileRole: session?.internal_profile_role ?? null,
-        message: "Informations du compte principal mises à jour."
-      });
-    }
-    setAccount(updated);
-    const refreshedSession = refreshMainAccountSession({
-      ...accountSession,
-      companyLabel: updated.companyName || updated.displayName || updated.email
-    });
-
-    storeMainAccountSession(refreshedSession);
-    refreshAccountSession();
+    setIsUpdatingDetails(true);
     setError(null);
-    setMessage(isPersistent ? "Informations du compte mises à jour dans SQLite." : "Informations du compte mises à jour.");
+    setMessage(null);
+    try {
+      const updated = updateMainAccountDetails({
+        companyName: detailsForm.companyName,
+        displayName: detailsForm.displayName,
+        email: account.email,
+        phone: detailsForm.phone
+      });
+      if (isPersistent) {
+        await accountRepository.updateDetails({
+          companyName: updated.companyName,
+          displayName: updated.displayName,
+          email: updated.email,
+          id: updated.id,
+          phone: updated.phone
+        });
+        await auditLogService.write({
+          accountId: account.id,
+          action: "account.details_updated",
+          category: "authentification",
+          internalProfileId: session?.internal_profile_id ?? null,
+          internalProfileRole: session?.internal_profile_role ?? null,
+          message: "Informations du compte principal mises à jour."
+        });
+      }
+      setAccount(updated);
+      const refreshedSession = refreshMainAccountSession({
+        ...accountSession,
+        companyLabel: updated.companyName || updated.displayName || updated.email
+      });
+
+      storeMainAccountSession(refreshedSession);
+      refreshAccountSession();
+      setMessage(isPersistent ? "Informations du compte mises à jour dans SQLite." : "Informations du compte mises à jour.");
+    } catch {
+      setError("Impossible de mettre à jour les informations du compte. Réessayez.");
+    } finally {
+      setIsUpdatingDetails(false);
+    }
   };
 
   const updatePassword = async () => {
+    if (isAccountActionPending) return;
+
     const validationError = validatePasswordChange(passwordForm);
 
     if (validationError) {
@@ -193,38 +208,45 @@ export function AccountPage() {
       return;
     }
 
-    const result = await changeMainAccountPassword({
-      email: account.email,
-      newPassword: passwordForm.newPassword,
-      oldPassword: passwordForm.oldPassword
-    });
+    setIsUpdatingPassword(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await changeMainAccountPassword({
+        email: account.email,
+        newPassword: passwordForm.newPassword,
+        oldPassword: passwordForm.oldPassword
+      });
 
-    if (!result.ok) {
-      setError(result.message);
-      setMessage(null);
-      return;
-    }
+      if (!result.ok) {
+        setError(result.message);
+        return;
+      }
 
-    if (isPersistent) {
-      await accountRepository.updatePassword(account.id, await hashMainAccountPassword(account.email, passwordForm.newPassword));
-      await auditLogService.write({
+      if (isPersistent) {
+        await accountRepository.updatePassword(account.id, await hashMainAccountPassword(account.email, passwordForm.newPassword));
+        await auditLogService.write({
+          accountId: account.id,
+          action: "account.password_changed",
+          category: "authentification",
+          internalProfileId: session?.internal_profile_id ?? null,
+          internalProfileRole: session?.internal_profile_role ?? null,
+          message: "Mot de passe principal modifié."
+        });
+      }
+
+      appendAccountSecurityLog({
         accountId: account.id,
-        action: "account.password_changed",
-        category: "authentification",
         internalProfileId: session?.internal_profile_id ?? null,
-        internalProfileRole: session?.internal_profile_role ?? null,
         message: "Mot de passe principal modifié."
       });
+      setPasswordForm(emptyPasswordForm);
+      setMessage(result.message);
+    } catch {
+      setError("Impossible de modifier le mot de passe. Réessayez.");
+    } finally {
+      setIsUpdatingPassword(false);
     }
-
-    appendAccountSecurityLog({
-      accountId: account.id,
-      internalProfileId: session?.internal_profile_id ?? null,
-      message: "Mot de passe principal modifié."
-    });
-    setPasswordForm(emptyPasswordForm);
-    setError(null);
-    setMessage(result.message);
   };
 
   const completeLogout = () => {
@@ -280,6 +302,7 @@ export function AccountPage() {
           <label className="form-field">
             Nom affiché
             <input
+              disabled={isAccountActionPending}
               value={detailsForm.displayName}
               onChange={(event) => setDetailsForm((current) => ({ ...current, displayName: event.target.value }))}
             />
@@ -287,6 +310,7 @@ export function AccountPage() {
           <label className="form-field">
             Entreprise
             <input
+              disabled={isAccountActionPending}
               value={detailsForm.companyName}
               onChange={(event) => setDetailsForm((current) => ({ ...current, companyName: event.target.value }))}
             />
@@ -294,6 +318,7 @@ export function AccountPage() {
           <label className="form-field">
             Téléphone du propriétaire
             <input
+              disabled={isAccountActionPending}
               inputMode="tel"
               placeholder="Ex. +227 90 12 34 56"
               value={detailsForm.phone}
@@ -302,9 +327,15 @@ export function AccountPage() {
             <small>Ce numéro sera centré et imprimé sur chaque ticket généré.</small>
           </label>
         </div>
-        <div className="confirm-dialog__actions">
-          <Button icon={UserRound} onClick={() => void updateDetails()} variant="primary">
-            Enregistrer
+        <div aria-busy={isUpdatingDetails} className="confirm-dialog__actions">
+          <Button
+            className={isUpdatingDetails ? "button--loading" : ""}
+            disabled={isAccountActionPending}
+            icon={isUpdatingDetails ? LoaderCircle : UserRound}
+            onClick={() => void updateDetails()}
+            variant="primary"
+          >
+            {isUpdatingDetails ? "Enregistrement…" : "Enregistrer"}
           </Button>
         </div>
       </Card>
@@ -312,26 +343,35 @@ export function AccountPage() {
       <Card title="Changer le mot de passe principal" description="L'ancien mot de passe est obligatoire. Aucun mot de passe n'est écrit dans les logs.">
         <div className="router-form-grid">
           <PasswordField
+            disabled={isAccountActionPending}
             label="Ancien mot de passe"
             onChange={(oldPassword) => setPasswordForm((current) => ({ ...current, oldPassword }))}
             value={passwordForm.oldPassword}
           />
           <PasswordField
             autoComplete="new-password"
+            disabled={isAccountActionPending}
             label="Nouveau mot de passe"
             onChange={(newPassword) => setPasswordForm((current) => ({ ...current, newPassword }))}
             value={passwordForm.newPassword}
           />
           <PasswordField
             autoComplete="new-password"
+            disabled={isAccountActionPending}
             label="Confirmer le nouveau mot de passe"
             onChange={(confirmPassword) => setPasswordForm((current) => ({ ...current, confirmPassword }))}
             value={passwordForm.confirmPassword}
           />
         </div>
-        <div className="confirm-dialog__actions">
-          <Button icon={KeyRound} onClick={() => void updatePassword()} variant="primary">
-            Mettre à jour
+        <div aria-busy={isUpdatingPassword} className="confirm-dialog__actions">
+          <Button
+            className={isUpdatingPassword ? "button--loading" : ""}
+            disabled={isAccountActionPending}
+            icon={isUpdatingPassword ? LoaderCircle : KeyRound}
+            onClick={() => void updatePassword()}
+            variant="primary"
+          >
+            {isUpdatingPassword ? "Mise à jour…" : "Mettre à jour"}
           </Button>
         </div>
       </Card>

@@ -703,15 +703,32 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
   assert.equal(invitation.payload.member.invitation_pending, true);
   assert.ok(invitation.payload.invitation_token);
 
-  const invitationInspection = await api("/v1/saas/invitations/inspect", {
+  const resentInvitation = await api("/v1/saas/team/members/resend-invitation", {
+    token: sessionToken,
+    body: { user_id: invitation.payload.member.id }
+  });
+  assert.equal(resentInvitation.status, 200);
+  assert.equal(resentInvitation.payload.invitation_delivery, "not_sent");
+  assert.ok(resentInvitation.payload.invitation_token);
+  assert.notEqual(
+    resentInvitation.payload.invitation_token,
+    invitation.payload.invitation_token
+  );
+
+  const obsoleteInvitationInspection = await api("/v1/saas/invitations/inspect", {
     body: { invitation_token: invitation.payload.invitation_token }
+  });
+  assert.equal(obsoleteInvitationInspection.status, 400);
+
+  const invitationInspection = await api("/v1/saas/invitations/inspect", {
+    body: { invitation_token: resentInvitation.payload.invitation_token }
   });
   assert.equal(invitationInspection.status, 200);
   assert.equal(invitationInspection.payload.requires_password, true);
 
   const employeePassword = await api("/v1/saas/invitations/accept", {
     body: {
-      invitation_token: invitation.payload.invitation_token,
+      invitation_token: resentInvitation.payload.invitation_token,
       new_password: "EmployeSimple123",
       confirm_password: "EmployeSimple123"
     }
@@ -739,7 +756,167 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
     token: employeeLogin.payload.session.token,
     body: {}
   });
-  assert.equal(employeeVpnAccess.status, 403);
+  assert.equal(employeeVpnAccess.status, 200);
+  assert.equal(employeeVpnAccess.payload.server_endpoint, "vpn.integration.test");
+
+  const operatorDesktop = await api("/v1/saas/devices/register", {
+    headers: { "x-forwarded-for": "10.10.0.10" },
+    token: employeeLogin.payload.session.token,
+    body: {
+      installation_id: "423e4567-e89b-42d3-a456-426614174333",
+      public_key: "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK=",
+      name: "PC operateur distant",
+      platform: "windows",
+      os_version: "Windows 11",
+      app_version: "0.2.4"
+    }
+  });
+  assert.equal(operatorDesktop.status, 200, JSON.stringify(operatorDesktop.payload));
+  assert.equal(operatorDesktop.payload.vpn.address, "10.250.7.3/32");
+
+  const operatorHeartbeat = await api("/v1/saas/devices/heartbeat", {
+    token: employeeLogin.payload.session.token,
+    body: {
+      installation_id: "423e4567-e89b-42d3-a456-426614174333",
+      app_version: "0.2.4"
+    }
+  });
+  assert.equal(operatorHeartbeat.status, 200);
+  assert.equal(operatorHeartbeat.payload.vpn_access, true);
+
+  const operatorDeviceAdministration = await api("/v1/saas/devices", {
+    method: "GET",
+    token: employeeLogin.payload.session.token
+  });
+  assert.equal(operatorDeviceAdministration.status, 403);
+
+  const removedOperatorDesktop = await api("/v1/saas/devices/revoke", {
+    headers: { "x-forwarded-for": "10.10.0.11" },
+    token: sessionToken,
+    body: { device_id: operatorDesktop.payload.device.id }
+  });
+  assert.equal(removedOperatorDesktop.status, 200);
+
+  const updatedEmployeeAccess = await api("/v1/saas/team/members/update", {
+    token: sessionToken,
+    body: {
+      user_id: invitation.payload.member.id,
+      app_role: "guest",
+      status: "active",
+      router_access_mode: "selected",
+      router_ids: ["router-niger-2"]
+    }
+  });
+  assert.equal(updatedEmployeeAccess.status, 200);
+  assert.equal(updatedEmployeeAccess.payload.member.app_role, "guest");
+  assert.deepEqual(
+    updatedEmployeeAccess.payload.member.router_access.router_ids,
+    ["router-niger-2"]
+  );
+  assert.equal(updatedEmployeeAccess.payload.sessions_revoked, true);
+
+  const revokedEmployeeSession = await api("/v1/saas/auth/me", {
+    method: "GET",
+    token: employeeLogin.payload.session.token
+  });
+  assert.equal(revokedEmployeeSession.status, 401);
+
+  const employeeRelogin = await api("/v1/saas/auth/login", {
+    body: {
+      email: "moussa.operator@example.com",
+      password: "EmployeSimple123"
+    }
+  });
+  assert.equal(employeeRelogin.status, 200);
+  assert.equal(employeeRelogin.payload.user.app_role, "guest");
+
+  const suspendedEmployee = await api("/v1/saas/team/members/update", {
+    token: sessionToken,
+    body: {
+      user_id: invitation.payload.member.id,
+      app_role: "guest",
+      status: "disabled",
+      router_access_mode: "selected",
+      router_ids: ["router-niger-2"]
+    }
+  });
+  assert.equal(suspendedEmployee.status, 200);
+  assert.equal(suspendedEmployee.payload.member.status, "disabled");
+
+  const suspendedSession = await api("/v1/saas/auth/me", {
+    method: "GET",
+    token: employeeRelogin.payload.session.token
+  });
+  assert.equal(suspendedSession.status, 401);
+
+  const disabledEmployeeLogin = await api("/v1/saas/auth/login", {
+    body: {
+      email: "moussa.operator@example.com",
+      password: "EmployeSimple123"
+    }
+  });
+  assert.equal(disabledEmployeeLogin.status, 403);
+
+  const reactivatedEmployee = await api("/v1/saas/team/members/update", {
+    token: sessionToken,
+    body: {
+      user_id: invitation.payload.member.id,
+      app_role: "operator",
+      status: "active",
+      router_access_mode: "selected",
+      router_ids: ["router-niger-1"]
+    }
+  });
+  assert.equal(reactivatedEmployee.status, 200);
+  assert.equal(reactivatedEmployee.payload.member.status, "active");
+
+  const activeOperatorLogin = await api("/v1/saas/auth/login", {
+    headers: { "x-forwarded-for": "10.10.0.12" },
+    body: {
+      email: "moussa.operator@example.com",
+      password: "EmployeSimple123"
+    }
+  });
+  assert.equal(activeOperatorLogin.status, 200);
+  assert.equal(activeOperatorLogin.payload.user.app_role, "operator");
+
+  const disposableInvitation = await api("/v1/saas/team/members", {
+    token: sessionToken,
+    body: {
+      name: "Invitation Supprimée",
+      email: "invitation.removed@example.com",
+      app_role: "agent",
+      router_access_mode: "selected",
+      router_ids: ["router-niger-1"]
+    }
+  });
+  assert.equal(disposableInvitation.status, 200);
+  const removedPendingMember = await api("/v1/saas/team/members/remove", {
+    token: sessionToken,
+    body: { user_id: disposableInvitation.payload.member.id }
+  });
+  assert.equal(removedPendingMember.status, 200);
+  const removedInvitationInspection = await api("/v1/saas/invitations/inspect", {
+    body: { invitation_token: disposableInvitation.payload.invitation_token }
+  });
+  assert.equal(removedInvitationInspection.status, 400);
+
+  const reinvitedIdentityWithoutPassword = await api("/v1/saas/team/members", {
+    token: sessionToken,
+    body: {
+      name: "Invitation Supprimée",
+      email: "invitation.removed@example.com",
+      app_role: "agent",
+      router_access_mode: "selected",
+      router_ids: ["router-niger-1"]
+    }
+  });
+  assert.equal(reinvitedIdentityWithoutPassword.status, 200);
+  const reinvitedIdentityInspection = await api("/v1/saas/invitations/inspect", {
+    body: { invitation_token: reinvitedIdentityWithoutPassword.payload.invitation_token }
+  });
+  assert.equal(reinvitedIdentityInspection.status, 200);
+  assert.equal(reinvitedIdentityInspection.payload.requires_password, true);
 
   const secondOrganization = await api("/v1/saas/register-trial", {
     body: {
@@ -837,7 +1014,7 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
     }
   });
   assert.equal(registeredDesktop.status, 200);
-  assert.equal(registeredDesktop.payload.vpn.address, "10.250.7.3/32");
+  assert.equal(registeredDesktop.payload.vpn.address, "10.250.7.4/32");
   assert.equal(registeredDesktop.payload.vpn.endpoint, "vpn.integration.test");
   assert.deepEqual(registeredDesktop.payload.vpn.allowed_ips, ["10.250.7.0/24"]);
   assert.equal(hubRequests.at(-1).body.peer_type, "operator");
@@ -847,6 +1024,24 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
     && entry.body.action === "revoke"
     && entry.body.resource_id === "operator:pc-recupere"
   ));
+
+  const forbiddenOperatorReplacement = await api("/v1/saas/devices/register", {
+    headers: { "x-forwarded-for": "10.10.0.13" },
+    token: activeOperatorLogin.payload.session.token,
+    body: {
+      installation_id: "523e4567-e89b-42d3-a456-426614174444",
+      public_key: "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ=",
+      replacement_device_id: registeredDesktop.payload.device.id,
+      name: "Tentative remplacement admin",
+      platform: "windows",
+      app_version: "0.2.4"
+    }
+  });
+  assert.equal(forbiddenOperatorReplacement.status, 403);
+  assert.equal(
+    forbiddenOperatorReplacement.payload.details.code,
+    "DEVICE_REPLACEMENT_FORBIDDEN"
+  );
 
   const registeredDesktopAgain = await api("/v1/saas/devices/register", {
     token: sessionToken,
@@ -927,12 +1122,19 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
     token: sessionToken
   });
   assert.equal(devicesBeforeRevocation.status, 200);
-  assert.equal(devicesBeforeRevocation.payload.devices.length, 1);
+  assert.equal(devicesBeforeRevocation.payload.devices.length, 2);
   assert.equal(devicesBeforeRevocation.payload.active_count, 1);
   assert.equal(devicesBeforeRevocation.payload.max_devices, 1);
-  assert.equal(devicesBeforeRevocation.payload.devices[0].vpn.key_version, 2);
-  assert.equal(devicesBeforeRevocation.payload.devices[0].vpn.applied_state, "enabled");
-  assert.equal("public_key" in devicesBeforeRevocation.payload.devices[0].vpn, false);
+  const activeOwnerDevice = devicesBeforeRevocation.payload.devices.find(
+    (device) => device.id === registeredDesktop.payload.device.id
+  );
+  const revokedOperatorDevice = devicesBeforeRevocation.payload.devices.find(
+    (device) => device.id === operatorDesktop.payload.device.id
+  );
+  assert.equal(activeOwnerDevice.vpn.key_version, 2);
+  assert.equal(activeOwnerDevice.vpn.applied_state, "enabled");
+  assert.equal("public_key" in activeOwnerDevice.vpn, false);
+  assert.equal(revokedOperatorDevice.status, "revoked");
 
   const replacementDesktop = await api("/v1/saas/devices/register", {
     token: sessionToken,

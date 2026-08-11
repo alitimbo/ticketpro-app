@@ -331,18 +331,25 @@ export function compareLocalAndRouterTickets(
     const activeUser = activeByCode.get(ticket.code);
 
     if (!routerUser) {
+      const synchronizedAt = new Date().toISOString();
       const manuallyDeleted = ticket.status === "supprimé";
-      const terminal = ["consommé", "expiré", "archivé"].includes(ticket.status);
+      const automaticallyCleaned = isExpectedRouterCleanup(ticket, Date.parse(synchronizedAt));
       updates.push({
+        archivedAt: automaticallyCleaned ? ticket.archivedAt ?? synchronizedAt : ticket.archivedAt,
+        completedAt: automaticallyCleaned
+          ? ticket.completedAt ?? ticket.expiresAt ?? synchronizedAt
+          : ticket.completedAt,
         id: ticket.id,
-        lastRouterSyncAt: new Date().toISOString(),
-        routerDeletedAt: ticket.routerDeletedAt ?? new Date().toISOString(),
-        status: manuallyDeleted ? "supprimé" : terminal ? "archivé" : "supprimé_routeur",
-        syncStatus: "router_missing"
+        lastRouterSyncAt: synchronizedAt,
+        routerDeletedAt: ticket.routerDeletedAt ?? synchronizedAt,
+        status: manuallyDeleted ? "supprimé" : automaticallyCleaned ? "archivé" : "supprimé_routeur",
+        syncStatus: automaticallyCleaned ? "router_synced" : "router_missing"
       });
       logs.push({
-        level: "warning",
-        message: "Ticket local absent du routeur.",
+        level: automaticallyCleaned ? "info" : "warning",
+        message: automaticallyCleaned
+          ? "Voucher arrivé en fin de vie, supprimé de RouterOS et conservé dans les archives TicketPro."
+          : "Ticket local absent du routeur.",
         ticketCode: ticket.code
       });
       return;
@@ -430,6 +437,31 @@ export function compareLocalAndRouterTickets(
 
 function routerOsDurationHasElapsed(value: string | null | undefined): boolean {
   return Boolean(value && value !== "0s" && value !== "0");
+}
+
+function isExpectedRouterCleanup(ticket: SyncableLocalTicket, nowMs: number): boolean {
+  if (["consommé", "expiré", "archivé"].includes(ticket.status)) {
+    return true;
+  }
+
+  const expiresAtMs = ticket.expiresAt ? Date.parse(ticket.expiresAt) : Number.NaN;
+  if (Number.isFinite(expiresAtMs) && expiresAtMs <= nowMs) {
+    return true;
+  }
+
+  const activatedAtMs = ticket.activatedAt ? Date.parse(ticket.activatedAt) : Number.NaN;
+  if (
+    Number.isFinite(activatedAtMs)
+    && Boolean(ticket.planValidityMinutes && ticket.planValidityMinutes > 0)
+    && activatedAtMs + (ticket.planValidityMinutes ?? 0) * 60_000 <= nowMs
+  ) {
+    return true;
+  }
+
+  return Boolean(
+    ticket.activatedAt
+    && (ticket.remainingSeconds === 0 || ticket.dataRemainingBytes === 0)
+  );
 }
 
 function deriveTicketRuntime(user: HotspotUser, active: ActiveHotspotUser | undefined): {

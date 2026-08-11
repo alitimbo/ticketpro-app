@@ -37,7 +37,7 @@ export type MikroTikRouterAdapterOptions = RouterOsApiConfig & {
   transport?: RouterOsApiTransport;
 };
 
-const VOUCHER_LIFECYCLE_ENGINE_VERSION = 1;
+const VOUCHER_LIFECYCLE_ENGINE_VERSION = 3;
 const VOUCHER_EXPIRATION_SCRIPT = "ticketpro-voucher-expiration-v1";
 const VOUCHER_EXPIRATION_SCHEDULER = "ticketpro-voucher-expiration-v1";
 const VOUCHER_LIFECYCLE_COMMENT_PREFIX = "TicketPro:v1;";
@@ -130,9 +130,11 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     );
     await this.upsertLifecycleScheduler();
 
-    const [profiles, systemScripts] = await Promise.all([
+    const [profiles, systemScripts, hotspotServers, hotspotProfiles] = await Promise.all([
       this.call("/ip/hotspot/user/profile/print"),
-      this.call("/system/script/print")
+      this.call("/system/script/print"),
+      this.call("/ip/hotspot/print"),
+      this.call("/ip/hotspot/profile/print")
     ]);
     const systemScriptNames = new Set(
       systemScripts.map((script) => pick(script, "name")).filter((name): name is string => Boolean(name))
@@ -143,13 +145,43 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       if (!profileId) continue;
       const currentOnLogin = pick(profile, "on-login") ?? "";
       const nextOnLogin = mergeVoucherLifecycleOnLogin(currentOnLogin, systemScriptNames);
-      if (nextOnLogin !== currentOnLogin) {
+      const currentMacCookieTimeout = pick(profile, "mac-cookie-timeout") ?? "";
+      const nextMacCookieTimeout = resolveMacCookieTimeout(
+        currentMacCookieTimeout,
+        pick(profile, "session-timeout")
+      );
+      if (
+        nextOnLogin !== currentOnLogin
+        || pick(profile, "add-mac-cookie") !== "yes"
+        || nextMacCookieTimeout !== currentMacCookieTimeout
+      ) {
         await this.call("/ip/hotspot/user/profile/set", {
+          "add-mac-cookie": "yes",
+          "mac-cookie-timeout": nextMacCookieTimeout,
           numbers: profileId,
           "on-login": nextOnLogin
         });
       }
       managedProfileCount += 1;
+    }
+
+    const usedHotspotProfileNames = new Set(
+      hotspotServers
+        .map((server) => pick(server, "profile"))
+        .filter((name): name is string => Boolean(name))
+    );
+    for (const profile of hotspotProfiles) {
+      const profileName = pick(profile, "name");
+      const profileId = pick(profile, ".id", "id");
+      if (!profileName || !profileId || !usedHotspotProfileNames.has(profileName)) continue;
+      const currentLoginBy = pick(profile, "login-by") ?? "";
+      const nextLoginBy = mergeHotspotLoginBy(currentLoginBy);
+      if (nextLoginBy !== currentLoginBy) {
+        await this.call("/ip/hotspot/profile/set", {
+          "login-by": nextLoginBy,
+          numbers: profileId
+        });
+      }
     }
 
     const clock = firstRow(await this.call("/system/clock/print"));
@@ -165,6 +197,10 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     const profileName = plan.profileName || slugify(plan.name);
 
     await this.call("/ip/hotspot/user/profile/add", {
+      "add-mac-cookie": "yes",
+      "mac-cookie-timeout": minutesToRouterOsDuration(
+        plan.validityMinutes ?? plan.durationMinutes
+      ),
       name: profileName,
       "on-login": mergeVoucherLifecycleOnLogin(""),
       "rate-limit": buildRateLimit(plan),
@@ -194,6 +230,10 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     );
 
     await this.call("/ip/hotspot/user/profile/set", {
+      "add-mac-cookie": "yes",
+      "mac-cookie-timeout": minutesToRouterOsDuration(
+        next.validityMinutes ?? next.durationMinutes
+      ),
       name: next.profileName,
       numbers: current.id,
       "on-login": mergeVoucherLifecycleOnLogin(
@@ -212,7 +252,28 @@ export class MikroTikRouterAdapter implements RouterAdapter {
 
   async deleteHotspotPlan(planId: string): Promise<void> {
     const plan = await this.findPlanById(planId);
+    const routerUsers = await this.call("/ip/hotspot/user/print");
+    const linkedUsers = routerUsers.filter(
+      (user) => pick(user, "profile") === plan.profileName
+    );
+    if (linkedUsers.length > 0) {
+      throw new RouterAdapterError(
+        "router_rejected",
+        `Hotspot profile is still used by ${linkedUsers.length} user(s)`
+      );
+    }
+
     await this.call("/ip/hotspot/user/profile/remove", { numbers: plan.id });
+    const remainingProfiles = await this.call("/ip/hotspot/user/profile/print");
+    if (remainingProfiles.some((profile) =>
+      pick(profile, ".id", "id") === plan.id
+      || pick(profile, "name") === plan.profileName
+    )) {
+      throw new RouterAdapterError(
+        "router_rejected",
+        "RouterOS kept the Hotspot profile after removal"
+      );
+    }
   }
 
   async listHotspotUsers(): Promise<HotspotUser[]> {
@@ -413,7 +474,46 @@ export class MikroTikRouterAdapter implements RouterAdapter {
 
   async removeHotspotUser(username: string): Promise<void> {
     const user = await this.findUserByName(username);
+
+    const [activeRows, cookieRows] = await Promise.all([
+      this.call("/ip/hotspot/active/print"),
+      this.call("/ip/hotspot/cookie/print")
+    ]);
+    const activeIds = activeRows
+      .filter((row) => pick(row, "user", "name") === username)
+      .map((row) => pick(row, ".id", "id"))
+      .filter((id): id is string => Boolean(id));
+    const cookieIds = cookieRows
+      .filter((row) => pick(row, "user", "name") === username)
+      .map((row) => pick(row, ".id", "id"))
+      .filter((id): id is string => Boolean(id));
+
+    for (const activeId of activeIds) {
+      await this.call("/ip/hotspot/active/remove", { numbers: activeId });
+    }
+    for (const cookieId of cookieIds) {
+      await this.call("/ip/hotspot/cookie/remove", { numbers: cookieId });
+    }
     await this.call("/ip/hotspot/user/remove", { numbers: user.id });
+
+    const [remainingUsers, remainingActiveRows, remainingCookieRows] = await Promise.all([
+      this.call("/ip/hotspot/user/print"),
+      this.call("/ip/hotspot/active/print"),
+      this.call("/ip/hotspot/cookie/print")
+    ]);
+    const stillPresent = (rows: RouterOsApiRow[]) => rows.some(
+      (row) => pick(row, "user", "name") === username
+    );
+    if (
+      stillPresent(remainingUsers)
+      || stillPresent(remainingActiveRows)
+      || stillPresent(remainingCookieRows)
+    ) {
+      throw new RouterAdapterError(
+        "router_rejected",
+        "RouterOS kept the Hotspot user, an active session or a cookie after removal"
+      );
+    }
   }
 
   async bindHotspotUserToMac(username: string, macAddress: string): Promise<HotspotUser> {
@@ -512,17 +612,31 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       );
     }
 
+    // The old FORWARD rules dropped TTL 63/127 packets. Depending on where a
+    // RouterOS release evaluates the TTL matcher, a legitimate Android client
+    // can itself be seen with TTL 63 and lose all connectivity. Set the TTL of
+    // traffic sent *to* the authenticated Hotspot client to 1 instead: the
+    // paying device can consume the packet, but cannot route it one hop farther.
     const ipv4Rules = config.enabled && config.blockIpv4Ttl
-      ? [63, 127].map((ttl) => ({
-          action: "drop",
-          chain: "forward",
-          comment: `TicketPro anti-tethering:IPv4 TTL ${ttl}`,
-          hotspot: "auth",
-          ttl: String(ttl)
+      ? activeInterfaces.map((interfaceName) => ({
+          action: "change-ttl",
+          chain: "postrouting",
+          comment: `TicketPro anti-tethering:IPv4 client TTL ${interfaceName}`,
+          hotspot: "to-client",
+          "new-ttl": "set:1",
+          "out-interface": interfaceName,
+          passthrough: "no"
         }))
       : [];
+
+    // Always remove the legacy drop rules during the first save after an
+    // application update. They are deliberately not reused by the new policy.
     await this.reconcileManagedFirewallRules(
       "/ip/firewall/filter",
+      []
+    );
+    await this.reconcileManagedFirewallRules(
+      "/ip/firewall/mangle",
       ipv4Rules
     );
 
@@ -545,27 +659,23 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       // inactive policy must remain possible in that situation.
     }
 
-    if (config.enabled) {
-      const profiles = await this.call("/ip/hotspot/user/profile/print");
-      for (const profile of profiles) {
-        const profileId = pick(profile, ".id", "id");
-        if (profileId && pick(profile, "shared-users") !== "1") {
-          await this.call("/ip/hotspot/user/profile/set", {
-            numbers: profileId,
-            "shared-users": "1"
-          });
-        }
-      }
-    }
+    // Anti-tethering is independent from a plan's simultaneous-device limit.
+    // Never overwrite shared-users here: plans that intentionally allow more
+    // than one device must keep their RouterOS configuration.
   }
 
   async getHotspotAntiTetheringState(): Promise<import("../../domain/router").HotspotAntiTetheringState> {
-    const [ipv4Rows, ipv6Rows] = await Promise.all([
+    const [ipv4FilterRows, ipv4MangleRows, ipv6Rows] = await Promise.all([
       this.call("/ip/firewall/filter/print"),
+      this.call("/ip/firewall/mangle/print"),
       this.call("/ipv6/firewall/filter/print").catch(() => [])
     ]);
     const managedPrefix = "TicketPro anti-tethering:";
-    const managedIpv4 = ipv4Rows.filter((row) =>
+    const managedIpv4Filters = ipv4FilterRows.filter((row) =>
+      pick(row, "comment")?.startsWith(managedPrefix)
+      && !isTruthy(pick(row, "disabled"))
+    );
+    const managedIpv4Mangle = ipv4MangleRows.filter((row) =>
       pick(row, "comment")?.startsWith(managedPrefix)
       && !isTruthy(pick(row, "disabled"))
     );
@@ -574,13 +684,18 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       && !isTruthy(pick(row, "disabled"))
     );
     return {
-      blockIpv4Ttl: managedIpv4.some((row) =>
+      blockIpv4Ttl: managedIpv4Mangle.some((row) =>
+        pick(row, "comment")?.startsWith(`${managedPrefix}IPv4 client TTL `)
+      ) || managedIpv4Filters.some((row) =>
+        // Legacy state remains visible until the next explicit save, which
+        // migrates it to the safe POSTROUTING rule.
         pick(row, "comment")?.startsWith(`${managedPrefix}IPv4 TTL `)
       ),
       blockIpv6: managedIpv6.some((row) =>
         pick(row, "comment")?.startsWith(`${managedPrefix}IPv6 `)
       ),
-      managedRuleCount: managedIpv4.length + managedIpv6.length
+      managedRuleCount:
+        managedIpv4Filters.length + managedIpv4Mangle.length + managedIpv6.length
     };
   }
 
@@ -756,13 +871,15 @@ export class MikroTikRouterAdapter implements RouterAdapter {
 
   async disconnectActiveUser(username: string): Promise<void> {
     const activeUsers = await this.listActiveUsers();
-    const user = activeUsers.find((item) => item.username === username);
+    const userSessions = activeUsers.filter((item) => item.username === username);
 
-    if (!user) {
+    if (userSessions.length === 0) {
       throw new RouterAdapterError("hotspot_not_found", "Active user not found");
     }
 
-    await this.call("/ip/hotspot/active/remove", { numbers: user.id });
+    for (const session of userSessions) {
+      await this.call("/ip/hotspot/active/remove", { numbers: session.id });
+    }
   }
 
   async getRouterHealth(): Promise<RouterHealth> {
@@ -866,7 +983,7 @@ export class MikroTikRouterAdapter implements RouterAdapter {
   }
 
   private async reconcileManagedFirewallRules(
-    menu: "/ip/firewall/filter" | "/ipv6/firewall/filter",
+    menu: "/ip/firewall/filter" | "/ip/firewall/mangle" | "/ipv6/firewall/filter",
     desiredRules: Array<Record<string, string>>
   ): Promise<void> {
     const rows = await this.call(`${menu}/print`);
@@ -876,9 +993,11 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     );
     const desiredComments = new Set(desiredRules.map((rule) => rule.comment));
     const removedRuleIds = new Set<string>();
-    const firstForwardRuleId = pick(
+    const desiredChain = desiredRules[0]?.chain;
+    const firstRuleInDesiredChainId = pick(
       rows.find((row) =>
-        pick(row, "chain") === "forward" &&
+        Boolean(desiredChain) &&
+        pick(row, "chain") === desiredChain &&
         !pick(row, "comment")?.startsWith(managedPrefix) &&
         !isTruthy(pick(row, "dynamic"))
       ) ?? {},
@@ -892,15 +1011,16 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       );
       const existingId = pick(matches[0] ?? {}, ".id", "id");
       if (existingId) {
-        await this.writeFirewallRuleWithTtlCompatibility(`${menu}/set`, {
+        await this.call(`${menu}/set`, {
           ...rule,
           numbers: existingId
         });
       } else {
-        await this.writeFirewallRuleWithTtlCompatibility(`${menu}/add`, {
-          ...rule,
-          "place-before": firstForwardRuleId ?? null
-        });
+        const addParams: Record<string, string> = { ...rule };
+        if (firstRuleInDesiredChainId) {
+          addParams["place-before"] = firstRuleInDesiredChainId;
+        }
+        await this.call(`${menu}/add`, addParams);
       }
 
       for (const duplicate of matches.slice(1)) {
@@ -939,28 +1059,6 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     }
   }
 
-  private async writeFirewallRuleWithTtlCompatibility(
-    command: string,
-    params: Record<string, string | null>
-  ): Promise<void> {
-    try {
-      await this.call(command, params);
-    } catch (error) {
-      const ttl = params.ttl;
-      if (
-        typeof ttl !== "string"
-        || !/^\d{1,3}$/.test(ttl)
-        || !isInvalidTtlArgumentError(error)
-      ) {
-        throw error;
-      }
-
-      await this.call(command, {
-        ...params,
-        ttl: `equal:${ttl}`
-      });
-    }
-  }
 
   private async ensureRouterClock(): Promise<void> {
     const ntpClients = await this.call("/system/ntp/client/print");
@@ -1071,12 +1169,6 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       throw normalizeMikroTikError(error);
     }
   }
-}
-
-function isInvalidTtlArgumentError(error: unknown): boolean {
-  return error instanceof RouterAdapterError
-    && error.code === "router_rejected"
-    && /invalid value for argument ttl/i.test(error.message);
 }
 
 export function normalizeMikroTikError(error: unknown): RouterAdapterError {
@@ -1372,6 +1464,31 @@ export function mergeVoucherLifecycleOnLogin(
   ].filter(Boolean).join("\r\n");
 }
 
+export function mergeHotspotLoginBy(currentValue: string): string {
+  const methods = currentValue
+    .split(",")
+    .map((method) => method.trim())
+    .filter(Boolean);
+  const uniqueMethods = new Set(methods);
+  uniqueMethods.add("cookie");
+  uniqueMethods.add("mac-cookie");
+  if (!["http-chap", "http-pap", "https"].some((method) => uniqueMethods.has(method))) {
+    uniqueMethods.add("http-chap");
+  }
+  return Array.from(uniqueMethods).join(",");
+}
+
+function resolveMacCookieTimeout(currentValue: string, sessionTimeout: string | undefined): string {
+  if (isPositiveRouterOsDuration(currentValue)) return currentValue;
+  if (isPositiveRouterOsDuration(sessionTimeout)) return sessionTimeout!;
+  return "3d";
+}
+
+function isPositiveRouterOsDuration(value: string | undefined): boolean {
+  if (!value || value === "none" || value === "0" || value === "0s") return false;
+  return /\d+(?:w|d|h|m|s)/.test(value);
+}
+
 export function buildVoucherOnLoginScript(): string {
   return [
     ':local tpId [/ip hotspot user find where name=$user];',
@@ -1418,12 +1535,22 @@ export function buildVoucherExpirationScript(): string {
     '    :if (([:typeof $tpValidityEnd] != "nil") && ([:typeof $tpExpiresEnd] != "nil")) do={',
     '      :local tpValidity [:tonum [:pick $tpComment $tpValidityStart $tpValidityEnd]];',
     '      :local tpExpires [:tonum [:pick $tpComment $tpExpiresStart $tpExpiresEnd]];',
-    '      :if (($tpExpires > 0) && ($tpNow >= $tpExpires)) do={',
+    '      :local tpShouldRemove false;',
+    '      :local tpReason "expired";',
+    '      :if (($tpExpires > 0) && ($tpNow >= $tpExpires)) do={ :set tpShouldRemove true };',
+    '      :local tpLimitUptime [:tonum [:totime [/ip hotspot user get $tpId limit-uptime]]];',
+    '      :local tpUptime [:tonum [:totime [/ip hotspot user get $tpId uptime]]];',
+    '      :if (($tpLimitUptime > 0) && ($tpUptime >= $tpLimitUptime)) do={ :set tpShouldRemove true; :set tpReason "time-consumed" };',
+    '      :local tpLimitBytes [/ip hotspot user get $tpId limit-bytes-total];',
+    '      :local tpBytesIn [/ip hotspot user get $tpId bytes-in];',
+    '      :local tpBytesOut [/ip hotspot user get $tpId bytes-out];',
+    '      :if (($tpLimitBytes > 0) && (($tpBytesIn + $tpBytesOut) >= $tpLimitBytes)) do={ :set tpShouldRemove true; :set tpReason "quota-consumed" };',
+    '      :if ($tpShouldRemove = true) do={',
     '        :local tpUser [/ip hotspot user get $tpId name];',
-    '        :foreach tpActiveId in=[/ip hotspot active find where user=$tpUser] do={ /ip hotspot active remove $tpActiveId };',
-    '        :foreach tpCookieId in=[/ip hotspot cookie find where user=$tpUser] do={ /ip hotspot cookie remove $tpCookieId };',
-    '        /ip hotspot user set $tpId disabled=yes comment=("TicketPro:v1;validity=" . $tpValidity . ";expires=" . $tpExpires . ";state=expired;");',
-    '        :log info ("TicketPro voucher expired: " . $tpUser);',
+    '        :foreach tpActiveId in=[/ip hotspot active find where user=$tpUser] do={ :do { /ip hotspot active remove $tpActiveId } on-error={} };',
+    '        :foreach tpCookieId in=[/ip hotspot cookie find where user=$tpUser] do={ :do { /ip hotspot cookie remove $tpCookieId } on-error={} };',
+    '        :log info ("TicketPro voucher removed: " . $tpUser . " (" . $tpReason . ")");',
+    '        :do { /ip hotspot user remove $tpId } on-error={ :log error ("TicketPro voucher removal failed: " . $tpUser) };',
     '      };',
     '    };',
     '  };',
