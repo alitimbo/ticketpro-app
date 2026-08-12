@@ -1195,6 +1195,55 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
     devicesAfterRevocation.payload.devices.length - 1
   );
 
+  const revokedLastOwnerDevice = await api("/v1/saas/devices/revoke", {
+    token: sessionToken,
+    body: { device_id: registeredDesktop.payload.device.id }
+  });
+  assert.equal(revokedLastOwnerDevice.status, 200);
+
+  const rejectedRecoveryPassword = await api("/v1/saas/devices/recover", {
+    token: sessionToken,
+    body: {
+      installation_id: desktopInstallationId,
+      previous_public_key: "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF=",
+      public_key: "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN=",
+      password: "mot-de-passe-incorrect"
+    }
+  });
+  assert.equal(rejectedRecoveryPassword.status, 401);
+  assert.equal(
+    rejectedRecoveryPassword.payload.details.code,
+    "DEVICE_RECOVERY_PASSWORD_INVALID"
+  );
+
+  const recoveredLastOwnerDevice = await api("/v1/saas/devices/recover", {
+    token: sessionToken,
+    body: {
+      installation_id: desktopInstallationId,
+      previous_public_key: "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF=",
+      public_key: "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN=",
+      password: "SaaSsimple123"
+    }
+  });
+  assert.equal(recoveredLastOwnerDevice.status, 200, JSON.stringify(recoveredLastOwnerDevice.payload));
+  assert.equal(recoveredLastOwnerDevice.payload.device.status, "active");
+  assert.equal(recoveredLastOwnerDevice.payload.device.vpn.key_version, 3);
+  assert.equal(recoveredLastOwnerDevice.payload.active_device_count, 1);
+  assert.equal(hubRequests.at(-1).body.action, "rotate");
+
+  const retriedOwnerDeviceRecovery = await api("/v1/saas/devices/recover", {
+    token: sessionToken,
+    body: {
+      installation_id: desktopInstallationId,
+      previous_public_key: "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF=",
+      public_key: "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN=",
+      password: "SaaSsimple123"
+    }
+  });
+  assert.equal(retriedOwnerDeviceRecovery.status, 200);
+  assert.equal(retriedOwnerDeviceRecovery.payload.device.vpn.key_version, 3);
+  assert.equal(hubRequests.at(-1).body.action, "upsert");
+
   const saasPeer = await api("/v1/saas/vpn/peers", {
     token: sessionToken,
     body: {

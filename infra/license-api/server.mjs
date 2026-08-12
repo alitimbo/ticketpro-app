@@ -1128,6 +1128,11 @@ const statements = {
     SET status = 'revoked', revoked_at = ?, updated_at = ?
     WHERE organization_id = ? AND id = ? AND status <> 'revoked'
   `),
+  restoreOrganizationDevice: db.prepare(`
+    UPDATE organization_devices
+    SET status = 'active', revoked_at = NULL, last_seen_at = ?, updated_at = ?
+    WHERE organization_id = ? AND id = ? AND status = 'revoked'
+  `),
   listOrganizationDevices: db.prepare(`
     SELECT device.*, peer.id AS peer_id, peer.gateway_id, peer.public_key,
       peer.vpn_ip, peer.key_version, peer.config_version, peer.desired_state,
@@ -5573,6 +5578,158 @@ const handlers = [
       status: device.status,
       vpn_access: device.status !== "revoked"
         && organizationSubscriptionLifecycle(subscription).isActive
+    };
+  }),
+
+  route("POST", "/v1/saas/devices/recover", async (request, body) => {
+    if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. Réessayez plus tard.");
+    const context = requireOrganizationPermission(request, "global.vpn", {
+      requireActiveSubscription: true
+    });
+    const { organization, subscription, user, membership } = context;
+    if (membership.authority_role !== "owner") {
+      throw new HttpError(403, "Seul le propriétaire peut restaurer le dernier appareil.", {
+        code: "DEVICE_RECOVERY_OWNER_REQUIRED"
+      });
+    }
+    const password = requirePasswordInput(body, "password");
+    if (!verifyPassword(password, user.password_hash)) {
+      throw new HttpError(401, "Mot de passe incorrect.", {
+        code: "DEVICE_RECOVERY_PASSWORD_INVALID"
+      });
+    }
+    const installationId = requireInstallationId(body);
+    const previousPublicKey = requireVpnPublicKey({ public_key: body.previous_public_key });
+    const newPublicKey = requireVpnPublicKey({ public_key: body.public_key });
+    if (previousPublicKey === newPublicKey) {
+      throw new HttpError(400, "La récupération exige une nouvelle clé VPN.", {
+        code: "VPN_KEY_ROTATION_REQUIRES_NEW_KEY"
+      });
+    }
+    let device = statements.findOrganizationDeviceByInstallation.get(
+      organization.id,
+      installationId
+    );
+    if (!device) {
+      throw new HttpError(404, "Appareil introuvable.", { code: "DEVICE_NOT_FOUND" });
+    }
+    let vpnPeer = statements.findOrganizationVpnPeerByDevice.get(organization.id, device.id);
+    if (!vpnPeer) {
+      throw new HttpError(404, "Pair VPN introuvable.", { code: "VPN_PEER_NOT_FOUND" });
+    }
+    const alreadyRecovered = device.status !== "revoked" && vpnPeer.public_key === newPublicKey;
+    if (!alreadyRecovered) {
+      if (device.status !== "revoked") {
+        throw new HttpError(409, "Cet appareil est déjà actif.", {
+          code: "DEVICE_ALREADY_ACTIVE"
+        });
+      }
+      if (vpnPeer.public_key !== previousPublicKey) {
+        throw new HttpError(409, "L'ancienne clé ne correspond plus à cet appareil.", {
+          code: "VPN_KEY_VERSION_CONFLICT",
+          key_version: Number(vpnPeer.key_version)
+        });
+      }
+      const activeCount = Number(
+        statements.countOrganizationRegisteredDevices.get(organization.id).count
+      );
+      if (activeCount !== 0) {
+        throw new HttpError(409, "Un autre appareil actif peut gérer cette révocation.", {
+          code: "DEVICE_RECOVERY_REQUIRES_NO_ACTIVE_DEVICE",
+          active_count: activeCount
+        });
+      }
+      const conflictingPeer = statements.findOrganizationVpnPeerByPublicKey.get(newPublicKey);
+      if (conflictingPeer && conflictingPeer.device_id !== device.id) {
+        throw new HttpError(409, "Cette clé VPN appartient déjà à un autre appareil.", {
+          code: "VPN_PUBLIC_KEY_ALREADY_REGISTERED"
+        });
+      }
+    }
+
+    const maxDevices = deviceLimitValue(subscription);
+    const tenant = await vpnHubRequest("/v1/tenants", {
+      account_id: organization.id,
+      operator_limit: maxDevices,
+      router_limit: Number(subscription.router_limit)
+    });
+    statements.markOrganizationVpnPeerPending.run("enabled", nowIso(), device.id);
+    let provisioned;
+    try {
+      provisioned = await vpnHubRequest("/v1/peers", {
+        account_id: organization.id,
+        action: alreadyRecovered ? "upsert" : "rotate",
+        name: device.name,
+        peer_type: "operator",
+        persistent_keepalive: 25,
+        previous_public_key: alreadyRecovered ? undefined : previousPublicKey,
+        public_key: newPublicKey,
+        resource_id: `device:${device.id}`
+      });
+    } catch (error) {
+      statements.markOrganizationVpnPeerError.run("VPN_DEVICE_RECOVERY_FAILED", nowIso(), device.id);
+      throw error;
+    }
+
+    const now = nowIso();
+    if (!alreadyRecovered) {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const restored = statements.restoreOrganizationDevice.run(
+          now,
+          now,
+          organization.id,
+          device.id
+        );
+        const rotated = statements.rotateOrganizationVpnPeer.run(
+          newPublicKey,
+          now,
+          device.id,
+          previousPublicKey
+        );
+        if (Number(restored.changes) !== 1 || Number(rotated.changes) !== 1) {
+          throw new Error("Conflit pendant la récupération de l'appareil.");
+        }
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    statements.markOrganizationVpnPeerEnabled.run(
+      provisioned.assigned_address ?? vpnPeer.vpn_ip,
+      nowIso(),
+      device.id
+    );
+    device = statements.findOrganizationDeviceById.get(organization.id, device.id);
+    vpnPeer = statements.findOrganizationVpnPeerByDevice.get(organization.id, device.id);
+    const joinedDevice = statements.listOrganizationDevices
+      .all(organization.id)
+      .find((item) => item.id === device.id);
+    logEvent(request, null, "saas_device_recovered", organization.id, null, {
+      device_id: device.id,
+      key_version: Number(vpnPeer.key_version),
+      organization_user_id: user.id,
+      previous_public_key_hash: hash(previousPublicKey),
+      public_key_hash: hash(newPublicKey)
+    });
+    return {
+      device: organizationDeviceResponse(joinedDevice),
+      active_device_count: Number(
+        statements.countOrganizationRegisteredDevices.get(organization.id).count
+      ),
+      device_limit_mode: deviceLimitMode(subscription),
+      max_devices: maxDevices,
+      vpn: {
+        address: provisioned.assigned_address ?? vpnPeer.vpn_ip,
+        allowed_ips: [tenant.address_pool],
+        config_version: Number(vpnPeer.config_version),
+        endpoint: tenant.server_endpoint,
+        gateway_id: vpnPeer.gateway_id,
+        gateway_public_key: tenant.server_public_key,
+        persistent_keepalive: 25,
+        port: tenant.server_port
+      }
     };
   }),
 

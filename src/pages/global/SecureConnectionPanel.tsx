@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import {
   getSaasDeviceInventory,
+  recoverCurrentSaasDevice,
   revokeSaasDevice,
   rotateCurrentSaasDeviceKey,
   type SaasDevice,
@@ -29,10 +30,10 @@ import {
   type VpnProviderStatus,
   type VpnRuntimeState
 } from "../../services/vpn";
-import { Badge, Button, Card, ConfirmDialog, EmptyState } from "../../shared/ui";
+import { Badge, Button, Card, ConfirmDialog, EmptyState, PasswordField } from "../../shared/ui";
 import { useAuth } from "../../app/auth/AuthProvider";
 
-type Operation = "connect" | "refresh" | "repair" | "revoke" | "replace" | "rotate";
+type Operation = "connect" | "refresh" | "repair" | "recover" | "revoke" | "replace" | "rotate";
 
 type SecureConnectionPanelProps = {
   onProviderChange?: (provider: VpnProviderStatus["provider"]) => void;
@@ -48,6 +49,8 @@ export function SecureConnectionPanel({ onProviderChange }: SecureConnectionPane
   const [operation, setOperation] = useState<Operation | null>(null);
   const [operationDeviceId, setOperationDeviceId] = useState<string | null>(null);
   const [confirmDevice, setConfirmDevice] = useState<SaasDevice | null>(null);
+  const [recoveryDevice, setRecoveryDevice] = useState<SaasDevice | null>(null);
+  const [recoveryPassword, setRecoveryPassword] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -166,6 +169,37 @@ export function SecureConnectionPanel({ onProviderChange }: SecureConnectionPane
       setError(
         `${vpnErrorMessage(rotationError)} La rotation préparée sera reprise au prochain essai sans créer de doublon.`
       );
+      await refresh();
+    } finally {
+      setOperation(null);
+      setOperationDeviceId(null);
+    }
+  };
+
+  const recoverCurrentDevice = async () => {
+    const device = recoveryDevice;
+    if (!device || !recoveryPassword) return;
+    setOperation("recover");
+    setOperationDeviceId(device.id);
+    setError(null);
+    setMessage(null);
+    try {
+      const current = await ensureVpnIdentity();
+      const pending = await prepareVpnIdentityRotation();
+      await recoverCurrentSaasDevice({
+        installationId: current.installationId,
+        previousPublicKey: current.publicKey,
+        publicKey: pending.publicKey,
+        password: recoveryPassword
+      });
+      await commitVpnIdentityRotation();
+      setRecoveryDevice(null);
+      setRecoveryPassword("");
+      await provisioning.ensureConnected(device.name);
+      await refresh();
+      setMessage("Cet appareil a été restauré avec une nouvelle clé. L'ancienne clé reste définitivement révoquée.");
+    } catch (recoveryError) {
+      setError(vpnErrorMessage(recoveryError));
       await refresh();
     } finally {
       setOperation(null);
@@ -293,6 +327,23 @@ export function SecureConnectionPanel({ onProviderChange }: SecureConnectionPane
                         Nouvelle clé
                       </Button>
                     ) : null}
+                    {isCurrent
+                      && device.status === "revoked"
+                      && activeDevices === 0
+                      && saasAccount?.user.role === "owner" ? (
+                      <Button
+                        className={busy && operation === "recover" ? "vpn-button--loading" : ""}
+                        disabled={Boolean(operation)}
+                        icon={busy && operation === "recover" ? LoaderCircle : RotateCw}
+                        onClick={() => {
+                          setRecoveryPassword("");
+                          setRecoveryDevice(device);
+                        }}
+                        variant="primary"
+                      >
+                        Restaurer cet appareil
+                      </Button>
+                    ) : null}
                     {!isCurrent && device.status !== "revoked" ? (
                       canReplace ? (
                         <Button
@@ -339,6 +390,44 @@ export function SecureConnectionPanel({ onProviderChange }: SecureConnectionPane
         onConfirm={() => void revokeConfirmedDevice()}
         title="Révoquer cet appareil ?"
       />
+      {recoveryDevice ? (
+        <div className="dialog-backdrop" role="presentation">
+          <section aria-modal="true" className="confirm-dialog" role="dialog">
+            <h2 className="confirm-dialog__title">Restaurer cet appareil ?</h2>
+            <p className="confirm-dialog__description">
+              TicketPro créera une nouvelle clé locale pour ce PC. L'ancienne clé restera révoquée et aucun autre appareil ne sera réactivé.
+            </p>
+            <PasswordField
+              disabled={operation === "recover"}
+              label="Confirmez votre mot de passe propriétaire"
+              name="device-recovery-password"
+              onChange={setRecoveryPassword}
+              value={recoveryPassword}
+            />
+            <div className="confirm-dialog__actions">
+              <Button
+                disabled={operation === "recover"}
+                onClick={() => {
+                  setRecoveryDevice(null);
+                  setRecoveryPassword("");
+                }}
+                variant="ghost"
+              >
+                Annuler
+              </Button>
+              <Button
+                className={operation === "recover" ? "vpn-button--loading" : ""}
+                disabled={Boolean(operation) || !recoveryPassword}
+                icon={operation === "recover" ? LoaderCircle : RotateCw}
+                onClick={() => void recoverCurrentDevice()}
+                variant="primary"
+              >
+                {operation === "recover" ? "Restauration…" : "Restaurer avec une nouvelle clé"}
+              </Button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -382,7 +471,10 @@ function vpnErrorMessage(error: unknown): string {
   if (error instanceof SaasRequestError) {
     const code = typeof error.details?.code === "string" ? error.details.code : "";
     if (code === "DEVICE_LIMIT_REACHED") return "La limite d'appareils est atteinte. Remplacez ou révoquez un ancien PC.";
-    if (code === "DEVICE_REVOKED") return "Cet appareil a été révoqué. Utilisez un autre appareil autorisé pour le remplacer.";
+    if (code === "DEVICE_REVOKED") return "Cet appareil a été révoqué. Le propriétaire peut le restaurer ici s'il ne reste aucun autre PC actif.";
+    if (code === "DEVICE_RECOVERY_PASSWORD_INVALID") return "Mot de passe propriétaire incorrect.";
+    if (code === "DEVICE_RECOVERY_OWNER_REQUIRED") return "Seul le propriétaire de l'organisation peut restaurer le dernier appareil.";
+    if (code === "DEVICE_RECOVERY_REQUIRES_NO_ACTIVE_DEVICE") return "Un autre appareil actif existe encore. Utilisez-le pour gérer ou remplacer ce PC.";
     if (code === "SUBSCRIPTION_REQUIRED") return "Votre abonnement ne permet pas actuellement la connexion sécurisée.";
   }
   return error instanceof Error ? error.message : "L'opération VPN a échoué.";

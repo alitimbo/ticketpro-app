@@ -553,6 +553,25 @@ export async function rotateCurrentSaasDeviceKey(input: {
   );
 }
 
+export async function recoverCurrentSaasDevice(input: {
+  installationId: string;
+  previousPublicKey: string;
+  publicKey: string;
+  password: string;
+}): Promise<SaasDeviceRegistration> {
+  const token = await requireSessionToken();
+  return request(
+    "/v1/saas/devices/recover",
+    {
+      installation_id: input.installationId,
+      previous_public_key: input.previousPublicKey,
+      public_key: input.publicKey,
+      password: input.password
+    },
+    token
+  );
+}
+
 export async function revokeSaasDevice(deviceId: string): Promise<{
   ok: boolean;
   device_id: string;

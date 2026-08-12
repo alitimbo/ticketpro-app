@@ -19,6 +19,7 @@ export {
   migrateLegacyLicenseToSaas,
   purchaseSaasSubscription,
   readSaasSession,
+  recoverCurrentSaasDevice,
   registerSaasAndInitiatePayment,
   registerSaasDevice,
   registerSaasTrial,
