@@ -7,7 +7,8 @@ import {
   isIdempotentActivePeer,
   isPeerLimitReached,
   revokeDuplicateActivePeers,
-  selectActivePeersToReplace
+  selectActivePeersToReplace,
+  selectRevokedPeerForRecovery
 } from "./peer-lifecycle.mjs";
 import { buildTenantFirewallCommands } from "./tenant-firewall.mjs";
 
@@ -223,14 +224,21 @@ async function mutatePeer(accountId, tenant, body) {
     publicKey,
     resourceId
   });
+  const revokedPeerForRecovery = body.action === "rotate" && replacedPeers.length === 0
+    ? selectRevokedPeerForRecovery(tenant.peers, {
+        peerType,
+        previousPublicKey,
+        resourceId
+      })
+    : null;
   if (body.action === "upsert" && replacedPeers.length > 0) {
     throw new HubError(409, "active_peer_already_exists_for_resource");
   }
-  if (body.action === "rotate" && replacedPeers.length === 0) {
+  if (body.action === "rotate" && replacedPeers.length === 0 && !revokedPeerForRecovery) {
     throw new HubError(409, "active_previous_peer_not_found");
   }
 
-  let replacementAddress = null;
+  let replacementAddress = revokedPeerForRecovery?.assigned_address ?? null;
   if (body.action === "rotate" && replacedPeers.length > 0) {
     replacementAddress = replacedPeers[0].assigned_address;
     const revokedAt = new Date().toISOString();

@@ -4,7 +4,8 @@ import {
   isIdempotentActivePeer,
   isPeerLimitReached,
   revokeDuplicateActivePeers,
-  selectActivePeersToReplace
+  selectActivePeersToReplace,
+  selectRevokedPeerForRecovery
 } from "./peer-lifecycle.mjs";
 
 test("une rotation cible uniquement la clé active de la même ressource et du même type", () => {
@@ -57,6 +58,28 @@ test("une limite opérateur nulle autorise le mode illimité", () => {
   assert.equal(isPeerLimitReached(100_000, null), false);
   assert.equal(isPeerLimitReached(5, 5), true);
   assert.equal(isPeerLimitReached(4, 5), false);
+});
+
+test("une rotation de récupération cible uniquement la clé révoquée du même appareil", () => {
+  const revoked = {
+    ...peer("revoked-device-key", "operator", "device:pc-1", "10.250.1.5/32"),
+    status: "revoked"
+  };
+  const peers = [
+    revoked,
+    { ...peer("other-key", "operator", "device:pc-2", "10.250.1.6/32"), status: "revoked" }
+  ];
+
+  assert.equal(selectRevokedPeerForRecovery(peers, {
+    peerType: "operator",
+    previousPublicKey: "revoked-device-key",
+    resourceId: "device:pc-1"
+  }), revoked);
+  assert.equal(selectRevokedPeerForRecovery(peers, {
+    peerType: "operator",
+    previousPublicKey: "revoked-device-key",
+    resourceId: "device:pc-2"
+  }), null);
 });
 
 function peer(publicKey, peerType, resourceId, assignedAddress) {

@@ -13,6 +13,18 @@ export function selectActivePeersToReplace(
   );
 }
 
+export function selectRevokedPeerForRecovery(
+  peers,
+  { peerType, previousPublicKey, resourceId }
+) {
+  return peers.find((peer) =>
+    peer.status === "revoked"
+    && peer.peer_type === peerType
+    && peer.public_key === previousPublicKey
+    && peer.resource_id === resourceId
+  ) ?? null;
+}
+
 export function isIdempotentActivePeer(existing, { peerType, publicKey, resourceId }) {
   return Boolean(
     existing
