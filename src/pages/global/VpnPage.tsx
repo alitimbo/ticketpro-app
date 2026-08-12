@@ -810,6 +810,10 @@ export function VpnPage() {
     return { badge: "offline" as const, label: "Déconnectée" };
   };
 
+  const visiblePeers = vpnProvider === "EMBEDDED"
+    ? peers.filter((peer) => peer.peer_type === "router")
+    : peers;
+
   return (
     <div className="page-stack">
       <PageHeader
@@ -917,9 +921,20 @@ export function VpnPage() {
         </div>
       )}
 
-      <Card title="Pairs provisionnés" description="Un pair routeur reste en brouillon jusqu'à une vraie commande RouterOS réussie via WireGuard.">
-        {peers.length === 0 ? (
-          <EmptyState icon={KeyRound} title="Aucun pair" description="Les pairs routeur et opérateur apparaîtront ici." />
+      <Card
+        title={vpnProvider === "EMBEDDED" ? "Routeurs connectés au VPN" : "Pairs provisionnés"}
+        description={vpnProvider === "EMBEDDED"
+          ? "Les postes Windows sont gérés dans Mes appareils. Cette liste contient uniquement les accès MikroTik du compte."
+          : "Un pair routeur reste en brouillon jusqu'à une vraie commande RouterOS réussie via WireGuard."}
+      >
+        {visiblePeers.length === 0 ? (
+          <EmptyState
+            icon={KeyRound}
+            title={vpnProvider === "EMBEDDED" ? "Aucun routeur connecté au VPN" : "Aucun pair"}
+            description={vpnProvider === "EMBEDDED"
+              ? "Provisionnez un MikroTik pour créer son accès sécurisé. Les PC apparaissent uniquement dans Mes appareils."
+              : "Les pairs routeur et opérateur apparaîtront ici."}
+          />
         ) : (
           <div className="vpn-peer-table">
             <div aria-hidden="true" className="vpn-peer-table__header">
@@ -930,7 +945,7 @@ export function VpnPage() {
               <span>Action</span>
             </div>
             <div className="vpn-peer-list">
-              {peers.map((peer) => {
+              {visiblePeers.map((peer) => {
                 const connectionState = getPeerConnectionState(peer);
                 const isPeerBusy = operation?.resourceId === peer.resource_id;
                 return (

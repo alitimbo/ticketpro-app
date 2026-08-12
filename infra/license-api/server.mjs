@@ -44,7 +44,7 @@ const SAAS_INVITATION_TTL_HOURS = Number.isFinite(parsedInvitationTtlHours)
   : 24;
 const MAX_BODY_BYTES = 64 * 1024;
 const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX = 60;
+const RATE_LIMIT_MAX = Math.max(1, Number(process.env.LICENSE_RATE_LIMIT_MAX ?? 60));
 const SAAS_TRIAL_DAYS = 7;
 const SAAS_TRIAL_ROUTER_LIMIT = 1;
 const SAAS_TRIAL_PLAN_ID = "ticketpro-trial-7-days";
@@ -105,6 +105,8 @@ db.exec(`
     duration_days INTEGER NOT NULL CHECK(duration_days > 0),
     price_cfa INTEGER,
     billing_period TEXT NOT NULL CHECK(billing_period IN ('monthly', 'yearly', 'custom')),
+    offer_code TEXT,
+    purchase_mode TEXT NOT NULL DEFAULT 'online' CHECK(purchase_mode IN ('online', 'contact')),
     is_recommended INTEGER NOT NULL DEFAULT 0,
     is_active INTEGER NOT NULL DEFAULT 1,
     sort_order INTEGER NOT NULL DEFAULT 0,
@@ -524,6 +526,8 @@ db.exec(`
 
 ensureColumn("plans", "is_reseller", "INTEGER NOT NULL DEFAULT 0");
 ensureColumn("plans", "device_limit_mode", "TEXT NOT NULL DEFAULT 'limited'");
+ensureColumn("plans", "offer_code", "TEXT");
+ensureColumn("plans", "purchase_mode", "TEXT NOT NULL DEFAULT 'online'");
 ensureColumn("licenses", "plan_id", "TEXT");
 ensureColumn("licenses", "plan_code", "TEXT");
 ensureColumn("licenses", "plan_name", "TEXT");
@@ -615,8 +619,38 @@ const seedPlan = db.prepare(`
   ["subscription-plan-50-routers", "RESELLER-50", "Pack Revendeur 50", "Pour revendre des sous-licences isolées.", 50, 25, 30, 40000, 0, 1, 40],
   ["subscription-plan-100-routers", "RESELLER-100", "Pack Revendeur 100", "Pour revendre des sous-licences isolées.", 100, 100, 30, 70000, 0, 1, 50]
 ].forEach((plan) => seedPlan.run(...plan, timestamp, timestamp));
+const seedSaasCatalogPlan = db.prepare(`
+  INSERT OR IGNORE INTO plans (
+    id, code, name, description, router_limit, max_devices, device_limit_mode,
+    duration_days, price_cfa, billing_period, offer_code, purchase_mode,
+    is_recommended, is_active, is_reseller, sort_order, created_at, updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?)
+`);
+[
+  ["subscription-starter-monthly", "STARTER-MONTHLY", "STARTER", "Pour une petite WiFi Zone qui démarre.", 1, 2, "limited", 30, 5000, "monthly", "STARTER", "online", 0, 10],
+  ["subscription-starter-yearly", "STARTER-YEARLY", "STARTER", "Pour une petite WiFi Zone qui démarre.", 1, 2, "limited", 365, 50000, "yearly", "STARTER", "online", 0, 10],
+  ["subscription-growth-monthly", "GROWTH-MONTHLY", "GROWTH", "Pour plusieurs points d'accès et une petite équipe.", 5, 4, "limited", 30, 10000, "monthly", "GROWTH", "online", 0, 20],
+  ["subscription-growth-yearly", "GROWTH-YEARLY", "GROWTH", "Pour plusieurs points d'accès et une petite équipe.", 5, 4, "limited", 365, 100000, "yearly", "GROWTH", "online", 0, 20],
+  ["subscription-pro-monthly", "PRO-MONTHLY", "PRO", "Pour les exploitants multi-sites et leurs techniciens.", 20, 10, "limited", 30, 20000, "monthly", "PRO", "online", 1, 30],
+  ["subscription-pro-yearly", "PRO-YEARLY", "PRO", "Pour les exploitants multi-sites et leurs techniciens.", 20, 10, "limited", 365, 200000, "yearly", "PRO", "online", 1, 30],
+  ["subscription-ultra-monthly", "ULTRA-MONTHLY", "ULTRA", "Pour les grands opérateurs et intégrateurs.", 100, 25, "limited", 30, 40000, "monthly", "ULTRA", "online", 0, 40],
+  ["subscription-ultra-yearly", "ULTRA-YEARLY", "ULTRA", "Pour les grands opérateurs et intégrateurs.", 100, 25, "limited", 365, 400000, "yearly", "ULTRA", "online", 0, 40],
+  ["subscription-enterprise-contact", "ENTERPRISE-CONTACT", "ENTREPRISE", "Capacité, appareils et accompagnement sur mesure.", 1000, 1, "unlimited", 365, null, "custom", "ENTERPRISE", "contact", 0, 50]
+].forEach((plan) => seedSaasCatalogPlan.run(...plan, timestamp, timestamp));
 db.exec("UPDATE plans SET is_reseller = 1 WHERE code LIKE 'RESELLER-%';");
 db.exec(`
+  UPDATE plans
+  SET is_active = 0, updated_at = '${timestamp}'
+  WHERE id IN (
+    'subscription-plan-1-router',
+    'subscription-plan-5-routers',
+    'subscription-plan-10-routers'
+  );
+
+  UPDATE plans
+  SET offer_code = COALESCE(NULLIF(offer_code, ''), code)
+  WHERE offer_code IS NULL OR offer_code = '';
+
   UPDATE plans
   SET device_limit_mode = 'unlimited'
   WHERE is_reseller = 0 AND max_devices >= 100000;
@@ -629,41 +663,46 @@ db.exec(`
   SET device_limit_mode = 'unlimited'
   WHERE max_devices >= 100000;
 
-  UPDATE organization_subscriptions
-  SET max_devices = COALESCE(
-    (SELECT plan.max_devices FROM plans AS plan WHERE plan.id = organization_subscriptions.plan_id),
-    max_devices,
-    1
-  );
-
-  UPDATE organization_subscriptions
-  SET device_limit_mode = COALESCE(
-    (SELECT plan.device_limit_mode FROM plans AS plan WHERE plan.id = organization_subscriptions.plan_id),
-    device_limit_mode,
-    'limited'
-  )
+  -- Les abonnements conservent l'instantané commercial acheté. Une modification
+  -- ultérieure du catalogue ne doit jamais changer leurs droits rétroactivement.
 `);
 
 const statements = {
-  listPlans: db.prepare("SELECT * FROM plans WHERE is_active = 1 AND is_reseller = 0 ORDER BY sort_order ASC, router_limit ASC"),
+  listPlans: db.prepare(`
+    SELECT * FROM plans
+    WHERE is_active = 1 AND is_reseller = 0 AND purchase_mode = 'online'
+    ORDER BY sort_order ASC, router_limit ASC, duration_days ASC
+  `),
+  listPublicCatalogPlans: db.prepare(`
+    SELECT * FROM plans
+    WHERE is_active = 1 AND is_reseller = 0
+    ORDER BY sort_order ASC, router_limit ASC, duration_days ASC
+  `),
   listAllPlans: db.prepare(`
     SELECT * FROM plans WHERE is_reseller = 0 ORDER BY sort_order ASC, router_limit ASC
   `),
   findPlanById: db.prepare("SELECT * FROM plans WHERE id = ?"),
   clearRecommendedPlans: db.prepare(`
-    UPDATE plans SET is_recommended = 0, updated_at = ? WHERE id <> ? AND is_reseller = 0
+    UPDATE plans SET is_recommended = 0, updated_at = ?
+    WHERE COALESCE(offer_code, code) <> ? AND is_reseller = 0
+  `),
+  setOfferRecommended: db.prepare(`
+    UPDATE plans SET is_recommended = ?, updated_at = ?
+    WHERE COALESCE(offer_code, code) = ? AND is_reseller = 0
   `),
   upsertPlan: db.prepare(`
     INSERT INTO plans (
       id, code, name, description, router_limit, max_devices, device_limit_mode, duration_days,
-      price_cfa, billing_period, is_recommended, is_active, is_reseller, sort_order, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      price_cfa, billing_period, offer_code, purchase_mode,
+      is_recommended, is_active, is_reseller, sort_order, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       code = excluded.code, name = excluded.name, description = excluded.description,
       router_limit = excluded.router_limit, max_devices = excluded.max_devices,
       device_limit_mode = excluded.device_limit_mode,
       duration_days = excluded.duration_days, price_cfa = excluded.price_cfa,
       billing_period = excluded.billing_period, is_recommended = excluded.is_recommended,
+      offer_code = excluded.offer_code, purchase_mode = excluded.purchase_mode,
       is_active = excluded.is_active, is_reseller = excluded.is_reseller,
       sort_order = excluded.sort_order, updated_at = excluded.updated_at
   `),
@@ -1847,6 +1886,8 @@ function planResponse(plan) {
     duration_days: Number(plan.duration_days),
     price_cfa: plan.price_cfa === null ? null : Number(plan.price_cfa),
     billing_period: plan.billing_period,
+    offer_code: plan.offer_code || plan.code,
+    purchase_mode: plan.purchase_mode === "contact" ? "contact" : "online",
     is_recommended: Boolean(plan.is_recommended),
     is_active: Boolean(plan.is_active),
     is_reseller: Boolean(plan.is_reseller)
@@ -3566,6 +3607,11 @@ async function createIpayOrder(
   if (purchaserType === "organization" && Boolean(plan.is_reseller)) {
     throw new HttpError(400, "Une organisation ne peut pas acheter un pack revendeur.");
   }
+  if (purchaserType === "organization" && plan.purchase_mode === "contact") {
+    throw new HttpError(409, "Ce forfait est disponible uniquement sur devis.", {
+      code: "PLAN_CONTACT_REQUIRED"
+    });
+  }
   if (purchaserType === "reseller") {
     if (!Boolean(plan.is_reseller)) throw new HttpError(400, "Un pack revendeur est requis.");
     if (reseller && reseller.plan_id !== plan.id) {
@@ -3692,6 +3738,12 @@ const handlers = [
     };
   }),
   route("GET", "/v1/plans", async () => ({ plans: statements.listPlans.all().map(planResponse) })),
+  route("GET", "/v1/plans/catalog", async () => ({
+    plans: statements.listPublicCatalogPlans.all().map((plan) => ({
+      ...planResponse(plan),
+      sort_order: Number(plan.sort_order)
+    }))
+  })),
 
   route("POST", "/v1/saas/register-trial", async (request, body) => {
     if (isRateLimited(request)) {
@@ -5325,13 +5377,30 @@ const handlers = [
     const maxDevices = deviceLimitValue(subscription);
     const now = nowIso();
     if (!device) {
+      const requestedReplacementDeviceId = typeof body.replacement_device_id === "string"
+        ? body.replacement_device_id.trim()
+        : "";
+      if (requestedReplacementDeviceId) {
+        const requestedReplacement = statements.findOrganizationDeviceById.get(
+          organization.id,
+          requestedReplacementDeviceId
+        );
+        if (
+          requestedReplacement
+          && requestedReplacement.status !== "revoked"
+          && requestedReplacement.registered_by_user_id !== user.id
+          && !organizationContextHasPermission(context, "global.vpn")
+        ) {
+          throw new HttpError(403, "Vous ne pouvez remplacer que l'un de vos propres appareils.", {
+            code: "DEVICE_REPLACEMENT_FORBIDDEN"
+          });
+        }
+      }
       const registeredCount = Number(
         statements.countOrganizationRegisteredDevices.get(organization.id).count
       );
       if (maxDevices !== null && registeredCount >= maxDevices) {
-        const replacementDeviceId = typeof body.replacement_device_id === "string"
-          ? body.replacement_device_id.trim()
-          : "";
+        const replacementDeviceId = requestedReplacementDeviceId;
         if (!replacementDeviceId) {
           throw new HttpError(409, "La limite d'appareils de votre abonnement est atteinte.", {
             code: "DEVICE_LIMIT_REACHED",
@@ -5807,6 +5876,18 @@ const handlers = [
     const isActive = body.is_active !== false;
     const isReseller = Boolean(body.is_reseller);
     const existing = statements.findPlanById.get(planId);
+    const offerCode = String(body.offer_code ?? existing?.offer_code ?? code)
+      .trim()
+      .toUpperCase();
+    if (!/^[A-Z0-9][A-Z0-9_-]{0,63}$/.test(offerCode)) {
+      throw new HttpError(400, "offer_code invalide.");
+    }
+    const purchaseMode = String(body.purchase_mode ?? existing?.purchase_mode ?? "online")
+      .trim()
+      .toLowerCase();
+    if (!isReseller && !["online", "contact"].includes(purchaseMode)) {
+      throw new HttpError(400, "purchase_mode invalide.");
+    }
     const requestedLimitMode = String(
       body.device_limit_mode ?? existing?.device_limit_mode ?? "limited"
     ).trim().toLowerCase();
@@ -5822,12 +5903,12 @@ const handlers = [
     const priceCfa = body.price_cfa === null || body.price_cfa === undefined
       ? null
       : requireInteger(body, "price_cfa", 1, 1_000_000_000);
-    if (isActive && !isReseller && priceCfa === null) {
+    if (isActive && !isReseller && purchaseMode === "online" && priceCfa === null) {
       throw new HttpError(400, "Un forfait SaaS actif doit avoir un prix payable.");
     }
     const now = nowIso();
     if (body.is_recommended && !isReseller) {
-      statements.clearRecommendedPlans.run(now, planId);
+      statements.clearRecommendedPlans.run(now, offerCode);
     }
     statements.upsertPlan.run(
       planId,
@@ -5840,6 +5921,8 @@ const handlers = [
       durationDays,
       priceCfa,
       billingPeriod,
+      offerCode,
+      isReseller ? "online" : purchaseMode,
       body.is_recommended ? 1 : 0,
       isActive ? 1 : 0,
       isReseller ? 1 : 0,
@@ -5847,6 +5930,9 @@ const handlers = [
       existing?.created_at ?? now,
       now
     );
+    if (!isReseller) {
+      statements.setOfferRecommended.run(body.is_recommended ? 1 : 0, now, offerCode);
+    }
     return { plan: planResponse(statements.findPlanById.get(planId)) };
   }),
 

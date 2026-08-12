@@ -226,6 +226,15 @@ Pour un forfait SaaS, `device_limit_mode` vaut `limited` ou `unlimited`. En mode
 `max_devices: null`; chaque PC garde malgré tout sa propre identité et sa propre
 adresse WireGuard.
 
+Le catalogue commercial accepte aussi `offer_code` pour regrouper les variantes
+mensuelle et annuelle d'une même gamme, ainsi que `purchase_mode` (`online` ou
+`contact`). Une offre `contact` apparaît dans `GET /v1/plans/catalog`, mais jamais
+dans `GET /v1/plans` ni dans le parcours de paiement iPay.
+
+Chaque paiement et abonnement conserve un instantané du prix, de la durée et des
+limites au moment de l'achat. Modifier le catalogue ne change donc pas les droits
+des abonnements déjà vendus ; désactivez une ancienne offre au lieu de la supprimer.
+
 ```json
 {
   "id": "business-unlimited",

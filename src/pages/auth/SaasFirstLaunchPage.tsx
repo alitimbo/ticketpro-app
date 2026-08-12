@@ -17,6 +17,7 @@ import {
 } from "../../services/saas";
 import { markFirstLaunchCompleted } from "../../services/auth";
 import { PaymentMethodPicker } from "../../shared/payment/PaymentMethodPicker";
+import { PaymentInstructions } from "../../shared/payment/PaymentInstructions";
 import { Badge, Button, Card, PasswordField } from "../../shared/ui";
 import { formatCfa, formatPlanDuration } from "../global/subscriptionPageModel";
 
@@ -350,6 +351,11 @@ export function SaasFirstLaunchPage({ onComplete }: { onComplete: () => void }) 
                   {payment.payment.meta_data?.code ? ` — Code : ${payment.payment.meta_data.code}` : ""}
                 </p>
               </div>
+              <PaymentInstructions
+                amountLabel={formatCfa(payment.order.amount)}
+                method={payment.order.payment_type}
+                reference={payment.payment.public_reference || payment.order.transaction_id}
+              />
               {error ? <p className="form-error">{error}</p> : null}
               <div className="confirm-dialog__actions">
                 <Button disabled={isLoading} icon={RefreshCw} onClick={restartPayment} type="button" variant="ghost">

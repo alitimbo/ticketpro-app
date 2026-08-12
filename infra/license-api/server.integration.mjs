@@ -177,6 +177,7 @@ before(async () => {
       LICENSE_DB: databasePath,
       APP_UPDATE_MANIFEST_PATH: updateManifestPath,
       LICENSE_MASTER_TOKEN: masterToken,
+      LICENSE_RATE_LIMIT_MAX: "500",
       LICENSE_HASH_SECRET: "integration-hash-secret-at-least-32-characters",
       ROUTER_VAULT_KEY: Buffer.alloc(32, 7).toString("base64"),
       IPAY_BASE_URL: `http://127.0.0.1:${ipayPort}`,
@@ -1067,9 +1068,29 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
       app_version: "0.2.4"
     }
   });
-  assert.equal(deviceLimitReached.status, 409);
-  assert.equal(deviceLimitReached.payload.details.code, "DEVICE_LIMIT_REACHED");
-  assert.equal(deviceLimitReached.payload.details.max_devices, 1);
+  assert.equal(deviceLimitReached.status, 200);
+  assert.equal(deviceLimitReached.payload.active_device_count, 2);
+  assert.equal(deviceLimitReached.payload.max_devices, 2);
+
+  const thirdDeviceLimitReached = await api("/v1/saas/devices/register", {
+    token: sessionToken,
+    body: {
+      installation_id: "323e4567-e89b-42d3-a456-426614174222",
+      public_key: "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK=",
+      name: "Troisième PC refusé",
+      platform: "windows",
+      app_version: "0.2.4"
+    }
+  });
+  assert.equal(thirdDeviceLimitReached.status, 409);
+  assert.equal(thirdDeviceLimitReached.payload.details.code, "DEVICE_LIMIT_REACHED");
+  assert.equal(thirdDeviceLimitReached.payload.details.max_devices, 2);
+
+  const revokedSecondDesktop = await api("/v1/saas/devices/revoke", {
+    token: sessionToken,
+    body: { device_id: deviceLimitReached.payload.device.id }
+  });
+  assert.equal(revokedSecondDesktop.status, 200);
 
   const changedDesktopKey = await api("/v1/saas/devices/register", {
     token: sessionToken,
@@ -1122,9 +1143,9 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
     token: sessionToken
   });
   assert.equal(devicesBeforeRevocation.status, 200);
-  assert.equal(devicesBeforeRevocation.payload.devices.length, 2);
+  assert.equal(devicesBeforeRevocation.payload.devices.length, 3);
   assert.equal(devicesBeforeRevocation.payload.active_count, 1);
-  assert.equal(devicesBeforeRevocation.payload.max_devices, 1);
+  assert.equal(devicesBeforeRevocation.payload.max_devices, 2);
   const activeOwnerDevice = devicesBeforeRevocation.payload.devices.find(
     (device) => device.id === registeredDesktop.payload.device.id
   );
@@ -1139,8 +1160,8 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
   const replacementDesktop = await api("/v1/saas/devices/register", {
     token: sessionToken,
     body: {
-      installation_id: "223e4567-e89b-42d3-a456-426614174111",
-      public_key: "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG=",
+      installation_id: "623e4567-e89b-42d3-a456-426614174333",
+      public_key: "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM=",
       replacement_device_id: registeredDesktop.payload.device.id,
       name: "PC de remplacement",
       platform: "windows",
@@ -1149,8 +1170,8 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
     }
   });
   assert.equal(replacementDesktop.status, 200, JSON.stringify(replacementDesktop.payload));
-  assert.equal(replacementDesktop.payload.active_device_count, 1);
-  assert.equal(replacementDesktop.payload.max_devices, 1);
+  assert.equal(replacementDesktop.payload.active_device_count, 2);
+  assert.equal(replacementDesktop.payload.max_devices, 2);
 
   const revokedDesktop = await api("/v1/saas/devices/revoke", {
     token: sessionToken,
@@ -1164,9 +1185,15 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
     token: sessionToken
   });
   assert.equal(devicesAfterRevocation.status, 200);
-  assert.equal(devicesAfterRevocation.payload.devices[0].status, "revoked");
-  assert.equal(devicesAfterRevocation.payload.devices[0].vpn.applied_state, "disabled");
-  assert.equal(devicesAfterRevocation.payload.devices[1].status, "revoked");
+  assert.equal(devicesAfterRevocation.payload.active_count, 1);
+  assert.equal(
+    devicesAfterRevocation.payload.devices.filter((device) => device.status === "active").length,
+    1
+  );
+  assert.equal(
+    devicesAfterRevocation.payload.devices.filter((device) => device.status === "revoked").length,
+    devicesAfterRevocation.payload.devices.length - 1
+  );
 
   const saasPeer = await api("/v1/saas/vpn/peers", {
     token: sessionToken,
@@ -1281,7 +1308,7 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
   assert.equal(unlimitedDesktop.status, 200, JSON.stringify(unlimitedDesktop.payload));
   assert.equal(unlimitedDesktop.payload.device_limit_mode, "unlimited");
   assert.equal(unlimitedDesktop.payload.max_devices, null);
-  assert.equal(unlimitedDesktop.payload.active_device_count, 2);
+  assert.equal(unlimitedDesktop.payload.active_device_count, 3);
   assert.equal(
     hubRequests.findLast((entry) => entry.url === "/v1/tenants")?.body.operator_limit,
     null
@@ -1459,6 +1486,59 @@ test("authentification, licences, paiements iPay et crédits revendeur restent c
   assert.equal(unlimitedOrganizationPlan.status, 200);
   assert.equal(unlimitedOrganizationPlan.payload.plan.device_limit_mode, "unlimited");
   assert.equal(unlimitedOrganizationPlan.payload.plan.max_devices, null);
+
+  const annualStarterPlan = await api("/v1/admin/plans", {
+    token: adminToken,
+    body: {
+      id: "integration-starter-yearly",
+      code: "INTEGRATION-STARTER-YEARLY",
+      offer_code: "STARTER",
+      name: "Starter annuel",
+      router_limit: 1,
+      max_devices: 2,
+      duration_days: 365,
+      price_cfa: 50000,
+      billing_period: "yearly",
+      purchase_mode: "online",
+      is_reseller: false
+    }
+  });
+  assert.equal(annualStarterPlan.status, 200);
+  assert.equal(annualStarterPlan.payload.plan.offer_code, "STARTER");
+  assert.equal(annualStarterPlan.payload.plan.purchase_mode, "online");
+
+  const enterpriseContactPlan = await api("/v1/admin/plans", {
+    token: adminToken,
+    body: {
+      id: "integration-enterprise-contact",
+      code: "INTEGRATION-ENTERPRISE-CONTACT",
+      offer_code: "ENTERPRISE",
+      name: "Entreprise",
+      router_limit: 1000,
+      device_limit_mode: "unlimited",
+      duration_days: 365,
+      price_cfa: null,
+      billing_period: "custom",
+      purchase_mode: "contact",
+      is_reseller: false
+    }
+  });
+  assert.equal(enterpriseContactPlan.status, 200);
+  assert.equal(enterpriseContactPlan.payload.plan.purchase_mode, "contact");
+  assert.equal(enterpriseContactPlan.payload.plan.price_cfa, null);
+
+  const publicPurchasablePlans = await api("/v1/plans", { method: "GET" });
+  assert.equal(publicPurchasablePlans.status, 200);
+  assert.equal(
+    publicPurchasablePlans.payload.plans.some((plan) => plan.id === "integration-enterprise-contact"),
+    false
+  );
+  const publicCatalog = await api("/v1/plans/catalog", { method: "GET" });
+  assert.equal(publicCatalog.status, 200);
+  assert.equal(
+    publicCatalog.payload.plans.some((plan) => plan.id === "integration-enterprise-contact"),
+    true
+  );
 
   const invalidPricelessPlan = await api("/v1/admin/plans", {
     token: adminToken,
@@ -1852,6 +1932,7 @@ test("authentification, licences, paiements iPay et crédits revendeur restent c
   assert.equal(replacementWithoutPayment.status, 409);
 
   const resellerPayment = await api("/v1/reseller/payments/orders", {
+    headers: { "x-forwarded-for": "10.20.30.40" },
     token: resellerToken,
     body: {
       plan_id: "integration-reseller-10",
