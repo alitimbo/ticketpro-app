@@ -1,4 +1,4 @@
-import { ArrowLeft, LogOut, PanelLeftClose, PanelLeftOpen, Router } from "lucide-react";
+import { ArrowLeft, Building2, ChevronDown, LoaderCircle, LogOut, PanelLeftClose, PanelLeftOpen, Router } from "lucide-react";
 import { useState } from "react";
 import { Outlet, useNavigate, useParams } from "react-router-dom";
 import { useAuth } from "../auth/AuthProvider";
@@ -14,6 +14,7 @@ type DesktopLayoutProps = {
 
 export function DesktopLayout({ scope }: DesktopLayoutProps) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [isSwitchingOrganization, setIsSwitchingOrganization] = useState(false);
   const navigate = useNavigate();
   const { routerId = "" } = useParams();
   const { accountSession, logoutAccount, saasAccount, session, switchOrganization } = useAuth();
@@ -75,22 +76,34 @@ export function DesktopLayout({ scope }: DesktopLayoutProps) {
           />
           {accountSession ? <p className="sidebar__footer-label">{accountSession.companyLabel}</p> : null}
           {saasAccount && saasAccount.organizations.length > 1 ? (
-            <label className="sidebar__footer-label">
-              Organisation
-              <select
-                onChange={(event) => {
-                  void switchOrganization(event.target.value).then((result) => {
-                    if (result.ok) navigate("/", { replace: true });
-                  });
-                }}
-                value={saasAccount.user.membership_id}
-              >
-                {saasAccount.organizations.map((organization) => (
-                  <option key={organization.membership_id} value={organization.membership_id}>
-                    {organization.organization_name}
-                  </option>
-                ))}
-              </select>
+            <label className="organization-switcher">
+              <span className="organization-switcher__label">
+                <Building2 aria-hidden="true" />
+                Organisation active
+              </span>
+              <span className={`organization-switcher__control${isSwitchingOrganization ? " organization-switcher__control--loading" : ""}`}>
+                <select
+                  aria-label="Changer d'organisation"
+                  disabled={isSwitchingOrganization}
+                  onChange={(event) => {
+                    setIsSwitchingOrganization(true);
+                    void switchOrganization(event.target.value).then((result) => {
+                      if (result.ok) navigate("/", { replace: true });
+                    }).finally(() => setIsSwitchingOrganization(false));
+                  }}
+                  value={saasAccount.user.membership_id}
+                >
+                  {saasAccount.organizations.map((organization) => (
+                    <option key={organization.membership_id} value={organization.membership_id}>
+                      {organization.organization_name}
+                    </option>
+                  ))}
+                </select>
+                {isSwitchingOrganization ? <LoaderCircle aria-hidden="true" className="organization-switcher__loader" /> : <ChevronDown aria-hidden="true" />}
+              </span>
+              <span className="organization-switcher__status" aria-live="polite">
+                {isSwitchingOrganization ? "Changement en cours…" : "Changer d'organisation"}
+              </span>
             </label>
           ) : null}
           <Button icon={LogOut} onClick={handleAccountLogout} variant="ghost">
