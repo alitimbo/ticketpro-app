@@ -29,3 +29,34 @@
 		format json
 	}
 }
+
+autoticket-ne.com, www.autoticket-ne.com {
+	encode zstd gzip
+
+	request_body {
+		max_size 5MB
+	}
+
+	reverse_proxy 127.0.0.1:8790 {
+		health_uri /api/health/ready
+		health_interval 30s
+		health_timeout 5s
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	handle_errors {
+		respond "Service AutoTicket temporairement indisponible." 503
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
