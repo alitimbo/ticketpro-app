@@ -46,6 +46,10 @@ const routerCloudIdentityMigrationPath = resolve(
   process.cwd(),
   "src-tauri/migrations/024_router_cloud_identity.sql"
 );
+const routerOrganizationScopeMigrationPath = resolve(
+  process.cwd(),
+  "src-tauri/migrations/025_router_organization_scope.sql"
+);
 
 describe("migration comptes et abonnements", () => {
   const migration = readFileSync(migrationPath, "utf8");
@@ -62,6 +66,7 @@ describe("migration comptes et abonnements", () => {
   const vpnPeerLifecycleMigration = readFileSync(vpnPeerLifecycleMigrationPath, "utf8");
   const ticketRuntimeTrackingMigration = readFileSync(ticketRuntimeTrackingMigrationPath, "utf8");
   const routerCloudIdentityMigration = readFileSync(routerCloudIdentityMigrationPath, "utf8");
+  const routerOrganizationScopeMigration = readFileSync(routerOrganizationScopeMigrationPath, "utf8");
 
   it("ajoute la grille tarifaire evolutive des abonnements logiciel", () => {
     expect(migration).toContain("price_per_router_cfa");
@@ -179,5 +184,12 @@ describe("migration comptes et abonnements", () => {
     expect(routerCloudIdentityMigration).toContain("ON routers(account_id, cloud_router_id)");
     expect(routerCloudIdentityMigration).toContain("WHERE deleted_at IS NULL");
     expect(routerCloudIdentityMigration).not.toContain("DROP TABLE");
+  });
+
+  it("isole les routeurs locaux par organisation SaaS", () => {
+    expect(routerOrganizationScopeMigration).toContain("ALTER TABLE routers ADD COLUMN organization_id TEXT");
+    expect(routerOrganizationScopeMigration).toContain("idx_routers_account_organization");
+    expect(routerOrganizationScopeMigration).toContain("uq_routers_account_organization_cloud_id");
+    expect(routerOrganizationScopeMigration).not.toContain("DROP TABLE");
   });
 });

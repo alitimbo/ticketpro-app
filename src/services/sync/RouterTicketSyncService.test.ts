@@ -84,7 +84,7 @@ describe("RouterTicketSyncService", () => {
         }),
         expect.objectContaining({
           id: "ticket-2",
-          status: "supprimé_routeur",
+          status: "erreur_sync",
           syncStatus: "router_missing"
         })
       ])
@@ -94,10 +94,15 @@ describe("RouterTicketSyncService", () => {
   });
 
   it("resynchronise un ticket manquant en créant l'utilisateur sur le routeur", async () => {
-    const createdUsers: string[] = [];
+    const createdUsers: Array<{
+      limitBytesTotal?: number | null;
+      limitUptime?: string | null;
+      username: string;
+      validityMinutes?: number | null;
+    }> = [];
     const service = new RouterTicketSyncService({
       createHotspotUser: async (user) => {
-        createdUsers.push(user.username);
+        createdUsers.push(user);
         return {
           comment: user.comment ?? null,
           createdAt: "2026-07-09T10:00:00.000Z",
@@ -113,10 +118,44 @@ describe("RouterTicketSyncService", () => {
       listHotspotUsers: async () => []
     });
 
-    const report = await service.resyncTicket(localTickets[1]);
+    const report = await service.resyncTicket({
+      ...localTickets[1],
+      dataLimitMb: 500,
+      planDurationMinutes: 60,
+      planValidityMinutes: 180
+    });
 
-    expect(createdUsers).toEqual(["654321"]);
+    expect(createdUsers).toEqual([expect.objectContaining({
+      limitBytesTotal: 500 * 1024 * 1024,
+      limitUptime: "1h",
+      username: "654321",
+      validityMinutes: 180
+    })]);
     expect(report.updates[0]).toMatchObject({ mikrotikId: "*created", syncStatus: "router_synced" });
+  });
+
+  it("refuse de recréer un voucher activé, épuisé ou ayant déjà consommé des octets", async () => {
+    let createCalls = 0;
+    const service = new RouterTicketSyncService({
+      createHotspotUser: async () => {
+        createCalls += 1;
+        return routerUsers[0];
+      },
+      listActiveUsers: async () => [],
+      listHotspotUsers: async () => []
+    });
+
+    for (const ticket of [
+      { ...localTickets[0], activatedAt: "2026-08-13T10:00:00.000Z", status: "activé" },
+      { ...localTickets[0], status: "consommé", uptimeSeconds: 3600 },
+      { ...localTickets[0], downloadedBytes: 1, status: "disponible" },
+      { ...localTickets[0], mikrotikId: "*OLD", status: "disponible", syncStatus: "router_synced" as const }
+    ]) {
+      const report = await service.resyncTicket(ticket);
+      expect(report.updates[0]).toMatchObject({ status: "erreur_sync", syncStatus: "error" });
+    }
+
+    expect(createCalls).toBe(0);
   });
 
   it("distingue la désactivation manuelle d'une limite consommée", () => {
@@ -194,7 +233,7 @@ describe("RouterTicketSyncService", () => {
         uploadedBytes: 1_000,
         limitBytesTotal: 5_000,
         uptime: "1h",
-        status: "expired"
+        status: "exhausted"
       }],
       []
     );
@@ -227,7 +266,7 @@ describe("RouterTicketSyncService", () => {
       [{ ...routerUsers[0], comment: "TicketPro:v1;validity=60;expires=1;state=expired;", status: "expired" }],
       []
     );
-    expect(expired.updates[0]).toMatchObject({ status: "expiré", archivedAt: expect.any(String) });
+    expect(expired.updates[0]).toMatchObject({ status: "expiré", archivedAt: undefined });
 
     const archived = compareLocalAndRouterTickets(
       [{ ...localTickets[0], status: "expiré", archivedAt: "2026-08-01T10:00:00.000Z" }],
@@ -236,7 +275,7 @@ describe("RouterTicketSyncService", () => {
     );
     expect(archived.updates[0]).toMatchObject({
       archivedAt: "2026-08-01T10:00:00.000Z",
-      status: "archivé",
+      status: "supprimé",
       syncStatus: "router_synced"
     });
     expect(archived.summary.routerMissing).toBe(0);
@@ -259,14 +298,31 @@ describe("RouterTicketSyncService", () => {
       archivedAt: expect.any(String),
       completedAt: "2026-08-01T11:00:00.000Z",
       routerDeletedAt: expect.any(String),
-      status: "archivé",
+      status: "supprimé",
       syncStatus: "router_synced"
     });
     expect(report.logs[0]).toMatchObject({ level: "info" });
     expect(report.summary).toMatchObject({ routerMissing: 0, routerSynced: 1 });
   });
 
-  it("ne recrée pas un voucher terminal déjà nettoyé par RouterOS", async () => {
+  it("refuse de confirmer la suppression si une session active résiduelle subsiste", () => {
+    const report = compareLocalAndRouterTickets(
+      [{
+        ...localTickets[0],
+        activatedAt: "2026-08-01T10:00:00.000Z",
+        expiresAt: "2026-08-01T11:00:00.000Z",
+        planValidityMinutes: 60,
+        status: "expiré"
+      }],
+      [],
+      [{ ...activeUsers[0], username: localTickets[0].code }]
+    );
+
+    expect(report.updates[0]).toMatchObject({ status: "erreur_sync", syncStatus: "router_missing" });
+    expect(report.logs[0]).toMatchObject({ level: "error" });
+  });
+
+  it("ne recrée jamais un voucher terminal sans preuve de suppression à l'expiration", async () => {
     let createCalls = 0;
     const service = new RouterTicketSyncService({
       createHotspotUser: async () => {
@@ -280,6 +336,6 @@ describe("RouterTicketSyncService", () => {
     const report = await service.resyncTicket({ ...localTickets[0], status: "expiré" });
 
     expect(createCalls).toBe(0);
-    expect(report.updates[0]).toMatchObject({ status: "archivé", syncStatus: "router_synced" });
+    expect(report.updates[0]).toMatchObject({ status: "erreur_sync", syncStatus: "error" });
   });
 });

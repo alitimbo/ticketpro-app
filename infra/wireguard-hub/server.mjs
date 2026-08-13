@@ -111,7 +111,7 @@ const server = http.createServer(async (request, response) => {
       if (!["upsert", "disable", "revoke", "rotate"].includes(body.action)) {
         throw new HubError(400, "invalid_action");
       }
-      const result = await withPeerMutationLock(accountId, () =>
+      const result = await withPeerMutationLock("wireguard-global", () =>
         mutatePeer(accountId, tenant, body)
       );
       json(response, 200, result);
@@ -153,7 +153,6 @@ function upgradeTenantData() {
     tenant.router_limit = normalizeLimit(tenant.router_limit, 1);
     tenant.operator_limit = normalizeOptionalLimit(tenant.operator_limit, 1);
   }
-  revokeCrossTenantDuplicateKeys();
 }
 
 async function mutatePeer(accountId, tenant, body) {
@@ -170,23 +169,29 @@ async function mutatePeer(accountId, tenant, body) {
   }
 
   if (body.action === "revoke") {
-    await runWireGuard(["set", interfaceName, "peer", publicKey, "remove"]);
     const revokedAt = new Date().toISOString();
     if (existing) {
       existing.status = "revoked";
       existing.revoked_at = revokedAt;
     }
+    if (!isPublicKeyActiveInAnotherTenant(accountId, publicKey)) {
+      await runWireGuard(["set", interfaceName, "peer", publicKey, "remove"]);
+    }
+    await syncTenantFirewall();
     await saveWireGuardConfig();
     await persistTenants();
     return { account_id: accountId, public_key: publicKey, resource_id: resourceId, status: "revoked" };
   }
 
   if (body.action === "disable") {
-    await runWireGuard(["set", interfaceName, "peer", publicKey, "remove"]);
     if (existing && existing.status !== "revoked") {
       existing.status = "disabled";
       existing.disabled_at = new Date().toISOString();
     }
+    if (!isPublicKeyActiveInAnotherTenant(accountId, publicKey)) {
+      await runWireGuard(["set", interfaceName, "peer", publicKey, "remove"]);
+    }
+    await syncTenantFirewall();
     await saveWireGuardConfig();
     await persistTenants();
     return {
@@ -200,13 +205,11 @@ async function mutatePeer(accountId, tenant, body) {
   if (existing?.status === "revoked") {
     throw new HubError(409, "revoked_key_cannot_be_reactivated");
   }
-  const usedByAnotherTenant = Object.entries(tenants).some(([candidateAccountId, candidate]) =>
-    candidateAccountId !== accountId
-    && candidate.peers.some((peer) => peer.public_key === publicKey)
-  );
-  if (usedByAnotherTenant) throw new HubError(409, "public_key_already_registered");
+  const sharedPeer = findActivePeerInAnotherTenant(accountId, publicKey);
 
   if (isIdempotentActivePeer(existing, { peerType, publicKey, resourceId })) {
+    await syncWireGuardPeers();
+    await syncTenantFirewall();
     return {
       account_id: accountId,
       address_pool: tenant.address_pool,
@@ -254,7 +257,7 @@ async function mutatePeer(accountId, tenant, body) {
   }
 
   const peer = existing ?? {
-    assigned_address: replacementAddress ?? allocatePeerAddress(tenant),
+    assigned_address: replacementAddress ?? sharedPeer?.assigned_address ?? allocatePeerAddress(tenant),
     created_at: new Date().toISOString(),
     public_key: publicKey
   };
@@ -271,15 +274,12 @@ async function mutatePeer(accountId, tenant, body) {
     throw new HubError(409, `${peerType}_peer_limit_reached`);
   }
 
-  await runWireGuard([
-    "set", interfaceName, "peer", publicKey,
-    "allowed-ips", peer.assigned_address,
-    "persistent-keepalive", String(normalizeKeepalive(body.persistent_keepalive))
-  ]);
   peer.status = "active";
   peer.disabled_at = null;
   peer.revoked_at = null;
   if (!existing) tenant.peers.push(peer);
+  await syncWireGuardPeers();
+  await syncTenantFirewall();
   await saveWireGuardConfig();
   await persistTenants();
   return {
@@ -293,35 +293,34 @@ async function mutatePeer(accountId, tenant, body) {
   };
 }
 
-async function withPeerMutationLock(accountId, mutation) {
-  const previous = peerMutationQueues.get(accountId) ?? Promise.resolve();
+async function withPeerMutationLock(mutationKey, mutation) {
+  const previous = peerMutationQueues.get(mutationKey) ?? Promise.resolve();
   let release;
   const current = new Promise((resolve) => { release = resolve; });
   const queued = previous.then(() => current);
-  peerMutationQueues.set(accountId, queued);
+  peerMutationQueues.set(mutationKey, queued);
   await previous;
   try {
     return await mutation();
   } finally {
     release();
-    if (peerMutationQueues.get(accountId) === queued) peerMutationQueues.delete(accountId);
+    if (peerMutationQueues.get(mutationKey) === queued) peerMutationQueues.delete(mutationKey);
   }
 }
 
-function revokeCrossTenantDuplicateKeys() {
-  const seen = new Set();
-  for (const accountId of Object.keys(tenants).sort()) {
-    for (const peer of tenants[accountId].peers
-      .filter((item) => item.status === "active")
-      .sort((left, right) => String(right.created_at ?? "").localeCompare(String(left.created_at ?? "")))) {
-      if (seen.has(peer.public_key)) {
-        peer.status = "revoked";
-        peer.revoked_at ||= new Date().toISOString();
-      } else {
-        seen.add(peer.public_key);
-      }
-    }
+function findActivePeerInAnotherTenant(accountId, publicKey) {
+  for (const [candidateAccountId, candidate] of Object.entries(tenants)) {
+    if (candidateAccountId === accountId) continue;
+    const peer = candidate.peers?.find((item) =>
+      item.public_key === publicKey && item.status === "active"
+    );
+    if (peer) return peer;
   }
+  return null;
+}
+
+function isPublicKeyActiveInAnotherTenant(accountId, publicKey) {
+  return Boolean(findActivePeerInAnotherTenant(accountId, publicKey));
 }
 
 async function readLatestHandshakes() {
@@ -423,7 +422,15 @@ async function syncWireGuardPeers() {
   const activePeers = new Map();
   for (const tenant of Object.values(tenants)) {
     for (const peer of tenant.peers) {
-      if (peer.status === "active") activePeers.set(peer.public_key, peer);
+      if (peer.status !== "active") continue;
+      const grouped = activePeers.get(peer.public_key) ?? {
+        allowedAddresses: new Set(),
+        keepalive: 25,
+        publicKey: peer.public_key
+      };
+      grouped.allowedAddresses.add(peer.assigned_address);
+      grouped.keepalive = normalizeKeepalive(peer.persistent_keepalive ?? grouped.keepalive);
+      activePeers.set(peer.public_key, grouped);
     }
   }
 
@@ -439,11 +446,11 @@ async function syncWireGuardPeers() {
       "set",
       interfaceName,
       "peer",
-      peer.public_key,
+      peer.publicKey,
       "allowed-ips",
-      peer.assigned_address,
+      [...peer.allowedAddresses].join(","),
       "persistent-keepalive",
-      "25"
+      String(peer.keepalive)
     ]);
   }
   await saveWireGuardConfig();

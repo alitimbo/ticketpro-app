@@ -157,6 +157,7 @@ export type RouterRecord = {
   id: string;
   cloud_router_id?: string | null;
   account_id: string;
+  organization_id?: string | null;
   zone_id: string | null;
   name: string;
   label: string;
@@ -369,12 +370,12 @@ export type AppLogRecord = {
 
 export type CreateRouterInput = Omit<
   RouterRecord,
-  "cloud_router_id" | "created_at" | "deleted_at" | "hotspot_address" | "notes" | "subscription_counted" | "sync_status" | "updated_at"
+  "cloud_router_id" | "created_at" | "deleted_at" | "hotspot_address" | "notes" | "organization_id" | "subscription_counted" | "sync_status" | "updated_at"
 > &
   Partial<
     Pick<
       RouterRecord,
-      "cloud_router_id" | "created_at" | "deleted_at" | "hotspot_address" | "notes" | "subscription_counted" | "sync_status" | "updated_at"
+      "cloud_router_id" | "created_at" | "deleted_at" | "hotspot_address" | "notes" | "organization_id" | "subscription_counted" | "sync_status" | "updated_at"
     >
   >;
 

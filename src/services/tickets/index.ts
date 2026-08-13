@@ -12,6 +12,8 @@ export {
 export { VoucherActionService } from "./VoucherActionService";
 export {
   defaultTicketDisplaySettings,
+  normalizeTicketDisplaySettings,
+  resolveTicketTitle,
   TicketDisplaySettingsService,
   type TicketDisplaySettings
 } from "./TicketDisplaySettingsService";

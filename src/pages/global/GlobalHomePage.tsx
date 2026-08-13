@@ -33,7 +33,7 @@ const emptyDashboard: DashboardData = {
 
 export function GlobalHomePage() {
   const navigate = useNavigate();
-  const { accountSession, session } = useAuth();
+  const { accountSession, saasAccount, session } = useAuth();
   const { database, isInitialized } = useAppDatabase();
   const accountId = accountSession?.accountId ?? session?.account_id ?? null;
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
@@ -54,14 +54,22 @@ export function GlobalHomePage() {
     setError(null);
 
     void Promise.all([
-      routerRepository.listByAccount(accountId),
+      saasAccount?.organization.id
+        ? routerRepository.listByOrganization(accountId, saasAccount.organization.id)
+        : routerRepository.listByAccount(accountId),
       ticketRepository.listByAccount(accountId),
       fileRepository.listByAccount(accountId),
       logRepository.listByAccount(accountId)
     ])
       .then(([routers, tickets, files, logs]) => {
         if (!cancelled) {
-          setDashboard({ files, logs, routers, tickets });
+          const routerIds = new Set(routers.map((router) => router.id));
+          setDashboard({
+            files: files.filter((file) => routerIds.has(file.router_id)),
+            logs: logs.filter((log) => log.router_id !== null && routerIds.has(log.router_id)),
+            routers,
+            tickets: tickets.filter((ticket) => routerIds.has(ticket.router_id))
+          });
         }
       })
       .catch((loadError: unknown) => {
@@ -78,7 +86,7 @@ export function GlobalHomePage() {
     return () => {
       cancelled = true;
     };
-  }, [accountId, fileRepository, isInitialized, logRepository, routerRepository, ticketRepository]);
+  }, [accountId, fileRepository, isInitialized, logRepository, routerRepository, saasAccount?.organization.id, ticketRepository]);
 
   const ticketsToday = dashboard.tickets.filter((ticket) => isToday(ticket.created_at)).length;
   const availableRouters = dashboard.routers.filter((router) => router.status === "active").length;

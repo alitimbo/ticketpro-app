@@ -28,6 +28,7 @@ export type RouterCardData = {
   accountId: string;
   cloudRouterId?: string | null;
   createdByProfileId: string | null;
+  organizationId?: string | null;
   hotspotAddress?: string | null;
   id: string;
   routerName?: string;
@@ -76,6 +77,7 @@ export type RouterFormValues = {
 export type RouterOwnershipInput = {
   accountId: string;
   createdByProfileId: string;
+  organizationId?: string | null;
 };
 
 export const emptyRouterFormValues: RouterFormValues = {
@@ -240,6 +242,7 @@ export function routerCardFromRecord(
     lastTestedAt: lastConnection?.last_connected_at ?? null,
     model: record.model ?? "Modèle non renseigné",
     notes: record.notes ?? "",
+    organizationId: record.organization_id ?? null,
     preferredMode: record.connection_mode,
     remoteMode: remoteConnection?.mode === "vpn" ? "vpn" : "distant_ip",
     remoteEnabled: Boolean(remoteConnection),
@@ -274,6 +277,7 @@ export function routerRecordFromCard(router: RouterCardData): CreateRouterInput 
     model: router.model,
     name: router.zoneName,
     notes: router.notes,
+    organization_id: router.organizationId ?? null,
     routeros_version: router.routerOsVersion,
     serial_number: router.serialNumber,
     status: routerCardStatusToRecordStatus(router.status),
@@ -340,6 +344,7 @@ export function createRouterFromForm(
     lastTestedAt: null,
     model: systemInfo?.model || "Modèle non détecté",
     notes: values.notes,
+    organizationId: ownership.organizationId ?? null,
     preferredMode: values.preferredMode,
     remoteMode: values.preferredMode === "vpn" ? "vpn" : "distant_ip",
     remoteHost: values.remoteHost,

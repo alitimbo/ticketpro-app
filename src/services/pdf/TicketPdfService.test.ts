@@ -3,6 +3,7 @@ import {
   buildGeneratedTicketPdfRecord,
   generateTicketPdf,
   resolveTicketPdfPassword,
+  ticketQrValue,
   type TicketPdfInput
 } from "./TicketPdfService";
 
@@ -16,11 +17,15 @@ describe("TicketPdfService", () => {
     expect(text).toContain("/MediaBox [0 0 595.28 841.89]");
     expect(text).toContain("/Count 1");
     expect(text).toContain("(Zone Centre)");
-    expect(text).toContain("(LOGIN)");
     expect(text).toContain("(123001)");
     expect(text).not.toContain("(MOT DE PASSE)");
-    expect(text).toContain("(Portail wifi.ticketpro.local)");
-    expect(text).toContain("(Contact +227 90 12 34 56)");
+    expect(text).toContain("(DUREE)");
+    expect(text).toContain("(VALIDITE)");
+    expect(text).toContain("(3 h)");
+    expect(text).toContain("(6 h)");
+    expect(text).toContain("(Portail : wifi.ticketpro.local)");
+    expect(text).not.toContain("(Contact : +227 90 12 34 56)");
+    expect(text).toContain("(Propulse par TicketPro)");
     expect(text).not.toContain("(Lot ");
 
     const overflowText = new TextDecoder().decode(generateTicketPdf(buildPdfInput(41)));
@@ -65,9 +70,10 @@ describe("TicketPdfService", () => {
     const text = new TextDecoder().decode(generateTicketPdf(input));
     const filledModules = text.match(/ re f/g) ?? [];
 
-    expect(text).toContain("(MOT DE PASSE)");
-    expect(text).toContain("(847295)");
+    expect(text).toContain("(MOT DE PASSE 847295)");
     expect(filledModules.length).toBeGreaterThan(80);
+    expect(ticketQrValue(input.tickets[0])).toBe("123001");
+    expect(ticketQrValue(input.tickets[0])).not.toContain("847295");
   });
 
   it.each(["thermal58", "thermal80"] as const)(
@@ -132,6 +138,8 @@ function buildPdfInput(quantity: number): TicketPdfInput {
         username
       };
     }),
+    titleLabel: "Zone Centre",
+    validityLabel: "6 h",
     zoneName: "Zone Centre"
   };
 }

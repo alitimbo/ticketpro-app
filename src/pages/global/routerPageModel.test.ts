@@ -63,7 +63,8 @@ describe("routerPageModel", () => {
       "router-test",
       {
         accountId: "account-douma-demo",
-        createdByProfileId: "account-douma-demo:internal-profile-operator"
+        createdByProfileId: "account-douma-demo:internal-profile-operator",
+        organizationId: "organization-test"
       }
     );
 
@@ -72,6 +73,7 @@ describe("routerPageModel", () => {
       createdByProfileId: "account-douma-demo:internal-profile-operator",
       hotspotAddress: "wifi.zone-test.ne",
       id: "router-test",
+      organizationId: "organization-test",
       subscriptionCounted: true
     });
   });
@@ -102,6 +104,7 @@ describe("routerPageModel", () => {
       model: "RB5009",
       name: "Zone persistée",
       notes: "Test SQLite",
+      organization_id: "organization-test",
       routeros_version: "7.15",
       serial_number: "SERIAL-1",
       status: "active",
@@ -150,6 +153,7 @@ describe("routerPageModel", () => {
       hotspotAddress: "wifi.ticketpro.local",
       id: "router-persisted",
       notes: "Test SQLite",
+      organizationId: "organization-test",
       preferredMode: "vpn",
       remoteHost: "router.vpn.local",
       remoteUseSsl: true,

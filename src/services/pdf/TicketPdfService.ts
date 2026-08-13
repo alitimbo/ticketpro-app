@@ -30,6 +30,8 @@ export type TicketPdfInput = {
   routerId: string;
   template: TicketPdfTemplate;
   tickets: TicketPdfTicket[];
+  titleLabel: string;
+  validityLabel: string;
   zoneName: string;
   displaySettings?: TicketDisplaySettings;
 };
@@ -45,6 +47,8 @@ export type TicketPdfArchiveMetadata = Pick<
   | "priceLabel"
   | "qrCodeEnabled"
   | "template"
+  | "titleLabel"
+  | "validityLabel"
   | "zoneName"
   | "displaySettings"
 >;
@@ -85,6 +89,8 @@ export function buildGeneratedTicketPdfRecord(input: TicketPdfInput): CreateGene
     priceLabel: input.priceLabel ?? null,
     qrCodeEnabled: input.qrCodeEnabled,
     template: input.template,
+    titleLabel: input.titleLabel,
+    validityLabel: input.validityLabel,
     zoneName: input.zoneName,
     displaySettings: input.displaySettings
   };
@@ -134,6 +140,8 @@ export function parseTicketPdfArchiveMetadata(value: string | null | undefined):
       priceLabel: typeof parsed.priceLabel === "string" ? parsed.priceLabel : null,
       qrCodeEnabled: parsed.qrCodeEnabled === true,
       template: parsed.template as TicketPdfTemplate,
+      titleLabel: typeof parsed.titleLabel === "string" ? parsed.titleLabel : parsed.zoneName,
+      validityLabel: typeof parsed.validityLabel === "string" ? parsed.validityLabel : parsed.durationLabel,
       zoneName: parsed.zoneName,
       displaySettings: parsed.displaySettings
     };
@@ -166,6 +174,10 @@ export function resolveTicketPdfPassword(ticket: TicketPdfTicket): string {
   }
   const expectedRef = `/${ticket.username}/password`;
   return ticket.passwordSecretRef.endsWith(expectedRef) ? ticket.username : "******";
+}
+
+export function ticketQrValue(ticket: TicketPdfTicket): string {
+  return ticket.username;
 }
 
 function drawTicketPage(
@@ -228,145 +240,316 @@ function drawTicket(
     return;
   }
 
-  const isCompactA4 = input.format === "a4";
-  const padding = isCompactA4 ? 5 : 6;
+  drawEconomyGridTicket(page, { cellHeight, cellWidth, index, input, ticket, x, y });
+}
+
+function drawEconomyGridTicket(
+  page: PdfPage,
+  {
+    cellHeight,
+    cellWidth,
+    index,
+    input,
+    ticket,
+    x,
+    y
+  }: {
+    cellHeight: number;
+    cellWidth: number;
+    index: number;
+    input: TicketPdfInput;
+    ticket: TicketPdfTicket;
+    x: number;
+    y: number;
+  }
+) {
+  const compact = input.format === "a4";
+  const padding = compact ? 5 : 7;
+  const contentWidth = cellWidth - padding * 2;
   const centerX = x + cellWidth / 2;
-  const top = y + cellHeight - padding;
-  const password = resolveTicketPdfPassword(ticket);
+  const top = y + cellHeight;
   const settings = input.displaySettings;
-  const showUsername = settings?.showUsername !== false;
-  const showPassword = settings?.showPassword !== false;
-  const isSingleCode = password === ticket.username || !showPassword;
+  const password = resolveTicketPdfPassword(ticket);
+  const singleCode = password === ticket.username;
   const showQr = (settings?.showQrCode ?? input.qrCodeEnabled) || input.template === "qr";
-  const isPremium = input.template === "premium";
+  const header = input.titleLabel || input.zoneName || "ACCES WIFI";
+  const showTicketNumber = settings?.showTicketNumber !== false;
+  const showPrice = settings?.showPrice !== false && Boolean(input.priceLabel);
+  const showPlan = Boolean(settings?.showPlanName && input.planName);
+  const showData = Boolean(settings?.showDataLimit && input.dataLimitLabel);
+  const showCreatedAt = settings?.showCreatedAt === true;
+  const showPortal = settings?.showInstructions !== false && Boolean(input.hotspotAddress);
+  const showContact = Boolean(settings?.showContact && input.ownerPhone);
+  const showNote = Boolean(settings?.showNote && settings.noteText);
+  const showPoweredBy = settings?.showPoweredBy !== false;
 
   page.rect(x, y, cellWidth, cellHeight);
 
-  if (isPremium) {
-    page.fillRect(x, y + cellHeight - 4, cellWidth, 4, 0.72);
-  }
-
-  const contentWidth = cellWidth - padding * 2;
-  const titleSize = fitTextSize(input.zoneName, contentWidth, isCompactA4 ? 7.2 : 8.4, isCompactA4 ? 4.8 : 6);
-  if (settings?.showZoneName !== false || settings?.showLogo) {
-    const header = [settings?.showLogo ? "TICKETPRO" : null, settings?.showZoneName !== false ? input.zoneName : null]
-      .filter(Boolean)
-      .join(" · ");
-    page.text(header, centerX, top - (isCompactA4 ? 7 : 8), {
-      align: "center",
-      font: "bold",
-      size: fitTextSize(header, contentWidth, titleSize, isCompactA4 ? 4.5 : 5.2)
-    });
-  }
-  if (!isCompactA4) {
-    page.text(`TICKET ${index}`, centerX, top - 17, {
-      align: "center",
-      size: 4.2
-    });
-  }
-
-  const credentialTop = top - (isCompactA4 ? 14 : 21);
-  const credentialHeight = isSingleCode ? (isCompactA4 ? 23 : 25) : (isCompactA4 ? 34 : 38);
-  const credentialBottom = credentialTop - credentialHeight;
-  const credentialX = x + padding;
-  page.rect(credentialX, credentialBottom, contentWidth, credentialHeight);
-
-  const credentialLabelSize = isCompactA4 ? 3.8 : 4.2;
-  if (isSingleCode) {
-    page.text("LOGIN", centerX, credentialTop - (isCompactA4 ? 7 : 8), {
-      align: "center",
-      font: "bold",
-      size: credentialLabelSize
-    });
-    page.text(showUsername ? ticket.username : "", centerX, credentialTop - (isCompactA4 ? 18 : 21), {
-      align: "center",
-      font: "bold",
-      size: fitTextSize(ticket.username, contentWidth - 8, isCompactA4 ? 8.5 : 11, isCompactA4 ? 5.8 : 7)
-    });
-  } else {
-    const dividerY = credentialTop - credentialHeight / 2;
-    page.line(credentialX, dividerY, credentialX + contentWidth, dividerY);
-    page.text("LOGIN", centerX, credentialTop - (isCompactA4 ? 5 : 6), {
-      align: "center",
-      font: "bold",
-      size: credentialLabelSize
-    });
-    page.text(showUsername ? ticket.username : "", centerX, credentialTop - (isCompactA4 ? 14 : 16), {
-      align: "center",
-      font: "bold",
-      size: fitTextSize(ticket.username, contentWidth - 8, isCompactA4 ? 7 : 8.5, isCompactA4 ? 4.8 : 5.8)
-    });
-    page.text("MOT DE PASSE", centerX, dividerY - (isCompactA4 ? 5 : 7), {
-      align: "center",
-      font: "bold",
-      size: credentialLabelSize
-    });
-    page.text(password, centerX, dividerY - (isCompactA4 ? 14 : 17), {
-      align: "center",
-      font: "bold",
-      size: fitTextSize(password, contentWidth - 8, isCompactA4 ? 7 : 8.5, isCompactA4 ? 4.8 : 5.8)
-    });
-  }
-
-  const smallSize = isCompactA4 ? 3.8 : 4.5;
-  const lineGap = isCompactA4 ? 5.4 : 6.2;
-  let lineY = credentialBottom - (isCompactA4 ? 6 : 8);
-  page.text(input.planName, centerX, lineY, {
+  page.text(header, centerX, top - (compact ? 12 : 15), {
     align: "center",
     font: "bold",
-    size: fitTextSize(input.planName, contentWidth, isCompactA4 ? 5.6 : 6.6, isCompactA4 ? 3.8 : 4.5)
+    size: fitTextSize(header, contentWidth, compact ? 7.4 : 9, compact ? 5 : 6)
   });
-  lineY -= lineGap;
-  const allowanceLabel = [settings?.showDuration === false ? null : `Duree ${input.durationLabel}`, settings?.showDataLimit === false ? null : input.dataLimitLabel].filter(Boolean).join(" - ");
-  page.text(allowanceLabel, centerX, lineY, {
-    align: "center",
-    size: fitTextSize(allowanceLabel, contentWidth, smallSize, isCompactA4 ? 3.1 : 3.5)
-  });
-
-  if (input.priceLabel && settings?.showPrice !== false) {
-    lineY -= lineGap;
-    page.text(input.priceLabel, centerX, lineY, { align: "center", font: "bold", size: smallSize });
+  if (showTicketNumber) {
+    page.text(`#${String(index).padStart(2, "0")}`, centerX, top - (compact ? 20 : 25), {
+      align: "center",
+      size: compact ? 3.4 : 4.4
+    });
   }
-  if (settings?.showCreatedAt) {
-    lineY -= lineGap;
-    page.text(`Cree le ${input.generatedAt.slice(0, 10)}`, centerX, lineY, { align: "center", size: smallSize });
-  }
-  if (settings?.showExpiresAt) {
-    lineY -= lineGap;
-    page.text("Expiration apres activation", centerX, lineY, { align: "center", size: smallSize });
-  }
-
-  const qrSize = isCompactA4 ? 22 : 28;
-  if (showQr && cellWidth > 85) {
-    drawQrPattern(
-      page,
-      x + cellWidth - padding - qrSize,
-      y + padding,
-      qrSize,
-      `${ticket.username}:${password}`
-    );
-  }
-
-  const footerSize = isCompactA4 ? 3.5 : 3.9;
-  const footerCenterX = showQr
-    ? x + padding + (cellWidth - padding * 3 - qrSize) / 2
-    : centerX;
-  const footerWidth = showQr ? cellWidth - padding * 3 - qrSize : cellWidth - padding * 2;
-  if (settings?.showInstructions !== false) {
-    const hotspotLabel = `Portail ${input.hotspotAddress}`;
-    page.text(hotspotLabel, footerCenterX, y + padding + (isCompactA4 ? 5 : 8), {
+  if (showPlan) {
+    page.text(input.planName, centerX, top - (compact ? 25 : 31), {
       align: "center",
       font: "bold",
-      size: fitTextSize(hotspotLabel, footerWidth, isCompactA4 ? 3.9 : 4.6, isCompactA4 ? 2.9 : 3.2)
+      size: fitTextSize(input.planName, contentWidth, compact ? 3.8 : 5, compact ? 2.8 : 3.5)
     });
   }
-  if (settings?.showContact !== false) {
-    const ownerPhoneLabel = `Contact ${input.ownerPhone}`;
-    page.text(ownerPhoneLabel, footerCenterX, y + padding + (isCompactA4 ? -1 : 2), {
+
+  if (showQr) {
+    drawEconomyQrBody(page, {
+      cellHeight,
+      cellWidth,
+      compact,
+      input,
+      password,
+      singleCode,
+      ticket,
+      x,
+      y
+    });
+  } else {
+    drawEconomyCodeBody(page, {
+      cellHeight,
+      cellWidth,
+      compact,
+      input,
+      password,
+      showPrice,
+      singleCode,
+      ticket,
+      x,
+      y
+    });
+  }
+
+  const footerLines: Array<{ bold?: boolean; text: string }> = [
+    ...(showData && input.dataLimitLabel ? [{ text: `Volume : ${input.dataLimitLabel}` }] : []),
+    ...(showCreatedAt ? [{ text: `Cree le ${input.generatedAt.slice(0, 16).replace("T", " ")}` }] : []),
+    ...(showPortal ? [{ text: `Portail : ${input.hotspotAddress}` }] : []),
+    ...(showContact ? [{ text: `Contact : ${input.ownerPhone}` }] : []),
+    ...(showNote && settings?.noteText ? [{ text: settings.noteText }] : [])
+  ];
+  const footerBottom = y + (showPoweredBy ? (compact ? 8 : 10) : compact ? 3 : 4);
+  const footerTop = y + (showQr ? cellHeight * 0.29 : cellHeight * 0.3);
+  const footerGap = Math.max(
+    compact ? 3.4 : 4.2,
+    Math.min(compact ? 5.3 : 6.5, (footerTop - footerBottom) / Math.max(1, footerLines.length))
+  );
+  let footerY = footerBottom + footerGap * Math.max(0, footerLines.length - 1);
+  footerLines.forEach((line) => {
+    page.text(line.text, centerX, footerY, {
       align: "center",
-      size: fitTextSize(ownerPhoneLabel, footerWidth, footerSize, isCompactA4 ? 2.9 : 3.1)
+      font: line.bold ? "bold" : "regular",
+      size: fitTextSize(line.text, contentWidth, compact ? 3.1 : 4.1, compact ? 2.25 : 3)
+    });
+    footerY -= footerGap;
+  });
+
+  if (showPoweredBy) {
+    page.text("Propulse par TicketPro", centerX, y + (compact ? 3.2 : 4.2), {
+      align: "center",
+      font: "bold",
+      size: compact ? 2.5 : 3.2
     });
   }
+}
+
+function drawEconomyCodeBody(
+  page: PdfPage,
+  {
+    cellHeight,
+    cellWidth,
+    compact,
+    input,
+    password,
+    showPrice,
+    singleCode,
+    ticket,
+    x,
+    y
+  }: {
+    cellHeight: number;
+    cellWidth: number;
+    compact: boolean;
+    input: TicketPdfInput;
+    password: string;
+    showPrice: boolean;
+    singleCode: boolean;
+    ticket: TicketPdfTicket;
+    x: number;
+    y: number;
+  }
+) {
+  const settings = input.displaySettings;
+  const padding = compact ? 8 : 10;
+  const bandX = x + padding;
+  const bandWidth = cellWidth - padding * 2;
+  const bandTop = y + cellHeight * (settings?.showPlanName ? 0.69 : 0.72);
+  const bandHeight = singleCode ? cellHeight * 0.2 : cellHeight * 0.27;
+  const bandBottom = bandTop - bandHeight;
+  const iconSize = compact ? 8 : 11;
+  const iconX = bandX + (compact ? 9 : 12);
+  const iconY = bandBottom + bandHeight / 2;
+  const valueCenterX = bandX + iconSize + (bandWidth - iconSize) / 2;
+
+  page.rect(bandX, bandBottom, bandWidth, bandHeight);
+  drawUserKeyIcon(page, iconX, iconY, iconSize);
+
+  if (singleCode) {
+    page.text(ticket.username, valueCenterX, bandBottom + bandHeight * 0.32, {
+      align: "center",
+      font: "bold",
+      size: fitTextSize(ticket.username, bandWidth - iconSize - 12, compact ? 10.5 : 14, compact ? 6.3 : 8)
+    });
+  } else {
+    const rightX = bandX + iconSize + (compact ? 7 : 9);
+    const rightWidth = bandX + bandWidth - rightX - 3;
+    const dividerY = bandBottom + bandHeight / 2;
+    page.line(rightX, dividerY, bandX + bandWidth - 3, dividerY);
+    page.text("LOGIN", rightX, dividerY + (compact ? 3.2 : 4.2), {
+      font: "bold",
+      size: compact ? 2.7 : 3.5
+    });
+    page.text(ticket.username, rightX + rightWidth, dividerY + (compact ? 3 : 4), {
+      align: "right",
+      font: "bold",
+      size: fitTextSize(ticket.username, rightWidth * 0.68, compact ? 6.2 : 8, compact ? 4.2 : 5.2)
+    });
+    page.text("MOT DE PASSE", rightX, bandBottom + (compact ? 3.5 : 4.5), {
+      font: "bold",
+      size: compact ? 2.5 : 3.3
+    });
+    page.text(password, rightX + rightWidth, bandBottom + (compact ? 3.3 : 4.3), {
+      align: "right",
+      font: "bold",
+      size: fitTextSize(password, rightWidth * 0.62, compact ? 5.7 : 7.4, compact ? 3.8 : 4.8)
+    });
+  }
+
+  const metricTop = bandBottom - (compact ? 5 : 7);
+  const metrics = [
+    { label: "DUREE", value: input.durationLabel },
+    ...(showPrice && input.priceLabel ? [{ label: "TARIF", value: input.priceLabel }] : []),
+    { label: "VALIDITE", value: input.validityLabel }
+  ];
+  const metricWidth = (cellWidth - padding * 2) / metrics.length;
+  metrics.forEach((metric, index) => {
+    const metricX = x + padding + metricWidth * (index + 0.5);
+    if (index > 0) {
+      const separatorX = x + padding + metricWidth * index;
+      page.line(separatorX, metricTop - (compact ? 2 : 3), separatorX, metricTop - (compact ? 18 : 23));
+    }
+    page.text(metric.label, metricX, metricTop - (compact ? 5 : 6.5), {
+      align: "center",
+      font: "bold",
+      size: compact ? 2.6 : 3.5
+    });
+    page.text(metric.value, metricX, metricTop - (compact ? 15 : 20), {
+      align: "center",
+      font: "bold",
+      size: fitTextSize(metric.value, metricWidth - 5, compact ? 6.1 : 8, compact ? 3.8 : 5)
+    });
+  });
+}
+
+function drawEconomyQrBody(
+  page: PdfPage,
+  {
+    cellHeight,
+    cellWidth,
+    compact,
+    input,
+    password,
+    singleCode,
+    ticket,
+    x,
+    y
+  }: {
+    cellHeight: number;
+    cellWidth: number;
+    compact: boolean;
+    input: TicketPdfInput;
+    password: string;
+    singleCode: boolean;
+    ticket: TicketPdfTicket;
+    x: number;
+    y: number;
+  }
+) {
+  const settings = input.displaySettings;
+  const mainTop = y + cellHeight * (settings?.showPlanName ? 0.69 : 0.72);
+  const qrSize = Math.min(cellWidth * 0.31, cellHeight * 0.31);
+  const qrX = x + (compact ? 6 : 8);
+  const qrY = y + cellHeight * 0.35;
+  const detailsX = qrX + qrSize + (compact ? 5 : 7);
+  const detailsWidth = x + cellWidth - (compact ? 6 : 8) - detailsX;
+  const detailsCenterX = detailsX + detailsWidth / 2;
+
+  drawQrPattern(page, qrX, qrY, qrSize, ticketQrValue(ticket));
+  page.text("Scannez pour vous connecter", qrX + qrSize / 2, qrY - (compact ? 4 : 5), {
+    align: "center",
+    size: fitTextSize("Scannez pour vous connecter", qrSize + 5, compact ? 2.2 : 3, compact ? 1.8 : 2.3)
+  });
+
+  drawUserKeyIcon(page, detailsX + (compact ? 4 : 5), mainTop - (compact ? 5 : 7), compact ? 6 : 8);
+  page.text("LOGIN", detailsX + (compact ? 11 : 14), mainTop - (compact ? 5.5 : 7), {
+    font: "bold",
+    size: compact ? 2.8 : 3.7
+  });
+  page.text(ticket.username, detailsCenterX, mainTop - (compact ? 17 : 22), {
+    align: "center",
+    font: "bold",
+    size: fitTextSize(ticket.username, detailsWidth, compact ? 8.2 : 11, compact ? 5.2 : 7)
+  });
+
+  let detailY = mainTop - (compact ? 27 : 35);
+  if (!singleCode) {
+    const passwordLabel = `MOT DE PASSE ${password}`;
+    page.text(passwordLabel, detailsCenterX, detailY, {
+      align: "center",
+      font: "bold",
+      size: fitTextSize(passwordLabel, detailsWidth, compact ? 4.2 : 5.5, compact ? 3 : 4)
+    });
+    detailY -= compact ? 7 : 9;
+  }
+  if (settings?.showPrice !== false && input.priceLabel) {
+    page.text(input.priceLabel, detailsCenterX, detailY, {
+      align: "center",
+      font: "bold",
+      size: fitTextSize(input.priceLabel, detailsWidth, compact ? 5.7 : 7.5, compact ? 3.8 : 5)
+    });
+    detailY -= compact ? 10 : 13;
+  }
+  const durationValidity = `${input.durationLabel} | VALIDE ${input.validityLabel}`;
+  page.text(durationValidity, detailsCenterX, detailY, {
+    align: "center",
+    font: "bold",
+    size: fitTextSize(durationValidity, detailsWidth, compact ? 3.4 : 4.5, compact ? 2.4 : 3.2)
+  });
+}
+
+function drawUserKeyIcon(page: PdfPage, centerX: number, centerY: number, size: number) {
+  const headRadius = size * 0.13;
+  const personX = centerX - size * 0.22;
+  page.fillCircle(personX, centerY + size * 0.2, headRadius);
+  page.line(personX, centerY + size * 0.06, personX, centerY - size * 0.25);
+  page.line(personX, centerY, personX - size * 0.14, centerY - size * 0.13);
+  page.line(personX, centerY, personX + size * 0.14, centerY - size * 0.13);
+
+  const keyX = centerX + size * 0.1;
+  const keyY = centerY + size * 0.08;
+  page.rect(keyX, keyY, size * 0.22, size * 0.22);
+  page.line(keyX + size * 0.22, keyY + size * 0.11, keyX + size * 0.48, keyY - size * 0.15);
+  page.line(keyX + size * 0.36, keyY - size * 0.03, keyX + size * 0.43, keyY + size * 0.04);
 }
 
 function drawThermalTicket(
@@ -374,6 +557,7 @@ function drawThermalTicket(
   {
     cellHeight,
     cellWidth,
+    index,
     input,
     ticket,
     x,
@@ -394,29 +578,24 @@ function drawThermalTicket(
   const centerX = x + cellWidth / 2;
   const password = resolveTicketPdfPassword(ticket);
   const settings = input.displaySettings;
-  const showUsername = settings?.showUsername !== false;
-  const showPassword = settings?.showPassword !== false;
-  const isSingleCode = password === ticket.username || !showPassword;
+  const showUsername = true;
+  const isSingleCode = password === ticket.username;
   const showQr = (settings?.showQrCode ?? input.qrCodeEnabled) || input.template === "qr";
-  const header = [settings?.showLogo ? "TICKETPRO" : null, settings?.showZoneName !== false ? input.zoneName : null]
-    .filter(Boolean)
-    .join(" - ") || "ACCES WIFI";
+  const header = input.titleLabel || input.zoneName || "ACCES WIFI";
   const headerLines = wrapPdfText(header, contentWidth, is58 ? 9 : 10, true, 2);
-  const portalLines = settings?.showInstructions === false
+  const portalLines = settings?.showInstructions === false || !input.hotspotAddress
     ? []
     : wrapPdfText(`Portail : ${input.hotspotAddress}`, contentWidth, is58 ? 6.6 : 7.2, true, 3);
-  const contactLines = settings?.showContact === false
+  const contactLines = !settings?.showContact || !input.ownerPhone
     ? []
     : wrapPdfText(`Contact : ${input.ownerPhone}`, contentWidth, is58 ? 6.2 : 6.8, false, 2);
-  const allowanceLabel = [
-    settings?.showDuration === false ? null : `Duree ${input.durationLabel}`,
-    settings?.showDataLimit === false ? null : input.dataLimitLabel
-  ].filter(Boolean).join(" - ");
   const detailLines = [
-    allowanceLabel || null,
+    `Duree : ${input.durationLabel}`,
+    `Validite : ${input.validityLabel}`,
+    settings?.showDataLimit ? input.dataLimitLabel : null,
     input.priceLabel && settings?.showPrice !== false ? input.priceLabel : null,
     settings?.showCreatedAt ? `Cree le ${input.generatedAt.slice(0, 10)}` : null,
-    settings?.showExpiresAt ? "Expiration apres activation" : null
+    settings?.showNote ? settings.noteText : null
   ].filter((line): line is string => Boolean(line));
 
   page.rect(x, y, cellWidth, cellHeight);
@@ -429,6 +608,12 @@ function drawThermalTicket(
     cursor -= is58 ? 9 : 10;
     page.text(line, centerX, cursor, { align: "center", font: "bold", size: is58 ? 9 : 10 });
   });
+  if (settings?.showTicketNumber !== false) {
+    page.text(`#${String(index).padStart(2, "0")}`, x + cellWidth - padding, y + cellHeight - padding, {
+      align: "right",
+      size: is58 ? 5 : 5.5
+    });
+  }
   cursor -= 5;
 
   const credentialHeight = isSingleCode ? (is58 ? 34 : 38) : (is58 ? 50 : 54);
@@ -459,11 +644,15 @@ function drawThermalTicket(
   }
   cursor = credentialBottom - 7;
 
-  page.text(input.planName, centerX, cursor, {
-    align: "center",
-    font: "bold",
-    size: fitTextSize(input.planName, contentWidth, is58 ? 8.5 : 9.5, is58 ? 6.5 : 7)
-  });
+  if (settings?.showPlanName) {
+    page.text(input.planName, centerX, cursor, {
+      align: "center",
+      font: "bold",
+      size: fitTextSize(input.planName, contentWidth, is58 ? 8.5 : 9.5, is58 ? 6.5 : 7)
+    });
+  } else {
+    cursor += is58 ? 9 : 10;
+  }
   detailLines.forEach((line) => {
     cursor -= is58 ? 8.5 : 9;
     page.text(line, centerX, cursor, {
@@ -476,7 +665,7 @@ function drawThermalTicket(
   if (showQr) {
     const qrSize = is58 ? 48 : 58;
     cursor -= qrSize + 7;
-    drawQrPattern(page, centerX - qrSize / 2, cursor, qrSize, `${ticket.username}:${password}`);
+    drawQrPattern(page, centerX - qrSize / 2, cursor, qrSize, ticketQrValue(ticket));
   }
 
   cursor -= 7;
@@ -489,6 +678,10 @@ function drawThermalTicket(
     cursor -= is58 ? 7.5 : 8;
     page.text(line, centerX, cursor, { align: "center", size: is58 ? 6.2 : 6.8 });
   });
+  if (settings?.showPoweredBy !== false) {
+    cursor -= is58 ? 6.5 : 7;
+    page.text("Propulse par TicketPro", centerX, cursor, { align: "center", size: is58 ? 4.8 : 5.2 });
+  }
 }
 
 function isThermalFormat(format: TicketPdfFormat): boolean {
@@ -502,35 +695,36 @@ function getThermalPageSize(input: TicketPdfInput, ticket?: TicketPdfTicket): Pa
   const settings = input.displaySettings;
   const contentWidth = width - grids[input.format].margin * 2 - (is58 ? 16 : 20);
   const password = resolveTicketPdfPassword(ticket);
-  const header = [settings?.showLogo ? "TICKETPRO" : null, settings?.showZoneName !== false ? input.zoneName : null]
-    .filter(Boolean)
-    .join(" - ") || "ACCES WIFI";
+  const header = input.titleLabel || input.zoneName || "ACCES WIFI";
   const headerCount = wrapPdfText(header, contentWidth, is58 ? 9 : 10, true, 2).length;
-  const portalCount = settings?.showInstructions === false
+  const portalCount = settings?.showInstructions === false || !input.hotspotAddress
     ? 0
     : wrapPdfText(`Portail : ${input.hotspotAddress}`, contentWidth, is58 ? 6.6 : 7.2, true, 3).length;
-  const contactCount = settings?.showContact === false
+  const contactCount = !settings?.showContact || !input.ownerPhone
     ? 0
     : wrapPdfText(`Contact : ${input.ownerPhone}`, contentWidth, is58 ? 6.2 : 6.8, false, 2).length;
   const detailCount = [
-    settings?.showDuration === false && settings?.showDataLimit === false ? null : "allowance",
+    "duration",
+    "validity",
+    settings?.showDataLimit && input.dataLimitLabel ? "data" : null,
     input.priceLabel && settings?.showPrice !== false ? "price" : null,
     settings?.showCreatedAt ? "created" : null,
-    settings?.showExpiresAt ? "expires" : null
+    settings?.showNote ? "note" : null
   ].filter(Boolean).length;
-  const singleCode = password === ticket.username || settings?.showPassword === false;
+  const singleCode = password === ticket.username;
   const showQr = (settings?.showQrCode ?? input.qrCodeEnabled) || input.template === "qr";
   const height = (is58 ? 16 : 20)
     + headerCount * (is58 ? 9 : 10)
     + 5
     + (singleCode ? (is58 ? 34 : 38) : (is58 ? 50 : 54))
     + 7
-    + (is58 ? 9 : 10)
+    + (settings?.showPlanName ? (is58 ? 9 : 10) : 0)
     + detailCount * (is58 ? 8.5 : 9)
     + (showQr ? (is58 ? 55 : 65) : 0)
     + 7
     + portalCount * (is58 ? 8 : 8.5)
     + contactCount * (is58 ? 7.5 : 8)
+    + (settings?.showPoweredBy === false ? 0 : is58 ? 6.5 : 7)
     + 5;
   return { height: Math.max(is58 ? 122 : 132, Math.ceil(height)), width };
 }

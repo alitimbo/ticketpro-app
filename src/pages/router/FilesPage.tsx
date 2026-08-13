@@ -59,7 +59,7 @@ type FileLog = {
 };
 
 export function FilesPage() {
-  const { session } = useAuth();
+  const { saasAccount, session } = useAuth();
   const { database, isInitialized, isPersistent } = useAppDatabase();
   const [files, setFiles] = useState<ArchivedGeneratedFile[]>(() => (isPersistent ? [] : createDemoArchivedFiles()));
   const [filters, setFilters] = useState<FileFilters>(emptyFileFilters);
@@ -87,16 +87,22 @@ export function FilesPage() {
 
       const [records, routers, batches, persistedLogs] = await Promise.all([
         generatedFileRepository.listByAccount(session.account_id),
-        routerRepository.listByAccount(session.account_id),
+        saasAccount?.organization.id
+          ? routerRepository.listByOrganization(session.account_id, saasAccount.organization.id)
+          : routerRepository.listByAccount(session.account_id),
         batchRepository.listByAccount(session.account_id),
         appLogRepository.listByAccount(session.account_id)
       ]);
+      const routerIds = new Set(routers.map((router) => router.id));
+      const scopedRecords = records.filter((record) => routerIds.has(record.router_id));
+      const scopedBatches = batches.filter((batch) => routerIds.has(batch.router_id));
+      const scopedLogs = persistedLogs.filter((log) => log.router_id !== null && routerIds.has(log.router_id));
       const plans = await Promise.all(routers.map((router) => planRepository.listByRouter(router.id)));
       const routerById = new Map(routers.map((router) => [router.id, router]));
-      const batchById = new Map(batches.map((batch) => [batch.id, batch]));
+      const batchById = new Map(scopedBatches.map((batch) => [batch.id, batch]));
       const planById = new Map(plans.flat().map((plan) => [plan.id, plan]));
       const archived = await Promise.all(
-        records.map(async (record) => {
+        scopedRecords.map(async (record) => {
           const metadata = await fileService.metadata(record.file_path).catch(() => null);
           const batch = record.batch_id ? batchById.get(record.batch_id) : null;
           const plan = batch ? planById.get(batch.plan_id) : null;
@@ -116,7 +122,7 @@ export function FilesPage() {
         scopeFilesForSession(archived, session).map((file) => file.fileName)
       );
       setLogs(
-        persistedLogs
+        scopedLogs
           .filter(
             (log) =>
               log.category === "fichiers" &&
@@ -139,6 +145,7 @@ export function FilesPage() {
     isPersistent,
     planRepository,
     routerRepository,
+    saasAccount?.organization.id,
     session
   ]);
 

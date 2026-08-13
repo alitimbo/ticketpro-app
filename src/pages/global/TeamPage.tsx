@@ -146,18 +146,22 @@ export function TeamPage() {
   };
 
   useEffect(() => {
+    setMembers([]);
+    setForm(null);
     void refresh();
-  }, []);
+  }, [saasAccount?.organization.id]);
 
   useEffect(() => {
-    if (!isInitialized || !accountSession) return;
-    void routerRepository.listByAccount(accountSession.accountId).then((records) => {
+    const organizationId = saasAccount?.organization.id;
+    if (!isInitialized || !accountSession || !organizationId) return;
+    setRouters([]);
+    void routerRepository.listByOrganization(accountSession.accountId, organizationId).then((records) => {
       setRouters(records.map((router) => ({
         id: router.cloud_router_id ?? router.id,
         name: router.name
       })));
     });
-  }, [accountSession, isInitialized, routerRepository]);
+  }, [accountSession, isInitialized, routerRepository, saasAccount?.organization.id]);
 
   const openEdit = (member: SaasOrganizationUser) => {
     setMessage(null);

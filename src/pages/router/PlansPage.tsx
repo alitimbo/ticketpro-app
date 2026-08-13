@@ -56,7 +56,7 @@ type PlanFormState = {
 };
 
 export function PlansPage() {
-  const { session, userCan } = useAuth();
+  const { saasAccount, session, userCan } = useAuth();
   const { routerId = "routeur-demo" } = useParams();
   const { database, isInitialized, isPersistent } = useAppDatabase();
   const canManagePlans = userCan("router.plans.write");
@@ -74,9 +74,15 @@ export function PlansPage() {
   const ticketRepository = useMemo(() => new TicketRepository(database), [database]);
   const recoveryService = useMemo(
     () => session
-      ? new RouterCloudRecoveryService(database, session.account_id, session.internal_profile_id)
+      ? new RouterCloudRecoveryService(
+          database,
+          session.account_id,
+          session.internal_profile_id,
+          undefined,
+          saasAccount?.organization.id ?? null
+        )
       : null,
-    [database, session]
+    [database, saasAccount?.organization.id, session]
   );
   const service = useMemo(
     () =>

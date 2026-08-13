@@ -126,6 +126,7 @@ export type SaasDevice = {
 
 export type SaasDeviceRegistration = {
   active_device_count: number;
+  device_access_scope?: "owner" | "collaborator";
   device: SaasDevice;
   device_limit_mode: "limited" | "unlimited";
   max_devices: number | null;
@@ -143,6 +144,8 @@ export type SaasDeviceRegistration = {
 
 export type SaasDeviceInventory = {
   active_count: number;
+  collaborator_device_count?: number;
+  device_access_scope?: "owner" | "collaborator";
   devices: SaasDevice[];
   device_limit_mode: "limited" | "unlimited";
   max_devices: number | null;
@@ -343,11 +346,14 @@ export async function acceptSaasInvitation(input: {
 
 export async function switchSaasOrganization(membershipId: string): Promise<SaasAuthResult> {
   const token = await requireSessionToken();
-  return request<SaasAuthResult>(
+  const result = await request<SaasAuthResult>(
     "/v1/saas/auth/switch-organization",
     { membership_id: membershipId },
     token
   );
+  if (!result.session) throw new Error("La session de l'organisation n'a pas pu être créée.");
+  await storeSaasSession(result.session.token);
+  return result;
 }
 
 export async function listSaasTeam(): Promise<SaasOrganizationUser[]> {

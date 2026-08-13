@@ -37,7 +37,7 @@ export type MikroTikRouterAdapterOptions = RouterOsApiConfig & {
   transport?: RouterOsApiTransport;
 };
 
-const VOUCHER_LIFECYCLE_ENGINE_VERSION = 3;
+const VOUCHER_LIFECYCLE_ENGINE_VERSION = 4;
 const VOUCHER_EXPIRATION_SCRIPT = "ticketpro-voucher-expiration-v1";
 const VOUCHER_EXPIRATION_SCHEDULER = "ticketpro-voucher-expiration-v1";
 const VOUCHER_LIFECYCLE_COMMENT_PREFIX = "TicketPro:v1;";
@@ -95,16 +95,29 @@ export class MikroTikRouterAdapter implements RouterAdapter {
   }
 
   async getHotspotServers(): Promise<HotspotServer[]> {
-    const rows = await this.call("/ip/hotspot/print");
+    const [rows, profileRows] = await Promise.all([
+      this.call("/ip/hotspot/print"),
+      this.call("/ip/hotspot/profile/print")
+    ]);
+    const dnsByProfile = new Map(
+      profileRows.map((profile) => [
+        pick(profile, "name") ?? "",
+        pick(profile, "dns-name") ?? ""
+      ])
+    );
 
-    return rows.map((row) => ({
-      addressPool: pick(row, "address-pool") || "default",
-      id: pick(row, ".id") || pick(row, "id") || pick(row, "name") || "hotspot",
-      interfaceName: pick(row, "interface") || "inconnue",
-      isEnabled: !isTruthy(pick(row, "disabled")),
-      name: pick(row, "name") || "Hotspot",
-      profileName: pick(row, "profile") || "default"
-    }));
+    return rows.map((row) => {
+      const profileName = pick(row, "profile") || "default";
+      return {
+        addressPool: pick(row, "address-pool") || "default",
+        dnsName: dnsByProfile.get(profileName) || "",
+        id: pick(row, ".id") || pick(row, "id") || pick(row, "name") || "hotspot",
+        interfaceName: pick(row, "interface") || "inconnue",
+        isEnabled: !isTruthy(pick(row, "disabled")),
+        name: pick(row, "name") || "Hotspot",
+        profileName
+      };
+    });
   }
 
   async getHotspotPlans(): Promise<HotspotPlan[]> {
@@ -473,12 +486,16 @@ export class MikroTikRouterAdapter implements RouterAdapter {
   }
 
   async removeHotspotUser(username: string): Promise<void> {
-    const user = await this.findUserByName(username);
-
-    const [activeRows, cookieRows] = await Promise.all([
+    const [userRows, activeRows, cookieRows, hostRows, bindingRows, connectionRows] = await Promise.all([
+      this.call("/ip/hotspot/user/print"),
       this.call("/ip/hotspot/active/print"),
-      this.call("/ip/hotspot/cookie/print")
+      this.call("/ip/hotspot/cookie/print"),
+      this.call("/ip/hotspot/host/print"),
+      this.call("/ip/hotspot/ip-binding/print"),
+      this.call("/ip/firewall/connection/print")
     ]);
+    const userRow = userRows.find((row) => pick(row, "name", "user") === username);
+    const userId = userRow ? pick(userRow, ".id", "id") : null;
     const activeIds = activeRows
       .filter((row) => pick(row, "user", "name") === username)
       .map((row) => pick(row, ".id", "id"))
@@ -487,6 +504,58 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       .filter((row) => pick(row, "user", "name") === username)
       .map((row) => pick(row, ".id", "id"))
       .filter((id): id is string => Boolean(id));
+    const clientMacAddresses = new Set(
+      [
+        normalizeOptionalMacAddress(userRow ? pick(userRow, "mac-address") : undefined),
+        ...cookieRows
+          .filter((row) => pick(row, "user", "name") === username)
+          .map((row) => normalizeOptionalMacAddress(pick(row, "mac-address")))
+      ].filter((value): value is string => Boolean(value))
+    );
+    const clientAddresses = new Set(
+      [
+        ...activeRows
+          .filter((row) => pick(row, "user", "name") === username)
+          .map((row) => pick(row, "address")),
+        ...hostRows
+          .filter((row) => {
+            const macAddress = normalizeOptionalMacAddress(pick(row, "mac-address"));
+            return Boolean(macAddress && clientMacAddresses.has(macAddress));
+          })
+          .map((row) => pick(row, "address"))
+      ].filter((value): value is string => Boolean(value))
+    );
+    const hostIds = hostRows
+      .filter((row) => {
+        const macAddress = normalizeOptionalMacAddress(pick(row, "mac-address"));
+        return Boolean(
+          (macAddress && clientMacAddresses.has(macAddress))
+          || (pick(row, "address") && clientAddresses.has(pick(row, "address")!))
+        );
+      })
+      .map((row) => pick(row, ".id", "id"))
+      .filter((id): id is string => Boolean(id));
+    const bindingIds = bindingRows
+      .filter((row) => {
+        const macAddress = normalizeOptionalMacAddress(pick(row, "mac-address"));
+        const address = pick(row, "address");
+        return isManagedVoucherBinding(row, username)
+          || Boolean(macAddress && clientMacAddresses.has(macAddress))
+          || Boolean(address && clientAddresses.has(address));
+      })
+      .map((row) => pick(row, ".id", "id"))
+      .filter((id): id is string => Boolean(id));
+    const connectionIds = connectionRows
+      .filter((row) => Array.from(clientAddresses).some((address) =>
+        connectionAddressMatches(pick(row, "src-address"), address)
+        || connectionAddressMatches(pick(row, "dst-address"), address)
+      ))
+      .map((row) => pick(row, ".id", "id"))
+      .filter((id): id is string => Boolean(id));
+
+    if (userId) {
+      await this.call("/ip/hotspot/user/disable", { numbers: userId });
+    }
 
     for (const activeId of activeIds) {
       await this.call("/ip/hotspot/active/remove", { numbers: activeId });
@@ -494,12 +563,26 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     for (const cookieId of cookieIds) {
       await this.call("/ip/hotspot/cookie/remove", { numbers: cookieId });
     }
-    await this.call("/ip/hotspot/user/remove", { numbers: user.id });
+    for (const hostId of hostIds) {
+      await this.call("/ip/hotspot/host/remove", { numbers: hostId });
+    }
+    for (const bindingId of bindingIds) {
+      await this.call("/ip/hotspot/ip-binding/remove", { numbers: bindingId });
+    }
+    for (const connectionId of connectionIds) {
+      await this.call("/ip/firewall/connection/remove", { numbers: connectionId });
+    }
+    if (userId) {
+      await this.call("/ip/hotspot/user/remove", { numbers: userId });
+    }
 
-    const [remainingUsers, remainingActiveRows, remainingCookieRows] = await Promise.all([
+    const [remainingUsers, remainingActiveRows, remainingCookieRows, remainingHosts, remainingBindings, remainingConnections] = await Promise.all([
       this.call("/ip/hotspot/user/print"),
       this.call("/ip/hotspot/active/print"),
-      this.call("/ip/hotspot/cookie/print")
+      this.call("/ip/hotspot/cookie/print"),
+      this.call("/ip/hotspot/host/print"),
+      this.call("/ip/hotspot/ip-binding/print"),
+      this.call("/ip/firewall/connection/print")
     ]);
     const stillPresent = (rows: RouterOsApiRow[]) => rows.some(
       (row) => pick(row, "user", "name") === username
@@ -508,10 +591,27 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       stillPresent(remainingUsers)
       || stillPresent(remainingActiveRows)
       || stillPresent(remainingCookieRows)
+      || remainingHosts.some((row) => {
+        const macAddress = normalizeOptionalMacAddress(pick(row, "mac-address"));
+        const address = pick(row, "address");
+        return Boolean(macAddress && clientMacAddresses.has(macAddress))
+          || Boolean(address && clientAddresses.has(address));
+      })
+      || remainingBindings.some((row) => {
+        const macAddress = normalizeOptionalMacAddress(pick(row, "mac-address"));
+        const address = pick(row, "address");
+        return isManagedVoucherBinding(row, username)
+          || Boolean(macAddress && clientMacAddresses.has(macAddress))
+          || Boolean(address && clientAddresses.has(address));
+      })
+      || remainingConnections.some((row) => Array.from(clientAddresses).some((address) =>
+        connectionAddressMatches(pick(row, "src-address"), address)
+        || connectionAddressMatches(pick(row, "dst-address"), address)
+      ))
     ) {
       throw new RouterAdapterError(
         "router_rejected",
-        "RouterOS kept the Hotspot user, an active session or a cookie after removal"
+        "RouterOS kept a Hotspot authorization or network connection after removal"
       );
     }
   }
@@ -1234,7 +1334,7 @@ async function userRowToHotspotUser(row: RouterOsApiRow): Promise<HotspotUser> {
     (limitBytesTotal > 0 && downloadedBytes + uploadedBytes >= limitBytesTotal) ||
     (routerOsDurationToSeconds(limitUptime) > 0 &&
       routerOsDurationToSeconds(uptime) >= routerOsDurationToSeconds(limitUptime));
-  const lifecycleExpired = pick(row, "comment")?.includes(";state=expired;") ?? false;
+  const lifecycleState = pick(row, "comment")?.match(/;state=([a-z-]+);/)?.[1] ?? null;
 
   return {
     comment: pick(row, "comment") || null,
@@ -1248,7 +1348,11 @@ async function userRowToHotspotUser(row: RouterOsApiRow): Promise<HotspotUser> {
           : `unavailable://mikrotik/${username}/password`,
     planId: pick(row, "profile") || "default",
     profileName: pick(row, "profile") || "default",
-    status: lifecycleExpired || limitReached
+    status: lifecycleState === "cleanup-error" || lifecycleState === "cleanup-pending"
+      ? "error"
+      : lifecycleState === "exhausted" || (limitReached && lifecycleState !== "expired")
+      ? "exhausted"
+      : lifecycleState === "expired"
       ? "expired"
       : isTruthy(pick(row, "disabled"))
         ? "disabled"
@@ -1275,6 +1379,19 @@ function normalizeMacAddress(value: string): string {
 function normalizeOptionalMacAddress(value: string | undefined): string | null {
   if (!value || value === "00:00:00:00:00:00") return null;
   return value.trim().replace(/-/g, ":").toUpperCase();
+}
+
+function isManagedVoucherBinding(row: RouterOsApiRow, username: string): boolean {
+  const comment = pick(row, "comment") ?? "";
+  return comment.startsWith(`TicketPro voucher:${username}`)
+    || comment.startsWith(`TicketPro ticket:${username}`);
+}
+
+function connectionAddressMatches(value: string | undefined, address: string): boolean {
+  if (!value || !address) return false;
+  return value === address
+    || value.startsWith(`${address}:`)
+    || value.startsWith(`${address}%`);
 }
 
 function parsePlanComment(comment: string | undefined): Partial<HotspotPlan> {
@@ -1436,7 +1553,7 @@ export function reconcileVoucherLifecycleComment(
   }
 
   const expires = currentComment.match(/;expires=(\d+);/)?.[1] ?? "0";
-  const state = currentComment.match(/;state=([a-z]+);/)?.[1] ?? "new";
+  const state = currentComment.match(/;state=([a-z-]+);/)?.[1] ?? "new";
   return `${VOUCHER_LIFECYCLE_COMMENT_PREFIX}validity=${Math.floor(validityMinutes)};expires=${expires};state=${state};`;
 }
 
@@ -1535,22 +1652,81 @@ export function buildVoucherExpirationScript(): string {
     '    :if (([:typeof $tpValidityEnd] != "nil") && ([:typeof $tpExpiresEnd] != "nil")) do={',
     '      :local tpValidity [:tonum [:pick $tpComment $tpValidityStart $tpValidityEnd]];',
     '      :local tpExpires [:tonum [:pick $tpComment $tpExpiresStart $tpExpiresEnd]];',
-    '      :local tpShouldRemove false;',
-    '      :local tpReason "expired";',
-    '      :if (($tpExpires > 0) && ($tpNow >= $tpExpires)) do={ :set tpShouldRemove true };',
+    '      :local tpExpired false;',
+    '      :local tpExhausted false;',
+    '      :local tpReason "";',
+    '      :if (($tpExpires > 0) && ($tpNow >= $tpExpires)) do={ :set tpExpired true; :set tpReason "validity-expired" };',
     '      :local tpLimitUptime [:tonum [:totime [/ip hotspot user get $tpId limit-uptime]]];',
     '      :local tpUptime [:tonum [:totime [/ip hotspot user get $tpId uptime]]];',
-    '      :if (($tpLimitUptime > 0) && ($tpUptime >= $tpLimitUptime)) do={ :set tpShouldRemove true; :set tpReason "time-consumed" };',
+    '      :if (($tpExpired = false) && ($tpLimitUptime > 0) && ($tpUptime >= $tpLimitUptime)) do={ :set tpExhausted true; :set tpReason "time-consumed" };',
     '      :local tpLimitBytes [/ip hotspot user get $tpId limit-bytes-total];',
     '      :local tpBytesIn [/ip hotspot user get $tpId bytes-in];',
     '      :local tpBytesOut [/ip hotspot user get $tpId bytes-out];',
-    '      :if (($tpLimitBytes > 0) && (($tpBytesIn + $tpBytesOut) >= $tpLimitBytes)) do={ :set tpShouldRemove true; :set tpReason "quota-consumed" };',
-    '      :if ($tpShouldRemove = true) do={',
+    '      :if (($tpExpired = false) && ($tpLimitBytes > 0) && (($tpBytesIn + $tpBytesOut) >= $tpLimitBytes)) do={ :set tpExhausted true; :set tpReason "quota-consumed" };',
+    '      :if (($tpExpired = true) || ($tpExhausted = true)) do={',
     '        :local tpUser [/ip hotspot user get $tpId name];',
-    '        :foreach tpActiveId in=[/ip hotspot active find where user=$tpUser] do={ :do { /ip hotspot active remove $tpActiveId } on-error={} };',
-    '        :foreach tpCookieId in=[/ip hotspot cookie find where user=$tpUser] do={ :do { /ip hotspot cookie remove $tpCookieId } on-error={} };',
-    '        :log info ("TicketPro voucher removed: " . $tpUser . " (" . $tpReason . ")");',
-    '        :do { /ip hotspot user remove $tpId } on-error={ :log error ("TicketPro voucher removal failed: " . $tpUser) };',
+    '        :local tpUserMac [/ip hotspot user get $tpId mac-address];',
+    '        :local tpState "exhausted";',
+    '        :local tpCleanupFailed false;',
+    '        :if ($tpExpired = true) do={ :set tpState "expired" };',
+    '        :do { /ip hotspot user set $tpId disabled=yes comment=("TicketPro:v1;validity=" . $tpValidity . ";expires=" . $tpExpires . ";state=cleanup-pending;") } on-error={ :set tpCleanupFailed true };',
+    '        :foreach tpActiveId in=[/ip hotspot active find where user=$tpUser] do={',
+    '          :local tpAddress [/ip hotspot active get $tpActiveId address];',
+    '          :do { /ip hotspot active remove $tpActiveId } on-error={ :set tpCleanupFailed true };',
+    '          :if ([:len $tpAddress] > 0) do={',
+    '            :do { /ip firewall connection remove [find where src-address~$tpAddress] } on-error={ :set tpCleanupFailed true };',
+    '            :do { /ip firewall connection remove [find where dst-address~$tpAddress] } on-error={ :set tpCleanupFailed true };',
+    '            :do { /ip hotspot ip-binding remove [find where address=$tpAddress] } on-error={ :set tpCleanupFailed true };',
+    '            :do { /ip hotspot host remove [find where address=$tpAddress] } on-error={ :set tpCleanupFailed true };',
+    '          };',
+    '        };',
+    '        :foreach tpCookieId in=[/ip hotspot cookie find where user=$tpUser] do={',
+    '          :local tpMac [/ip hotspot cookie get $tpCookieId mac-address];',
+    '          :if ([:len $tpMac] > 0) do={',
+    '            :do { /ip hotspot ip-binding remove [find where mac-address=$tpMac] } on-error={ :set tpCleanupFailed true };',
+    '            :foreach tpHostId in=[/ip hotspot host find where mac-address=$tpMac] do={',
+    '              :local tpHostAddress [/ip hotspot host get $tpHostId address];',
+    '              :if ([:len $tpHostAddress] > 0) do={',
+    '                :do { /ip firewall connection remove [find where src-address~$tpHostAddress] } on-error={ :set tpCleanupFailed true };',
+    '                :do { /ip firewall connection remove [find where dst-address~$tpHostAddress] } on-error={ :set tpCleanupFailed true };',
+    '              };',
+    '              :do { /ip hotspot host remove $tpHostId } on-error={ :set tpCleanupFailed true };',
+    '            };',
+    '          };',
+    '          :do { /ip hotspot cookie remove $tpCookieId } on-error={ :set tpCleanupFailed true };',
+    '        };',
+    '        :if (([:len $tpUserMac] > 0) && ($tpUserMac != "00:00:00:00:00:00")) do={',
+    '          :do { /ip hotspot ip-binding remove [find where mac-address=$tpUserMac] } on-error={ :set tpCleanupFailed true };',
+    '          :foreach tpHostId in=[/ip hotspot host find where mac-address=$tpUserMac] do={',
+    '            :local tpHostAddress [/ip hotspot host get $tpHostId address];',
+    '            :if ([:len $tpHostAddress] > 0) do={',
+    '              :do { /ip firewall connection remove [find where src-address~$tpHostAddress] } on-error={ :set tpCleanupFailed true };',
+    '              :do { /ip firewall connection remove [find where dst-address~$tpHostAddress] } on-error={ :set tpCleanupFailed true };',
+    '            };',
+    '            :do { /ip hotspot host remove $tpHostId } on-error={ :set tpCleanupFailed true };',
+    '          };',
+    '        };',
+    '        :local tpBindingMarker ("TicketPro voucher:" . $tpUser);',
+    '        :foreach tpBindingId in=[/ip hotspot ip-binding find where comment~$tpBindingMarker] do={ :do { /ip hotspot ip-binding remove $tpBindingId } on-error={ :set tpCleanupFailed true } };',
+    '        :if ([:len [/ip hotspot active find where user=$tpUser]] > 0) do={ :set tpCleanupFailed true };',
+    '        :if ([:len [/ip hotspot cookie find where user=$tpUser]] > 0) do={ :set tpCleanupFailed true };',
+    '        :if ([:len [/ip hotspot ip-binding find where comment~$tpBindingMarker]] > 0) do={ :set tpCleanupFailed true };',
+    '        :if ($tpCleanupFailed = true) do={',
+    '          :do { /ip hotspot user set $tpId disabled=yes comment=("TicketPro:v1;validity=" . $tpValidity . ";expires=" . $tpExpires . ";state=cleanup-error;") } on-error={};',
+    '          :log error ("TicketPro voucher cleanup failed: " . $tpUser . " (" . $tpReason . ")");',
+    '        } else={',
+    '          :do { /ip hotspot user set $tpId disabled=yes comment=("TicketPro:v1;validity=" . $tpValidity . ";expires=" . $tpExpires . ";state=" . $tpState . ";") } on-error={ :set tpCleanupFailed true };',
+    '          :if ($tpCleanupFailed = true) do={',
+    '            :log error ("TicketPro voucher state update failed: " . $tpUser);',
+    '          } else={',
+    '            :if ($tpExpired = true) do={',
+    '              :do { /ip hotspot user remove $tpId } on-error={ :set tpCleanupFailed true };',
+    '              :if (([:len [/ip hotspot user find where name=$tpUser]] = 0) && ($tpCleanupFailed = false)) do={ :log info ("TicketPro voucher removed: " . $tpUser . " (" . $tpReason . ")") } else={ :log error ("TicketPro voucher removal failed: " . $tpUser) };',
+    '            } else={',
+    '              :log info ("TicketPro voucher exhausted: " . $tpUser . " (" . $tpReason . ")");',
+    '            };',
+    '          };',
+    '        };',
     '      };',
     '    };',
     '  };',

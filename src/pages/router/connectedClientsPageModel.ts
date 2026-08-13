@@ -16,7 +16,12 @@ export type ConnectedClientFilters = {
 };
 
 export type ConnectedClientViewModel = {
+  consumptionPercent: number | null;
+  currentSessionUptime: string;
+  dataLimitBytes: number | null;
+  dataRemainingBytes: number | null;
   downloadedBytes: number;
+  expiresAt: string | null;
   id: string;
   ipAddress: string;
   macAddress: string;
@@ -66,8 +71,33 @@ export function buildConnectedClientViewModels(
         )
       : undefined;
 
+    const uptimeSeconds = Math.max(
+      parseDurationToSeconds(activeUser.uptime),
+      parseDurationToSeconds(ticket?.uptime ?? null)
+    );
+    const durationLimitSeconds = parseDurationToSeconds(ticket?.limitUptime ?? null)
+      || Math.max(0, (plan?.durationMinutes ?? 0) * 60);
+    const downloadedBytes = Math.max(activeUser.downloadedBytes, ticket?.downloadedBytes ?? 0);
+    const uploadedBytes = Math.max(activeUser.uploadedBytes, ticket?.uploadedBytes ?? 0);
+    const totalBytes = downloadedBytes + uploadedBytes;
+    const dataLimitBytes = resolveDataLimitBytes(ticket?.limitBytesTotal, plan?.dataLimitMb);
+    const expiresAt = lifecycleExpirationIso(ticket?.comment);
+    const timeConsumed = durationLimitSeconds > 0 && uptimeSeconds >= durationLimitSeconds;
+    const quotaConsumed = dataLimitBytes !== null && totalBytes >= dataLimitBytes;
+    const validityExpired = expiresAt !== null && Date.parse(expiresAt) <= Date.now();
+
     return {
-      downloadedBytes: activeUser.downloadedBytes,
+      consumptionPercent: calculateConsumptionPercent(
+        uptimeSeconds,
+        durationLimitSeconds,
+        totalBytes,
+        dataLimitBytes
+      ),
+      currentSessionUptime: activeUser.uptime,
+      dataLimitBytes,
+      dataRemainingBytes: dataLimitBytes === null ? null : Math.max(0, dataLimitBytes - totalBytes),
+      downloadedBytes,
+      expiresAt,
       id: activeUser.id,
       ipAddress: activeUser.ipAddress,
       macAddress: activeUser.macAddress,
@@ -75,17 +105,23 @@ export function buildConnectedClientViewModels(
       planName: plan?.name ?? ticket?.profileName ?? ticket?.planId ?? "Plan non identifié",
       routerId: router.id,
       routerName: router.name,
-      sessionTimeLeft: activeUser.sessionTimeLeft,
+      sessionTimeLeft: durationLimitSeconds > 0
+        ? formatClientDuration(Math.max(0, durationLimitSeconds - uptimeSeconds))
+        : activeUser.sessionTimeLeft,
       status: "active",
       ticketStatus: ticket
         ? ticket.status === "disabled" || ticket.status === "expired"
           ? ticket.status
-          : "active"
+          : validityExpired
+            ? "expired"
+            : timeConsumed || quotaConsumed || ticket.status === "exhausted"
+              ? "exhausted"
+              : "active"
         : "unknown",
-      totalBytes: activeUser.downloadedBytes + activeUser.uploadedBytes,
-      uploadedBytes: activeUser.uploadedBytes,
-      uptime: activeUser.uptime,
-      uptimeMinutes: parseDurationToMinutes(activeUser.uptime),
+      totalBytes,
+      uploadedBytes,
+      uptime: formatClientDuration(uptimeSeconds),
+      uptimeMinutes: Math.floor(uptimeSeconds / 60),
       username: activeUser.username
     };
   });
@@ -108,12 +144,29 @@ export function buildCachedConnectedClientViewModels(
           || candidate.name === ticket.plan_id
         ) ?? null
       : null;
-    const downloadedBytes = cachedUser.downloaded_bytes;
-    const uploadedBytes = cachedUser.uploaded_bytes;
-    const uptime = cachedUser.uptime ?? "0s";
+    const downloadedBytes = Math.max(cachedUser.downloaded_bytes, ticket?.downloaded_bytes ?? 0);
+    const uploadedBytes = Math.max(cachedUser.uploaded_bytes, ticket?.uploaded_bytes ?? 0);
+    const uptimeSeconds = Math.max(
+      parseDurationToSeconds(cachedUser.uptime),
+      ticket?.uptime_seconds ?? 0
+    );
+    const durationLimitSeconds = Math.max(0, (plan?.duration_minutes ?? 0) * 60);
+    const totalBytes = downloadedBytes + uploadedBytes;
+    const dataLimitBytes = resolveDataLimitBytes(null, plan?.data_limit_mb);
 
     return {
+      consumptionPercent: calculateConsumptionPercent(
+        uptimeSeconds,
+        durationLimitSeconds,
+        totalBytes,
+        dataLimitBytes
+      ),
+      currentSessionUptime: cachedUser.uptime ?? "0s",
+      dataLimitBytes,
+      dataRemainingBytes: ticket?.data_remaining_bytes
+        ?? (dataLimitBytes === null ? null : Math.max(0, dataLimitBytes - totalBytes)),
       downloadedBytes,
+      expiresAt: ticket?.expires_at ?? null,
       id: cachedUser.id,
       ipAddress: cachedUser.ip_address ?? "",
       macAddress: cachedUser.mac_address ?? "",
@@ -121,13 +174,17 @@ export function buildCachedConnectedClientViewModels(
       planName: plan?.name ?? ticket?.plan_id ?? "Plan non identifié",
       routerId: router.id,
       routerName: router.name,
-      sessionTimeLeft: cachedUser.session_time_left ?? "Non disponible",
+      sessionTimeLeft: ticket?.remaining_seconds !== null && ticket?.remaining_seconds !== undefined
+        ? formatClientDuration(ticket.remaining_seconds)
+        : durationLimitSeconds > 0
+          ? formatClientDuration(Math.max(0, durationLimitSeconds - uptimeSeconds))
+          : cachedUser.session_time_left ?? "Non disponible",
       status: "active",
       ticketStatus: ticketStatusFromRecord(ticket),
-      totalBytes: downloadedBytes + uploadedBytes,
+      totalBytes,
       uploadedBytes,
-      uptime,
-      uptimeMinutes: parseDurationToMinutes(uptime),
+      uptime: formatClientDuration(uptimeSeconds),
+      uptimeMinutes: Math.floor(uptimeSeconds / 60),
       username: cachedUser.username
     };
   });
@@ -214,32 +271,65 @@ export function formatClientBytes(bytes: number): string {
   return `${Math.round(megabytes)} MB`;
 }
 
-function parseDurationToMinutes(value: string): number {
-  const normalized = value.toLowerCase();
-  let minutes = 0;
+export function parseClientDurationToSeconds(value: string | null | undefined): number {
+  return parseDurationToSeconds(value);
+}
 
-  const weeks = normalized.match(/(\d+)\s*w/);
-  const days = normalized.match(/(\d+)\s*d/);
-  const hours = normalized.match(/(\d+)\s*h/);
-  const mins = normalized.match(/(\d+)\s*m/);
+export function formatClientDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "0 s";
+  const rounded = Math.floor(seconds);
+  const days = Math.floor(rounded / 86400);
+  const hours = Math.floor((rounded % 86400) / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  const remainingSeconds = rounded % 60;
+  return [
+    days > 0 ? `${days} j` : null,
+    hours > 0 ? `${hours} h` : null,
+    minutes > 0 ? `${minutes} min` : null,
+    remainingSeconds > 0 ? `${remainingSeconds} s` : null
+  ].filter(Boolean).join(" ");
+}
 
-  if (weeks) {
-    minutes += Number(weeks[1]) * 10080;
+function parseDurationToSeconds(value: string | null | undefined): number {
+  if (!value) return 0;
+  const units: Record<string, number> = { w: 604800, d: 86400, h: 3600, m: 60, s: 1 };
+  let seconds = 0;
+  for (const match of value.toLowerCase().matchAll(/(\d+)\s*(w|d|h|m|s)/g)) {
+    seconds += Number(match[1]) * units[match[2]];
   }
+  return seconds;
+}
 
-  if (days) {
-    minutes += Number(days[1]) * 1440;
-  }
+function resolveDataLimitBytes(
+  routerLimit: number | null | undefined,
+  planLimitMb: number | null | undefined
+): number | null {
+  if (routerLimit && routerLimit > 0) return routerLimit;
+  if (planLimitMb && planLimitMb > 0) return Math.round(planLimitMb * 1024 * 1024);
+  return null;
+}
 
-  if (hours) {
-    minutes += Number(hours[1]) * 60;
-  }
+function calculateConsumptionPercent(
+  uptimeSeconds: number,
+  durationLimitSeconds: number,
+  totalBytes: number,
+  dataLimitBytes: number | null
+): number | null {
+  const ratios: number[] = [];
+  if (durationLimitSeconds > 0) ratios.push(uptimeSeconds / durationLimitSeconds);
+  if (dataLimitBytes !== null && dataLimitBytes > 0) ratios.push(totalBytes / dataLimitBytes);
+  if (ratios.length === 0) return null;
+  return Math.min(100, Math.max(0, Math.round(Math.max(...ratios) * 100)));
+}
 
-  if (mins) {
-    minutes += Number(mins[1]);
-  }
-
-  return minutes;
+function lifecycleExpirationIso(comment: string | null | undefined): string | null {
+  const raw = comment?.match(/;expires=(\d+);/)?.[1];
+  if (!raw || raw === "0") return null;
+  const numeric = Number(raw);
+  if (!Number.isFinite(numeric)) return null;
+  const milliseconds = numeric > 10_000_000_000_000 ? numeric / 1_000_000 : numeric;
+  const date = new Date(milliseconds);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
 function ticketStatusFromRecord(
@@ -248,6 +338,7 @@ function ticketStatusFromRecord(
   if (!ticket) return "unknown";
   if (ticket.status === "désactivé" || ticket.status === "disabled") return "disabled";
   if (ticket.status === "expiré" || ticket.status === "expired") return "expired";
+  if (ticket.status === "consommé" || ticket.status === "exhausted") return "exhausted";
   return "active";
 }
 

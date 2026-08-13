@@ -16,6 +16,11 @@ import {
 
 const connectionTimeoutMs = 20_000;
 const statusPollIntervalMs = 750;
+let provisioningQueue: Promise<void> = Promise.resolve();
+
+export async function waitForEmbeddedVpnProvisioning(): Promise<void> {
+  await provisioningQueue;
+}
 
 export type EmbeddedVpnProvisioningResult = {
   installationId: string | null;
@@ -51,6 +56,13 @@ export class EmbeddedVpnProvisioningService {
   constructor(private readonly dependencies: EmbeddedVpnProvisioningDependencies = defaultDependencies) {}
 
   async ensureConnected(
+    deviceName?: string,
+    replacementDeviceId?: string
+  ): Promise<EmbeddedVpnProvisioningResult> {
+    return enqueueProvisioning(() => this.ensureConnectedNow(deviceName, replacementDeviceId));
+  }
+
+  private async ensureConnectedNow(
     deviceName?: string,
     replacementDeviceId?: string
   ): Promise<EmbeddedVpnProvisioningResult> {
@@ -128,6 +140,19 @@ export class EmbeddedVpnProvisioningService {
     }
     return status;
   }
+}
+
+function enqueueProvisioning<T>(operation: () => Promise<T>): Promise<T> {
+  let release: (() => void) | null = null;
+  const next = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const previous = provisioningQueue;
+  provisioningQueue = previous.then(() => next, () => next);
+
+  return previous
+    .then(operation)
+    .finally(() => release?.());
 }
 
 function normalizeDeviceName(name: string | undefined, identity: VpnPublicIdentity): string {

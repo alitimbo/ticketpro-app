@@ -129,4 +129,45 @@ describe("EmbeddedVpnProvisioningService", () => {
     expect(mocks.registerDevice).not.toHaveBeenCalled();
     expect(mocks.applyConfig).not.toHaveBeenCalled();
   });
+
+  it("sérialise les provisionnements pour empêcher deux configurations concurrentes", async () => {
+    const firstGate = { release: () => undefined as void };
+    let markFirstStarted: (() => void) | null = null;
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    const firstBlocked = new Promise<void>((resolve) => {
+      firstGate.release = resolve;
+    });
+    const legacyStatus = {
+      provider: "LEGACY" as const,
+      state: "CONNECTED" as const,
+      serviceName: "WireGuardTunnel$tp-*",
+      serviceVersion: null,
+      detailCode: null,
+      lastHandshakeUnixSeconds: null,
+      rxBytes: 0,
+      txBytes: 0
+    };
+    const first = dependencies({
+      getStatus: vi.fn().mockImplementation(async () => {
+        markFirstStarted?.();
+        await firstBlocked;
+        return legacyStatus;
+      })
+    });
+    const second = dependencies({
+      getStatus: vi.fn().mockResolvedValue(legacyStatus)
+    });
+
+    const firstRun = new EmbeddedVpnProvisioningService(first).ensureConnected();
+    await firstStarted;
+    const secondRun = new EmbeddedVpnProvisioningService(second).ensureConnected();
+    await Promise.resolve();
+
+    expect(second.getStatus).not.toHaveBeenCalled();
+    firstGate.release();
+    await Promise.all([firstRun, secondRun]);
+    expect(second.getStatus).toHaveBeenCalledOnce();
+  });
 });

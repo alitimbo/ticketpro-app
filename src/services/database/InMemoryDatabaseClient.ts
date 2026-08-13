@@ -201,6 +201,12 @@ export class InMemoryDatabaseClient implements DatabaseClient {
       ] as T[];
     }
 
+    if (normalized.includes("where account_id = ?1 and organization_id = ?2")) {
+      return visibleRows.filter(
+        (row) => row.account_id === params[0] && row.organization_id === params[1]
+      ) as T[];
+    }
+
     if (normalized.includes("where account_id = ?1")) {
       return visibleRows.filter((row) => row.account_id === params[0]) as T[];
     }

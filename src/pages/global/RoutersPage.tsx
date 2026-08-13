@@ -109,19 +109,32 @@ export function RoutersPage() {
   const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
   const recoveryService = useMemo(
     () => accountId && session
-      ? new RouterCloudRecoveryService(database, accountId, session.internal_profile_id)
+      ? new RouterCloudRecoveryService(
+          database,
+          accountId,
+          session.internal_profile_id,
+          undefined,
+          saasAccount?.organization.id ?? null
+        )
       : null,
-    [accountId, database, session]
+    [accountId, database, saasAccount?.organization.id, session]
   );
 
   useEffect(() => {
     if (!isInitialized || !accountId) return undefined;
     let mounted = true;
     const scopedAccountId = accountId;
+    const selectedOrganizationId = saasAccount?.organization.id ?? null;
+    setRouters([]);
+    setSelectedRouter(null);
+    setRouterToDelete(null);
+    setFormState(null);
 
     async function loadRouters() {
       try {
-        let records = await routerRepository.listByAccount(scopedAccountId);
+        let records = selectedOrganizationId
+          ? await routerRepository.listByOrganization(scopedAccountId, selectedOrganizationId)
+          : await routerRepository.listByAccount(scopedAccountId);
         if (isPersistent && recoveryService) {
           const recovery = await recoveryService.restoreMissingRouters();
           if (recovery.restoredRouterIds.length > 0 && mounted) {
@@ -129,10 +142,12 @@ export function RoutersPage() {
               `${recovery.restoredRouterIds.length} routeur(s) restauré(s) depuis le coffre TicketPro. Vérification réelle en attente.`
             );
           }
-          records = await routerRepository.listByAccount(scopedAccountId);
+          records = selectedOrganizationId
+            ? await routerRepository.listByOrganization(scopedAccountId, selectedOrganizationId)
+            : await routerRepository.listByAccount(scopedAccountId);
         }
         if (isPersistent && records.length > 0 && recoveryService && canEditRouter) {
-          void recoveryService.backupAll().catch(() => {
+          void Promise.all(records.map((record) => recoveryService.backupRouter(record.id))).catch(() => {
             // La sauvegarde sera retentée au prochain chargement sans bloquer le travail local.
           });
         }
@@ -145,7 +160,7 @@ export function RoutersPage() {
       } catch (error) {
         if (!mounted) return;
         setMessage(readUnknownError(error, "Impossible de charger les routeurs."));
-        if (!isPersistent) setRouters(demoRouters);
+        setRouters(isPersistent ? [] : demoRouters);
       }
     }
 
@@ -160,7 +175,8 @@ export function RoutersPage() {
     isInitialized,
     isPersistent,
     recoveryService,
-    routerRepository
+    routerRepository,
+    saasAccount?.organization.id
   ]);
 
   const accountRouters = useMemo(() => {
@@ -322,6 +338,9 @@ export function RoutersPage() {
       if (isPersistent && accountId && session) {
         try {
           const cardStatus = routerCardStatusFromTestStatus(result.status);
+          if (result.status === "connected" && testedMode !== router.preferredMode) {
+            await routerRepository.setPreferredConnectionMode(accountId, router.id, testedMode);
+          }
           await routerRepository.recordConnectionTest({
             accountId,
             checkedAt: new Date().toISOString(),
@@ -338,7 +357,12 @@ export function RoutersPage() {
 
       setRouters((current) =>
         current.map((item) => (item.id === router.id
-          ? applyTestResult(item, result.status, result.message, result.systemInfo)
+          ? applyTestResult(
+              { ...item, preferredMode: result.status === "connected" ? testedMode : item.preferredMode },
+              result.status,
+              result.message,
+              result.systemInfo
+            )
           : item))
       );
       if (!options.silent) setMessage(result.message);
@@ -385,7 +409,8 @@ export function RoutersPage() {
         const created = applyTestResult(
           createRouterFromForm(formState.values, encryptedPassword, formState.detectedInfo, undefined, {
             accountId,
-            createdByProfileId: session.internal_profile_id
+            createdByProfileId: session.internal_profile_id,
+            organizationId: saasAccount?.organization.id ?? null
           }),
           formState.testStatus,
           formState.testMessage,

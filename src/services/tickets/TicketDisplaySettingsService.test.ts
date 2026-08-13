@@ -19,9 +19,36 @@ describe("TicketDisplaySettingsService", () => {
     });
 
     await expect(service.get("account-1", "router-1")).resolves.toMatchObject({
-      showPassword: false,
+      showPassword: true,
       showQrCode: true
     });
     await expect(service.get("account-1", "router-2")).resolves.toEqual(defaultTicketDisplaySettings);
+  });
+
+  it("impose les informations structurelles et migre les anciennes préférences", async () => {
+    const database = new InMemoryDatabaseClient();
+    await database.initialize();
+    const service = new TicketDisplaySettingsService(database);
+
+    await service.save("account-1", "router-1", {
+      ...defaultTicketDisplaySettings,
+      currency: "XOF",
+      customTitle: "Nova WiFi",
+      showDuration: false,
+      showPassword: false,
+      showUsername: false,
+      showValidity: false,
+      titleMode: "custom"
+    });
+
+    await expect(service.get("account-1", "router-1")).resolves.toMatchObject({
+      currency: "XOF",
+      customTitle: "Nova WiFi",
+      showDuration: true,
+      showPassword: true,
+      showUsername: true,
+      showValidity: true,
+      titleMode: "custom"
+    });
   });
 });

@@ -7,6 +7,7 @@ import type {
   TicketRecord
 } from "../../domain/database";
 import { resolveTicketPasswordValue } from "../tickets";
+import { defaultTicketDisplaySettings } from "../tickets/TicketDisplaySettingsService";
 import {
   generateTicketPdf,
   parseTicketPdfArchiveMetadata,
@@ -37,9 +38,6 @@ export async function regenerateArchivedTicketPdf(input: {
   const ownerPhone = metadata?.ownerPhone.trim() || input.account.phone?.trim();
   const hotspotAddress = metadata?.hotspotAddress.trim() || input.router.hotspot_address?.trim();
 
-  if (!ownerPhone) {
-    throw new Error("Renseignez le téléphone du propriétaire dans Mon compte avant de régénérer le PDF.");
-  }
   if (!hotspotAddress) {
     throw new Error("Renseignez l'adresse Hotspot du routeur avant de régénérer le PDF.");
   }
@@ -60,12 +58,16 @@ export async function regenerateArchivedTicketPdf(input: {
     createdByProfile: input.file.created_by_profile,
     createdByProfileId: input.file.created_by_profile_id,
     dataLimitLabel: metadata?.dataLimitLabel ?? formatDataLimit(input.plan.data_limit_mb),
+    displaySettings: metadata?.displaySettings ?? {
+      ...defaultTicketDisplaySettings,
+      showContact: Boolean(ownerPhone)
+    },
     durationLabel: metadata?.durationLabel ?? formatDuration(input.plan.duration_minutes),
     fileName: input.file.file_name,
     format: metadata?.format ?? normalizeArchivedFormat(input.file.format),
     generatedAt: new Date().toISOString(),
     hotspotAddress,
-    ownerPhone,
+    ownerPhone: ownerPhone ?? "",
     planName: metadata?.planName ?? input.plan.name,
     priceLabel:
       metadata?.priceLabel ??
@@ -74,6 +76,8 @@ export async function regenerateArchivedTicketPdf(input: {
     routerId: input.router.id,
     template: metadata?.template === "qr" ? "economy" : metadata?.template ?? "economy",
     tickets,
+    titleLabel: metadata?.titleLabel ?? metadata?.zoneName ?? input.router.name,
+    validityLabel: metadata?.validityLabel ?? formatDuration(input.plan.validity_minutes ?? input.plan.duration_minutes),
     zoneName: metadata?.zoneName ?? input.router.name
   };
 

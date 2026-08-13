@@ -39,7 +39,7 @@ const emptyPasswordForm: PasswordFormState = {
 
 export function AccountPage() {
   const navigate = useNavigate();
-  const { accountSession, logoutAccount, refreshAccountSession, session } = useAuth();
+  const { accountSession, logoutAccount, refreshAccountSession, saasAccount, session } = useAuth();
   const { database, isInitialized, isPersistent } = useAppDatabase();
   const [account, setAccount] = useState(() => readMainAccountRecord(accountSession?.email ?? ""));
   const accountRepository = useMemo(() => new AccountRepository(database), [database]);
@@ -103,8 +103,12 @@ export function AccountPage() {
       return;
     }
 
-    void routerRepository.countSubscriptionRoutersByAccount(accountSession.accountId).then(setRoutersUsed);
-  }, [accountSession, isInitialized, isPersistent, routerRepository]);
+    const organizationId = saasAccount?.organization.id;
+    void (organizationId
+      ? routerRepository.countSubscriptionRoutersByOrganization(accountSession.accountId, organizationId)
+      : routerRepository.countSubscriptionRoutersByAccount(accountSession.accountId)
+    ).then(setRoutersUsed);
+  }, [accountSession, isInitialized, isPersistent, routerRepository, saasAccount?.organization.id]);
 
   useEffect(() => {
     if (!isPersistent || !isInitialized || !accountSession) {

@@ -8,8 +8,6 @@ import { WireGuardOperatorRecoveryService } from "../../services/recovery";
 import { bootstrapSaasVpn } from "../../services/saas";
 import { EmbeddedVpnProvisioningService } from "../../services/vpn";
 
-const recoveredAccounts = new Set<string>();
-
 export function WireGuardRecoveryBootstrap() {
   const { accountSession, saasAccount, session } = useAuth();
   const { database, isInitialized } = useAppDatabase();
@@ -22,14 +20,10 @@ export function WireGuardRecoveryBootstrap() {
 
   useEffect(() => {
     if (!accountId || !session || !isInitialized || !canUseSecureConnection) return;
-    const recoveryKey = `${accountId}:${saasAccount?.organization.id ?? "legacy"}`;
-    if (recoveredAccounts.has(recoveryKey)) return;
     const scopedAccountId = accountId;
     const provisioning = new EmbeddedVpnProvisioningService();
     let heartbeatTimer: number | null = null;
     let disposed = false;
-    recoveredAccounts.add(recoveryKey);
-
     void recoverExistingTunnel()
       .then((embedded) => {
         if (!embedded || disposed) return;
@@ -40,7 +34,6 @@ export function WireGuardRecoveryBootstrap() {
       .catch(() => {
         // Une panne réseau ou un refus temporaire sera retenté après une
         // reconnexion ou au chargement explicite de la page VPN.
-        recoveredAccounts.delete(recoveryKey);
       });
 
     async function recoverExistingTunnel(): Promise<boolean> {
@@ -49,20 +42,28 @@ export function WireGuardRecoveryBootstrap() {
 
       const networks = new VpnNetworkRepository(database);
       let network = await networks.findByAccount(scopedAccountId);
-      if (!network) {
-        const remote = await bootstrapSaasVpn();
-        network = await networks.create({
-          account_id: scopedAccountId,
-          address_pool: remote.address_pool,
-          id: `vpn-${crypto.randomUUID()}`,
-          name: "Réseau WireGuard TicketPro",
-          provisioning_api_token_encrypted: null,
-          provisioning_api_url: "",
-          server_endpoint: remote.server_endpoint,
-          server_port: remote.server_port,
-          server_public_key: remote.server_public_key,
-          status: "active"
-        });
+      const remote = await bootstrapSaasVpn();
+      const input = {
+        account_id: scopedAccountId,
+        address_pool: remote.address_pool,
+        id: network?.id ?? `vpn-${crypto.randomUUID()}`,
+        name: "Réseau WireGuard TicketPro",
+        provisioning_api_token_encrypted: null,
+        provisioning_api_url: "",
+        server_endpoint: remote.server_endpoint,
+        server_port: remote.server_port,
+        server_public_key: remote.server_public_key,
+        status: "active" as const
+      };
+      if (network) {
+        await networks.update(input);
+        network = {
+          ...network,
+          ...input,
+          updated_at: new Date().toISOString()
+        };
+      } else {
+        network = await networks.create(input);
       }
       await new WireGuardOperatorRecoveryService(database, scopedAccountId).recover(network);
       return false;
@@ -71,7 +72,6 @@ export function WireGuardRecoveryBootstrap() {
     return () => {
       disposed = true;
       if (heartbeatTimer !== null) window.clearInterval(heartbeatTimer);
-      recoveredAccounts.delete(recoveryKey);
     };
   }, [accountId, canUseSecureConnection, database, isInitialized, saasAccount?.organization.id, session?.account_id]);
 

@@ -341,6 +341,8 @@ export function buildTicketPdfInput(input: {
       passwordSecretRef: ticket.password_encrypted,
       username: ticket.username
     })),
+    titleLabel: input.router.name,
+    validityLabel: formatDuration(input.plan.validityMinutes ?? input.plan.durationMinutes),
     zoneName: input.router.name
   };
 }
@@ -358,10 +360,8 @@ export function buildTicketPdfInputFromOptions(input: {
   return {
     ...buildTicketPdfInput(input),
     format: input.options.pdfFormat,
-    // QR intentionally disabled in the generation UI until the captive-portal
-    // authentication flow has been validated end to end.
-    qrCodeEnabled: false,
-    template: input.options.pdfTemplate === "qr" ? "economy" : input.options.pdfTemplate
+    qrCodeEnabled: input.options.generateQrCode || input.options.pdfTemplate === "qr",
+    template: input.options.pdfTemplate
   };
 }
 

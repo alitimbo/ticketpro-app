@@ -28,6 +28,7 @@ export type RouterStateReconciliationResult = {
 
 type RouterStateReconciliationDependencies = {
   backupRouter?: (routerId: string) => Promise<unknown>;
+  organizationId?: string | null;
   policies?: Pick<RouterAccessPolicySyncService, "load">;
 };
 
@@ -39,6 +40,7 @@ export class RouterStateReconciliationService {
   private readonly ticketBatches: TicketBatchRepository;
   private readonly tickets: TicketRepository;
   private readonly backupRouter: (routerId: string) => Promise<unknown>;
+  private readonly organizationId: string | null;
 
   constructor(
     private readonly database: DatabaseClient,
@@ -51,11 +53,14 @@ export class RouterStateReconciliationService {
     this.routers = new RouterRepository(database);
     this.ticketBatches = new TicketBatchRepository(database);
     this.tickets = new TicketRepository(database);
+    this.organizationId = dependencies.organizationId ?? null;
     this.backupRouter = dependencies.backupRouter ?? ((routerId) =>
       new RouterCloudRecoveryService(
         this.database,
         this.session.account_id,
-        this.session.internal_profile_id
+        this.session.internal_profile_id,
+        undefined,
+        dependencies.organizationId ?? null
       ).backupRouter(routerId)
     );
   }
@@ -64,6 +69,12 @@ export class RouterStateReconciliationService {
     router: RouterRecord,
     service: RouterService
   ): Promise<RouterStateReconciliationResult> {
+    if (
+      router.account_id !== this.session.account_id
+      || (this.organizationId !== null && router.organization_id !== this.organizationId)
+    ) {
+      throw new Error("Ce routeur n'appartient pas à l'organisation active.");
+    }
     const connections = await this.connections.listByRouter(router.id);
     const cloudRouterId = routerAccessPolicyCloudId(router, connections);
     const [systemInfo, actualPlans, routerUsers, policyResult] = await Promise.all([
@@ -228,7 +239,9 @@ export class RouterStateReconciliationService {
         account_id: router.account_id,
         activated_at: user.uptime && user.uptime !== "0s" ? new Date().toISOString() : null,
         batch_id: batchId,
-        completed_at: user.status === "expired" ? new Date().toISOString() : null,
+        completed_at: user.status === "expired" || user.status === "exhausted"
+          ? new Date().toISOString()
+          : null,
         created_by_profile: this.session.internal_profile_role,
         created_by_profile_id: this.session.internal_profile_id,
         deleted_at: null,
@@ -244,7 +257,9 @@ export class RouterStateReconciliationService {
         router_id: router.id,
         status:
           user.status === "expired"
-            ? "complété"
+            ? "expiré"
+            : user.status === "exhausted"
+              ? "consommé"
             : user.status === "disabled"
               ? "désactivé"
               : "disponible",

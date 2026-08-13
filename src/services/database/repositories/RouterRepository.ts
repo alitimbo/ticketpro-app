@@ -15,14 +15,15 @@ export class RouterRepository {
     assertAccountProfileOwnership(input.account_id, input.created_by_profile_id);
     await this.database.execute(
       `INSERT INTO routers (
-        id, cloud_router_id, account_id, zone_id, name, label, model, board_name, serial_number, routeros_version,
+        id, cloud_router_id, account_id, organization_id, zone_id, name, label, model, board_name, serial_number, routeros_version,
         local_ip, hotspot_address, notes, api_port, api_ssl_port, username, encrypted_password, connection_mode,
         status, last_seen_at, subscription_counted, created_by_profile_id, sync_status
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)`,
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)`,
       [
         input.id,
         input.cloud_router_id ?? input.id,
         input.account_id,
+        input.organization_id ?? null,
         input.zone_id,
         input.name,
         input.label,
@@ -70,7 +71,9 @@ export class RouterRepository {
 
   async update(input: CreateRouterInput): Promise<RouterRecord> {
     assertAccountProfileOwnership(input.account_id, input.created_by_profile_id);
-    const existing = input.hotspot_address === undefined || input.cloud_router_id === undefined
+    const existing = input.hotspot_address === undefined
+      || input.cloud_router_id === undefined
+      || input.organization_id === undefined
       ? await this.findById(input.id)
       : null;
     const cloudRouterId = input.cloud_router_id === undefined
@@ -79,11 +82,15 @@ export class RouterRepository {
     const hotspotAddress = input.hotspot_address === undefined
       ? existing?.hotspot_address ?? null
       : input.hotspot_address;
+    const organizationId = input.organization_id === undefined
+      ? existing?.organization_id ?? null
+      : input.organization_id;
     const updatedAt = input.updated_at ?? new Date().toISOString();
     await this.database.transaction([
       {
         params: [
           cloudRouterId,
+          organizationId,
           input.name,
           input.label,
           input.model,
@@ -107,12 +114,12 @@ export class RouterRepository {
           input.account_id
         ],
         sql: `UPDATE routers SET
-          cloud_router_id = ?1, name = ?2, label = ?3, model = ?4, board_name = ?5, serial_number = ?6,
-          routeros_version = ?7, local_ip = ?8, hotspot_address = ?9, notes = ?10, api_port = ?11,
-          api_ssl_port = ?12, username = ?13, encrypted_password = ?14, connection_mode = ?15,
-          status = ?16, last_seen_at = ?17, subscription_counted = ?18, sync_status = ?19,
-          updated_at = ?20
-        WHERE id = ?21 AND account_id = ?22`
+          cloud_router_id = ?1, organization_id = ?2, name = ?3, label = ?4, model = ?5,
+          board_name = ?6, serial_number = ?7, routeros_version = ?8, local_ip = ?9,
+          hotspot_address = ?10, notes = ?11, api_port = ?12, api_ssl_port = ?13,
+          username = ?14, encrypted_password = ?15, connection_mode = ?16, status = ?17,
+          last_seen_at = ?18, subscription_counted = ?19, sync_status = ?20, updated_at = ?21
+        WHERE id = ?22 AND account_id = ?23`
       },
       {
         params: [input.local_ip, input.api_port, updatedAt, input.id],
@@ -218,6 +225,17 @@ export class RouterRepository {
     await this.database.transaction(statements);
   }
 
+  async setPreferredConnectionMode(
+    accountId: string,
+    routerId: string,
+    mode: RouterConnectionMode
+  ): Promise<void> {
+    await this.database.execute(
+      "UPDATE routers SET connection_mode = ?1, updated_at = ?2 WHERE id = ?3 AND account_id = ?4",
+      [mode, new Date().toISOString(), routerId, accountId]
+    );
+  }
+
   async findById(id: string): Promise<RouterRecord | null> {
     const rows = await this.database.query<RouterRecord>("SELECT * FROM routers WHERE id = ?1", [id]);
     return rows[0] ?? null;
@@ -234,6 +252,15 @@ export class RouterRepository {
     );
   }
 
+  async listByOrganization(accountId: string, organizationId: string): Promise<RouterRecord[]> {
+    return this.database.query<RouterRecord>(
+      `SELECT * FROM routers
+       WHERE account_id = ?1 AND organization_id = ?2 AND deleted_at IS NULL
+       ORDER BY created_at DESC`,
+      [accountId, organizationId]
+    );
+  }
+
   async findByCloudId(accountId: string, cloudRouterId: string): Promise<RouterRecord | null> {
     const routers = await this.listByAccount(accountId);
     return routers.find((router) => (router.cloud_router_id ?? router.id) === cloudRouterId) ?? null;
@@ -246,6 +273,13 @@ export class RouterRepository {
     );
   }
 
+  async setOrganizationId(accountId: string, routerId: string, organizationId: string): Promise<void> {
+    await this.database.execute(
+      "UPDATE routers SET organization_id = ?1, updated_at = ?2 WHERE id = ?3 AND account_id = ?4",
+      [organizationId, new Date().toISOString(), routerId, accountId]
+    );
+  }
+
   async countSubscriptionRoutersByAccount(accountId: string): Promise<number> {
     const rows = await this.database.query<{ count: number }>(
       "SELECT COUNT(*) as count FROM routers WHERE account_id = ?1 AND subscription_counted = 1 AND deleted_at IS NULL",
@@ -254,12 +288,21 @@ export class RouterRepository {
     return Number(rows[0]?.count ?? 0);
   }
 
+  async countSubscriptionRoutersByOrganization(
+    accountId: string,
+    organizationId: string
+  ): Promise<number> {
+    const rows = await this.listByOrganization(accountId, organizationId);
+    return rows.filter((router) => router.subscription_counted === 1).length;
+  }
+
   private buildRouterInsertStatement(input: CreateRouterInput): DatabaseStatement {
     return {
       params: [
         input.id,
         input.cloud_router_id ?? input.id,
         input.account_id,
+        input.organization_id ?? null,
         input.zone_id,
         input.name,
         input.label,
@@ -282,10 +325,10 @@ export class RouterRepository {
         input.sync_status ?? "local"
       ],
       sql: `INSERT INTO routers (
-        id, cloud_router_id, account_id, zone_id, name, label, model, board_name, serial_number, routeros_version,
+        id, cloud_router_id, account_id, organization_id, zone_id, name, label, model, board_name, serial_number, routeros_version,
         local_ip, hotspot_address, notes, api_port, api_ssl_port, username, encrypted_password, connection_mode,
         status, last_seen_at, subscription_counted, created_by_profile_id, sync_status
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)`
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)`
     };
   }
 

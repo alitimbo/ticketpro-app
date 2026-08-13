@@ -62,7 +62,7 @@ const emptyBlockedDevice: Omit<BlockedDevice, "id"> = {
 };
 
 export function RouterSettingsPage() {
-  const { session } = useAuth();
+  const { saasAccount, session } = useAuth();
   const { routerId = "" } = useParams();
   const [searchParams] = useSearchParams();
   const shouldFocusAntiSharing = searchParams.get("section") === "anti-partage";
@@ -77,9 +77,15 @@ export function RouterSettingsPage() {
   );
   const recoveryService = useMemo(
     () => session
-      ? new RouterCloudRecoveryService(database, session.account_id, session.internal_profile_id)
+      ? new RouterCloudRecoveryService(
+          database,
+          session.account_id,
+          session.internal_profile_id,
+          undefined,
+          saasAccount?.organization.id ?? null
+        )
       : null,
-    [database, session]
+    [database, saasAccount?.organization.id, session]
   );
   const [router, setRouter] = useState<RouterRecord | null>(null);
   const [settings, setSettings] = useState<RouterSettings>(defaultRouterSettings);

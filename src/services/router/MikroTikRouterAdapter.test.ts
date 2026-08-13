@@ -6,7 +6,8 @@ import {
   mergeHotspotLoginBy,
   mergeVoucherLifecycleOnLogin,
   MikroTikRouterAdapter,
-  normalizeMikroTikError
+  normalizeMikroTikError,
+  reconcileVoucherLifecycleComment
 } from "./MikroTikRouterAdapter";
 import type { RouterOsApiRequest, RouterOsApiRow, RouterOsApiTransport } from "./RouterOsApiTransport";
 
@@ -20,8 +21,10 @@ class MockRouterOsTransport implements RouterOsApiTransport {
     const hotspotRemovalTargets: Record<string, string> = {
       "/ip/hotspot/active/remove": "/ip/hotspot/active/print",
       "/ip/hotspot/cookie/remove": "/ip/hotspot/cookie/print",
+      "/ip/hotspot/host/remove": "/ip/hotspot/host/print",
       "/ip/hotspot/user/profile/remove": "/ip/hotspot/user/profile/print",
-      "/ip/hotspot/user/remove": "/ip/hotspot/user/print"
+      "/ip/hotspot/user/remove": "/ip/hotspot/user/print",
+      "/ip/firewall/connection/remove": "/ip/firewall/connection/print"
     };
     const hotspotPrintCommand = hotspotRemovalTargets[request.command];
     if (hotspotPrintCommand) {
@@ -111,7 +114,7 @@ describe("MikroTikRouterAdapter", () => {
 
     await expect(adapter.ensureVoucherLifecycleEngine()).resolves.toEqual({
       clockReady: true,
-      engineVersion: 3,
+      engineVersion: 4,
       managedProfileCount: 1,
       schedulerEnabled: true
     });
@@ -178,12 +181,12 @@ describe("MikroTikRouterAdapter", () => {
 
     expect(transport.calls.filter((call) => call.command === "/system/script/add")).toHaveLength(0);
     expect(transport.calls.find((call) => call.command === "/system/script/set")?.params).toMatchObject({
-      comment: "TicketPro managed voucher lifecycle v3",
+      comment: "TicketPro managed voucher lifecycle v4",
       numbers: "*SC1",
       source: expect.stringContaining("/ip hotspot user remove $tpId")
     });
     expect(transport.calls.find((call) => call.command === "/system/scheduler/set")?.params).toMatchObject({
-      comment: "TicketPro managed voucher lifecycle v3",
+      comment: "TicketPro managed voucher lifecycle v4",
       numbers: "*S1"
     });
   });
@@ -193,6 +196,10 @@ describe("MikroTikRouterAdapter", () => {
       "TicketPro:v1;validity=300;expires=0;state=new;"
     );
     expect(buildVoucherLifecycleComment(null, "Lot local")).toBe("Lot local");
+    expect(reconcileVoucherLifecycleComment(
+      "TicketPro:v1;validity=180;expires=123;state=cleanup-error;",
+      180
+    )).toBe("TicketPro:v1;validity=180;expires=123;state=cleanup-error;");
     const first = mergeVoucherLifecycleOnLogin(':log info "avant";');
     const upgraded = mergeVoucherLifecycleOnLogin(first);
     expect(upgraded).toContain(':log info "avant";');
@@ -203,10 +210,24 @@ describe("MikroTikRouterAdapter", () => {
     const expirationScript = buildVoucherExpirationScript();
     expect(expirationScript).toContain("/ip hotspot active remove");
     expect(expirationScript).toContain("/ip hotspot cookie remove");
+    expect(expirationScript).toContain("/ip hotspot host remove");
+    expect(expirationScript).toContain("/ip firewall connection remove");
+    expect(expirationScript).toContain("/ip hotspot user set $tpId disabled=yes");
+    expect(expirationScript).toContain('tpState "exhausted"');
     expect(expirationScript).toContain("/ip hotspot user remove $tpId");
     expect(expirationScript).toContain("time-consumed");
     expect(expirationScript).toContain("quota-consumed");
-    expect(expirationScript).not.toContain("disabled=yes");
+    expect(expirationScript).toContain("validity-expired");
+    expect(expirationScript).not.toContain("tpShouldRemove");
+    expect(expirationScript).toContain(
+      ':if (($tpExpired = false) && ($tpLimitUptime > 0) && ($tpUptime >= $tpLimitUptime)) do={ :set tpExhausted true; :set tpReason "time-consumed" };'
+    );
+    expect(expirationScript).toContain(
+      ':if (($tpExpired = false) && ($tpLimitBytes > 0) && (($tpBytesIn + $tpBytesOut) >= $tpLimitBytes)) do={ :set tpExhausted true; :set tpReason "quota-consumed" };'
+    );
+    expect(expirationScript.indexOf(':if ($tpExpired = true) do={')).toBeLessThan(
+      expirationScript.indexOf('/ip hotspot user remove $tpId')
+    );
   });
 
   it("active cookie et mac-cookie sans retirer les méthodes Hotspot existantes", () => {
@@ -483,7 +504,7 @@ describe("MikroTikRouterAdapter", () => {
     await expect(adapter.listHotspotUsers()).resolves.toEqual([
       expect.objectContaining({
         downloadedBytes: 4000,
-        status: "expired",
+        status: "exhausted",
         uploadedBytes: 1000,
         username: "654321"
       })
@@ -719,12 +740,24 @@ describe("MikroTikRouterAdapter", () => {
   it("supprime la session, les cookies et le compte Hotspot puis vérifie leur absence", async () => {
     const transport = new MockRouterOsTransport({
       "/ip/hotspot/active/print": [
-        { ".id": "*A1", user: "voucher-1" },
+        { ".id": "*A1", address: "192.168.88.20", "mac-address": "AA:BB:CC:DD:EE:01", user: "voucher-1" },
         { ".id": "*A2", user: "autre-voucher" }
       ],
       "/ip/hotspot/cookie/print": [
-        { ".id": "*C1", user: "voucher-1" },
+        { ".id": "*C1", "mac-address": "AA:BB:CC:DD:EE:01", user: "voucher-1" },
         { ".id": "*C2", user: "autre-voucher" }
+      ],
+      "/ip/hotspot/host/print": [
+        { ".id": "*H1", address: "192.168.88.20", "mac-address": "AA:BB:CC:DD:EE:01" },
+        { ".id": "*H2", address: "192.168.88.21", "mac-address": "AA:BB:CC:DD:EE:02" }
+      ],
+      "/ip/hotspot/ip-binding/print": [
+        { ".id": "*B1", comment: "TicketPro voucher:voucher-1", type: "bypassed" },
+        { ".id": "*B2", comment: "TicketPro infrastructure:antenna-1", type: "bypassed" }
+      ],
+      "/ip/firewall/connection/print": [
+        { ".id": "*F1", "src-address": "192.168.88.20:52100", "dst-address": "1.1.1.1:443" },
+        { ".id": "*F2", "src-address": "192.168.88.21:52100", "dst-address": "1.1.1.1:443" }
       ],
       "/ip/hotspot/user/print": [
         { ".id": "*U1", name: "voucher-1", profile: "plan-1h" },
@@ -741,6 +774,9 @@ describe("MikroTikRouterAdapter", () => {
     expect(removalCalls).toEqual([
       { command: "/ip/hotspot/active/remove", numbers: "*A1" },
       { command: "/ip/hotspot/cookie/remove", numbers: "*C1" },
+      { command: "/ip/hotspot/host/remove", numbers: "*H1" },
+      { command: "/ip/hotspot/ip-binding/remove", numbers: "*B1" },
+      { command: "/ip/firewall/connection/remove", numbers: "*F1" },
       { command: "/ip/hotspot/user/remove", numbers: "*U1" }
     ]);
     expect(await adapter.listHotspotUsers()).toEqual([

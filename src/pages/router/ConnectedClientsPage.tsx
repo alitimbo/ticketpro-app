@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import {
   Ban,
@@ -73,6 +73,8 @@ type Notice = {
   text: string;
 } | null;
 
+const connectedClientsLiveIntervalMs = 5_000;
+
 export function ConnectedClientsPage() {
   const { routerId = "routeur-demo" } = useParams();
   const { session } = useAuth();
@@ -93,6 +95,11 @@ export function ConnectedClientsPage() {
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [selectedClient, setSelectedClient] = useState<ConnectedClientViewModel | null>(null);
   const [availablePlans, setAvailablePlans] = useState<ConnectedClientPlanOption[]>([]);
+  const [isLiveRefreshing, setIsLiveRefreshing] = useState(false);
+  const [liveError, setLiveError] = useState<string | null>(null);
+  const refreshRunningRef = useRef(false);
+  const clientsRef = useRef<ConnectedClientViewModel[]>([]);
+  const liveRouterServiceRef = useRef<{ key: string; service: RouterService } | null>(null);
 
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
   const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
@@ -108,6 +115,7 @@ export function ConnectedClientsPage() {
     [ticketRepository]
   );
   const applyClients = (nextClients: ConnectedClientViewModel[]) => {
+    clientsRef.current = nextClients;
     setClients(nextClients);
     setSelectedClient((current) =>
       current
@@ -116,7 +124,7 @@ export function ConnectedClientsPage() {
     );
   };
 
-  const createService = async () => {
+  const createService = async (logActions = true) => {
     if (!isPersistent) {
       return new RouterService({
         adapter: new FakeRouterAdapter({ latencyMs: 0 }),
@@ -128,29 +136,40 @@ export function ConnectedClientsPage() {
       throw new Error("La base locale n'est pas encore prête.");
     }
 
+    const serviceKey = `${session.account_id}:${routerId}`;
+    if (!logActions && liveRouterServiceRef.current?.key === serviceKey) {
+      return liveRouterServiceRef.current.service;
+    }
+
     const router = await routerRepository.findById(routerId);
     if (!router || router.account_id !== session.account_id) {
       throw new Error("Routeur introuvable dans la base locale.");
     }
 
-    return createPersistedRouterService({
+    const service = await createPersistedRouterService({
       authSession: session,
       connections: await connectionRepository.listByRouter(routerId),
       database,
+      logActions,
       router
     });
+    if (!logActions) liveRouterServiceRef.current = { key: serviceKey, service };
+    return service;
   };
 
-  const loadClients = async () => {
+  const loadClients = async (options: { silent?: boolean; synchronizePolicy?: boolean } = {}) => {
     if (isPersistent && (!isInitialized || !session)) {
       return;
     }
+    if (refreshRunningRef.current) return;
 
-    setIsLoading(true);
-    setNotice(null);
+    refreshRunningRef.current = true;
+    if (options.silent) setIsLiveRefreshing(true);
+    else setIsLoading(true);
+    if (!options.silent) setNotice(null);
 
     try {
-      const service = await createService();
+      const service = await createService(!options.silent);
       const [activeUsers, hotspotUsers, plans, routers] = await Promise.all([
         service.listActiveUsers(),
         service.listHotspotUsers(),
@@ -162,7 +181,7 @@ export function ConnectedClientsPage() {
 
       if (isPersistent) {
         await activeSessionCacheRepository.replaceForRouter(routerId, activeUsers);
-        if (session) {
+        if (session && (options.synchronizePolicy ?? !options.silent)) {
           const connections = persistedRouter
             ? await connectionRepository.listByRouter(routerId)
             : [];
@@ -176,7 +195,10 @@ export function ConnectedClientsPage() {
             ),
             ticketRepository.listByRouter(routerId)
           ]);
-          if (policy.policy.lockVoucherToFirstMac && canManageDeviceBinding) {
+          if (
+            policy.policy.lockVoucherToFirstMac
+            && canManageDeviceBinding
+          ) {
             const bindingResult = await bindingService.synchronize({
               accountId: session.account_id,
               activeUsers,
@@ -209,7 +231,12 @@ export function ConnectedClientsPage() {
       applyClients(liveClients);
       setDataSource("live");
       setLastRefreshAt(formatRefreshDate(new Date()));
+      setLiveError(null);
     } catch (error) {
+      const errorMessage = error instanceof RouterServiceError
+        ? error.message
+        : "Impossible de charger les clients connectés.";
+      setLiveError(errorMessage);
       if (isPersistent) {
         const [router, cachedUsers, ticketRecords, planRecords] = await Promise.all([
           routerRepository.findById(routerId),
@@ -230,25 +257,41 @@ export function ConnectedClientsPage() {
           );
           setDataSource("cache");
           setLastRefreshAt(formatRefreshDate(new Date(cachedUsers[0].cached_at)));
-          setNotice({ status: "error", text: "Routeur hors ligne : affichage du dernier cache local." });
-          setIsLoading(false);
+          if (!options.silent) {
+            setNotice({ status: "error", text: "Routeur hors ligne : affichage du dernier cache local." });
+          }
           return;
         }
       }
-      applyClients([]);
-      setDataSource("none");
-      setLastRefreshAt(null);
-      setNotice({
-        status: "error",
-        text: error instanceof RouterServiceError ? error.message : "Impossible de charger les clients connectés."
-      });
+      if (clientsRef.current.length === 0) {
+        applyClients([]);
+        setDataSource("none");
+        setLastRefreshAt(null);
+      } else {
+        setDataSource("cache");
+      }
+      if (!options.silent) setNotice({ status: "error", text: errorMessage });
     } finally {
-      setIsLoading(false);
+      refreshRunningRef.current = false;
+      if (options.silent) setIsLiveRefreshing(false);
+      else setIsLoading(false);
     }
   };
 
   useEffect(() => {
     void loadClients();
+    const synchronize = () => {
+      if (document.visibilityState === "hidden") return;
+      void loadClients({ silent: true, synchronizePolicy: false });
+    };
+    const interval = window.setInterval(synchronize, connectedClientsLiveIntervalMs);
+    window.addEventListener("focus", synchronize);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", synchronize);
+    };
+    // Repository and organization changes intentionally restart this live loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accessPolicyService, activeSessionCacheRepository, bindingService, canManageDeviceBinding, connectionRepository, database, isInitialized, isPersistent, planRepository, routerId, routerRepository, session, ticketRepository]);
 
   const filteredClients = useMemo(() => filterConnectedClients(clients, filters), [clients, filters]);
@@ -378,14 +421,46 @@ export function ConnectedClientsPage() {
     <div className="page-stack">
       <PageHeader
         actions={
-          <Button disabled={isLoading} icon={RefreshCw} onClick={() => void loadClients()} variant="primary">
-            Rafraîchir
+          <Button
+            className={isLoading || isLiveRefreshing ? "button--loading" : ""}
+            disabled={isLoading || isLiveRefreshing}
+            icon={RefreshCw}
+            onClick={() => void loadClients({ synchronizePolicy: true })}
+            variant="primary"
+          >
+            Synchroniser maintenant
           </Button>
         }
         description="Suivez les utilisateurs actuellement connectés au réseau."
         eyebrow="Routeur"
         title="Clients connectés"
       />
+
+      <Card className={`report-live-card report-live-card--${dataSource === "live" ? "live" : dataSource === "cache" ? "degraded" : "connecting"}`}>
+        <div className="report-live-status">
+          <span className="report-live-status__icon"><Router aria-hidden="true" /></span>
+          <div className="report-live-status__copy">
+            <div className="button-row">
+              <strong>Sessions RouterOS en direct</strong>
+              <Badge status={dataSource === "live" ? "success" : dataSource === "cache" ? "warning" : "active"}>
+                {isLoading || isLiveRefreshing ? "Synchronisation…" : dataSource === "live" ? "En direct" : dataSource === "cache" ? "Mode dégradé" : "Connexion…"}
+              </Badge>
+            </div>
+            <span>
+              {dataSource === "live"
+                ? `Durée, consommation, appareils et sessions relus à ${lastRefreshAt ?? "l'instant"}.`
+                : dataSource === "cache"
+                  ? `Dernières données fiables conservées. ${liveError ?? "Le routeur est momentanément inaccessible."}`
+                  : "Connexion au MikroTik et lecture des sessions actives…"}
+            </span>
+          </div>
+          <div className="report-live-status__facts">
+            <span>Actualisation</span>
+            <strong>5 secondes</strong>
+            <small>Uniquement lorsque cette page est visible</small>
+          </div>
+        </div>
+      </Card>
 
       <div className="stats-grid">
         <StatCard icon={UserRound} label="Connectés" value={String(filteredClients.length)} hint="Clients visibles" />
@@ -621,9 +696,13 @@ function ConnectedClientRow({
       </div>
 
       <div className="client-row__usage">
-        <span><Clock aria-hidden="true" /> {client.uptime}</span>
+        <span><Clock aria-hidden="true" /> Session {client.currentSessionUptime}</span>
+        <span>Utilisé {client.uptime}</span>
         <span>Reste {client.sessionTimeLeft}</span>
         <strong>{formatClientBytes(client.totalBytes)}</strong>
+        {client.consumptionPercent !== null ? (
+          <small>{client.consumptionPercent}% consommé</small>
+        ) : null}
       </div>
 
       <ActionMenu
@@ -681,11 +760,27 @@ function ClientDetailDialog({
           <DetailLine icon={Router} label="Routeur" value={client.routerName} />
           <DetailLine icon={Smartphone} label="Adresse IP" value={client.ipAddress} />
           <DetailLine icon={Laptop} label="Adresse MAC" value={client.macAddress} />
-          <DetailLine icon={Clock} label="Temps connecté" value={client.uptime} />
-          <DetailLine icon={Clock} label="Temps restant" value={client.sessionTimeLeft} />
+          <DetailLine icon={Clock} label="Session actuelle" value={client.currentSessionUptime} />
+          <DetailLine icon={Clock} label="Temps total utilisé" value={client.uptime} />
+          <DetailLine icon={Clock} label="Temps d'utilisation restant" value={client.sessionTimeLeft} />
           <DetailLine icon={Download} label="Download" value={formatClientBytes(client.downloadedBytes)} />
           <DetailLine icon={Upload} label="Upload" value={formatClientBytes(client.uploadedBytes)} />
           <DetailLine icon={Laptop} label="Volume total" value={formatClientBytes(client.totalBytes)} />
+          <DetailLine
+            icon={Download}
+            label="Volume restant"
+            value={client.dataRemainingBytes === null ? "Illimité" : formatClientBytes(client.dataRemainingBytes)}
+          />
+          <DetailLine
+            icon={Clock}
+            label="Expiration de validité"
+            value={client.expiresAt ? formatClientDateTime(client.expiresAt) : "Non définie"}
+          />
+          <DetailLine
+            icon={ShieldCheck}
+            label="Consommation"
+            value={client.consumptionPercent === null ? "Sans limite mesurable" : `${client.consumptionPercent}%`}
+          />
           <DetailLine icon={ShieldCheck} label="Statut ticket" value={ticketStatusLabel(client.ticketStatus)} />
         </dl>
 
@@ -720,7 +815,9 @@ function ticketStatusLabel(status: ConnectedClientViewModel["ticketStatus"]): st
   const labels: Record<ConnectedClientViewModel["ticketStatus"], string> = {
     active: "Actif",
     available: "Disponible",
+    exhausted: "Épuisé",
     disabled: "Désactivé",
+    error: "Erreur de révocation",
     expired: "Expiré",
     unknown: "Non identifié"
   };
@@ -733,5 +830,17 @@ function formatRefreshDate(date: Date): string {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit"
+  });
+}
+
+function formatClientDateTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Non disponible";
+  return date.toLocaleString("fr-FR", {
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    month: "2-digit",
+    year: "numeric"
   });
 }

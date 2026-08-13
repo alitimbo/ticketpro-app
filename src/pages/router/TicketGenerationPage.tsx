@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
-import { CheckCircle2, ChevronLeft, ChevronRight, FileText, Hash, Printer, RefreshCw, Ticket, Wifi } from "lucide-react";
+import { CheckCircle2, ChevronLeft, ChevronRight, FileText, Hash, Printer, RefreshCw, Settings, Ticket, Wifi } from "lucide-react";
 import type { HotspotPlan, HotspotServer, HotspotUser, RouterSummary } from "../../domain/router";
 import type {
   CreateGeneratedFileInput,
@@ -34,7 +34,8 @@ import {
   buildGeneratedTicketPdfRecord,
   generateTicketPdf,
   resolveTicketPdfPassword,
-  type TicketPdfFormat
+  type TicketPdfFormat,
+  type TicketPdfInput
 } from "../../services/pdf";
 import {
   LocalPrintService,
@@ -61,8 +62,6 @@ import {
   quickQuantities,
   roleLabel,
   syncStatusLabel,
-  ticketPdfFormatLabels,
-  ticketPdfTemplateLabels,
   ticketStatusLabel,
   ticketStatuses,
   userToTicketRecord,
@@ -77,11 +76,14 @@ import {
   protectTicketPassword,
   resolveTicketPasswordValue,
   defaultTicketDisplaySettings,
+  normalizeTicketDisplaySettings,
+  resolveTicketTitle,
   TicketDisplaySettingsService,
   type TicketDisplaySettings,
   TicketCodeGenerator
 } from "../../services/tickets";
 import { TauriFileService } from "../../services/files";
+import { TicketDisplaySettingsForm } from "./TicketDisplaySettingsForm";
 
 const stepLabels = [
   "Routeur",
@@ -109,7 +111,10 @@ export function TicketGenerationPage() {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [ownerPhone, setOwnerPhone] = useState<string | null>(null);
+  const [companyName, setCompanyName] = useState<string | null>(null);
   const [displaySettings, setDisplaySettings] = useState<TicketDisplaySettings>(defaultTicketDisplaySettings);
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+  const [showPreviewSettings, setShowPreviewSettings] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [catalogStatus, setCatalogStatus] = useState<RouterCatalogStatus>("loading");
   const [printers, setPrinters] = useState<LocalPrinter[]>([]);
@@ -193,14 +198,16 @@ export function TicketGenerationPage() {
     return serviceForRouter;
   };
 
+  const settingsRouterId = state.selectedRouterId || routerId;
+
   useEffect(() => {
     if (!isInitialized || !session) return undefined;
     let mounted = true;
-    void displaySettingsService.get(session.account_id, routerId).then((settings) => {
+    void displaySettingsService.get(session.account_id, settingsRouterId).then((settings) => {
       if (mounted) setDisplaySettings(settings);
     });
     return () => { mounted = false; };
-  }, [displaySettingsService, isInitialized, routerId, session]);
+  }, [displaySettingsService, isInitialized, session, settingsRouterId]);
 
   useEffect(() => {
     if (!isInitialized || !session) {
@@ -211,10 +218,12 @@ export function TicketGenerationPage() {
     void accountRepository.findById(session.account_id).then((account) => {
       if (mounted) {
         setOwnerPhone(account?.phone?.trim() || null);
+        setCompanyName(account?.company_name?.trim() || null);
       }
     }).catch(() => {
       if (mounted) {
         setOwnerPhone(null);
+        setCompanyName(null);
       }
     });
 
@@ -419,6 +428,10 @@ export function TicketGenerationPage() {
 
   const selectedRouter = routers.find((router) => router.id === state.selectedRouterId) ?? routers[0] ?? null;
   const selectedPlan = plans.find((plan) => plan.id === state.selectedPlanId) ?? null;
+  const selectedHotspotServer = hotspotServers.find((server) => server.name === state.selectedServerName) ?? null;
+  const ticketHotspotAddress = state.selectedServerName === "all"
+    ? selectedRouter?.hotspotAddress?.trim() || ""
+    : selectedHotspotServer?.dnsName?.trim() || selectedRouter?.hotspotAddress?.trim() || "";
   const quantity = getSelectedQuantity(state);
   const summary =
     session && selectedRouter && selectedPlan && Number.isFinite(quantity)
@@ -430,6 +443,24 @@ export function TicketGenerationPage() {
           syncStatus: result?.syncStatus ?? "pending"
         })
       : null;
+  const ticketTitle = selectedRouter
+    ? resolveTicketTitle(displaySettings, selectedRouter.name, companyName)
+    : "Accès WiFi";
+  const ticketContact = displaySettings.showContact
+    ? displaySettings.contactNumber.trim() || ownerPhone?.trim() || ""
+    : "";
+  const previewPdfInput = session && selectedRouter && selectedPlan
+    ? buildCreationPreviewPdfInput({
+        accountId: session.account_id,
+        displaySettings,
+        hotspotAddress: ticketHotspotAddress,
+        options: state.options,
+        plan: selectedPlan,
+        router: selectedRouter,
+        titleLabel: ticketTitle,
+        ownerPhone: ticketContact
+      })
+    : null;
 
   const updateState = (partial: Partial<TicketGenerationState>) => {
     setError(null);
@@ -437,9 +468,47 @@ export function TicketGenerationPage() {
     setState((current) => ({ ...current, ...partial }));
   };
 
+  const updateDisplaySettings = (next: TicketDisplaySettings) => {
+    const normalized = normalizeTicketDisplaySettings(next);
+    setDisplaySettings(normalized);
+    setState((current) => ({
+      ...current,
+      options: {
+        ...current.options,
+        generateQrCode: normalized.showQrCode,
+        pdfFormat: "a4",
+        pdfTemplate: normalized.showQrCode ? "qr" : "economy"
+      }
+    }));
+    if (session && settingsRouterId) {
+      void displaySettingsService.save(session.account_id, settingsRouterId, normalized).catch(() => {
+        setError("Les paramètres du ticket n'ont pas pu être mémorisés localement.");
+      });
+    }
+  };
+
+  const openCreationPreview = () => {
+    const validationError = validateTicketGeneration(state, routers, plans, hotspotServers);
+    if (validationError || !selectedPlan || !selectedRouter || !session) {
+      setError(validationError ?? "La prévisualisation n'est pas prête.");
+      return;
+    }
+    if (!ticketHotspotAddress) {
+      setError("Le profil Hotspot sélectionné ne fournit aucun DNS. Configurez son DNS captif avant de continuer.");
+      return;
+    }
+    if (displaySettings.titleMode === "custom" && !displaySettings.customTitle.trim()) {
+      setError("Renseignez le titre personnalisé du voucher.");
+      return;
+    }
+    setShowPreviewSettings(false);
+    setIsPreviewOpen(true);
+    setError(null);
+  };
+
   const goNext = () => {
     if (state.step === 5) {
-      void generateTickets();
+      openCreationPreview();
       return;
     }
 
@@ -487,15 +556,10 @@ export function TicketGenerationPage() {
       return;
     }
 
-    if (isPersistent && !selectedRouter.hotspotAddress?.trim()) {
+    if (isPersistent && !ticketHotspotAddress) {
       setError("Renseignez et enregistrez l'adresse Hotspot dans Paramètres routeur avant de créer les tickets.");
       return;
     }
-    if (isPersistent && !ownerPhone?.trim()) {
-      setError("Renseignez le téléphone du propriétaire dans Mon compte avant de créer les tickets.");
-      return;
-    }
-
     setIsGenerating(true);
     setError(null);
     setMessage(null);
@@ -617,10 +681,15 @@ export function TicketGenerationPage() {
         try {
           const createdUser = await generationService.createHotspotUser({
             comment: `Lot ${batchId}`,
+            limitBytesTotal: selectedPlan.dataLimitMb === null
+              ? null
+              : Math.round(selectedPlan.dataLimitMb * 1024 * 1024),
+            limitUptime: minutesToRouterOsDuration(selectedPlan.durationMinutes),
             passwordSecretRef: credential.passwordSecretRef,
             planId: state.selectedPlanId,
             serverName: selectedRemoteServer,
-            username: credential.username
+            username: credential.username,
+            validityMinutes: selectedPlan.validityMinutes ?? selectedPlan.durationMinutes
           });
 
           const succeededTicket = userToTicketRecord({
@@ -731,11 +800,15 @@ export function TicketGenerationPage() {
         totalValue: selectedPlan.priceHint === null ? null : selectedPlan.priceHint * requestedQuantity
       });
       setState((current) => ({ ...current, step: 6 }));
+      setIsPreviewOpen(false);
+      if (failedTickets.length > 0) {
+        setError(`${failedTickets.length} voucher(s) n'ont pas été confirmés sur RouterOS. Ils restent en erreur de synchronisation.`);
+      }
       setMessage(
-        pdfError
+        failedTickets.length > 0
+          ? `${succeededTickets.length} ticket(s) réellement confirmés sur RouterOS. ${firstCreationError ?? ""}`
+          : pdfError
           ? `${succeededTickets.length} ticket(s) créé(s). PDF à reprendre : ${pdfError}`
-          : failedTickets.length > 0
-          ? `${succeededTickets.length} ticket(s) créés, ${failedTickets.length} en attente. ${firstCreationError ?? "Reprenez-les depuis Tickets."}`
           : `${succeededTickets.length} ticket(s) créés avec succès${createdPdf ? " et PDF enregistré." : "."}`
       );
     } catch (generationError) {
@@ -745,8 +818,7 @@ export function TicketGenerationPage() {
     }
   };
 
-  const primaryActionLabel =
-    state.step === 5 ? `Créer ${Number.isFinite(quantity) ? quantity : 0} tickets` : "Continuer";
+  const primaryActionLabel = state.step === 5 ? "Prévisualiser et continuer" : "Continuer";
 
   const createAndStorePdf = async (
     batch: CreateTicketBatchInput,
@@ -757,14 +829,9 @@ export function TicketGenerationPage() {
     if (!selectedPlan || !selectedRouter) {
       throw new Error("Le plan ou le routeur du PDF est introuvable.");
     }
-    if (isPersistent && !selectedRouter.hotspotAddress?.trim()) {
+    if (isPersistent && !ticketHotspotAddress) {
       throw new Error(
         "Configurez d'abord l'adresse Hotspot dans Paramètres routeur afin qu'elle figure sur chaque ticket."
-      );
-    }
-    if (isPersistent && !ownerPhone?.trim()) {
-      throw new Error(
-        "Renseignez le téléphone du propriétaire dans Mon compte avant de générer le PDF."
       );
     }
     const generatedAt = new Date().toISOString();
@@ -773,17 +840,23 @@ export function TicketGenerationPage() {
       fileName,
       generatedAt,
       options: state.options,
-      ownerPhone: ownerPhone?.trim() || "Contact propriétaire",
+      ownerPhone: ticketContact,
       plan: selectedPlan,
-      router: selectedRouter,
+      router: { ...selectedRouter, hotspotAddress: ticketHotspotAddress },
       tickets: pdfTickets
     });
-    const pdfInput = {
+    const pdfInput: TicketPdfInput = {
       ...basePdfInput,
       fileName,
-      format: output?.format ?? basePdfInput.format,
+      format: output?.format ?? "a4",
       displaySettings,
+      ownerPhone: ticketContact,
+      priceLabel: selectedPlan.priceHint === null || !displaySettings.showPrice
+        ? null
+        : `${selectedPlan.priceHint.toLocaleString("fr-FR")} ${displaySettings.currency.trim() || "CFA"}`,
       qrCodeEnabled: displaySettings.showQrCode,
+      template: displaySettings.showQrCode ? "qr" : "economy",
+      titleLabel: ticketTitle,
       tickets: await mapWithConcurrency(
         pdfTickets,
         8,
@@ -965,8 +1038,8 @@ export function TicketGenerationPage() {
     <div className="page-stack">
       <PageHeader
         actions={
-          <Button disabled={isGenerating || state.step !== 5} icon={Ticket} onClick={() => void generateTickets()} size="large" variant="primary">
-            Créer les tickets
+          <Button disabled={isGenerating || state.step !== 5} icon={FileText} onClick={openCreationPreview} size="large" variant="primary">
+            Prévisualiser et continuer
           </Button>
         }
         description="Assistant rapide pour créer un lot de tickets numériques à partir d'un plan."
@@ -1074,6 +1147,25 @@ export function TicketGenerationPage() {
           </Button>
         )}
       </div>
+
+      <TicketCreationPreviewDialog
+        companyName={companyName}
+        displaySettings={displaySettings}
+        isGenerating={isGenerating}
+        onBack={() => {
+          if (!isGenerating) setIsPreviewOpen(false);
+        }}
+        onConfirm={() => void generateTickets()}
+        onSettings={() => setShowPreviewSettings((current) => !current)}
+        onSettingsChange={updateDisplaySettings}
+        open={isPreviewOpen}
+        plan={selectedPlan}
+        previewInput={previewPdfInput}
+        quantity={quantity}
+        router={selectedRouter}
+        serverName={state.selectedServerName}
+        showSettings={showPreviewSettings}
+      />
     </div>
   );
 }
@@ -1312,35 +1404,12 @@ function StepOptions({
             le modèle pour une réactivation future après validation du parcours captif. */}
         {/* Le PDF est obligatoire et automatiquement archivé dans Fichiers. */}
       </div>
-      <div className="router-form-grid pdf-options-grid">
-        <label className="form-field">
-          Format PDF
-          <select
-            value={state.options.pdfFormat}
-            onChange={(event) => updateOptions({ pdfFormat: event.target.value as TicketGenerationState["options"]["pdfFormat"] })}
-          >
-            {Object.entries(ticketPdfFormatLabels).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="form-field">
-          Template
-          <select
-            value={state.options.pdfTemplate}
-            onChange={(event) => updateOptions({ pdfTemplate: event.target.value as TicketGenerationState["options"]["pdfTemplate"] })}
-          >
-            {Object.entries(ticketPdfTemplateLabels)
-              .filter(([value]) => value !== "qr")
-              .map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-          </select>
-        </label>
+      <div className="ticket-generation-format-note">
+        <FileText aria-hidden="true" />
+        <div>
+          <strong>PDF A4 obligatoire - 40 tickets par page</strong>
+          <span>Le choix avec ou sans QR se fait dans « Paramètres du ticket » avant la confirmation.</span>
+        </div>
       </div>
     </Card>
   );
@@ -1408,6 +1477,119 @@ function StepConfirmation({
         </div>
       </Card>
 
+    </div>
+  );
+}
+
+function TicketCreationPreviewDialog({
+  companyName,
+  displaySettings,
+  isGenerating,
+  onBack,
+  onConfirm,
+  onSettings,
+  onSettingsChange,
+  open,
+  plan,
+  previewInput,
+  quantity,
+  router,
+  serverName,
+  showSettings
+}: {
+  companyName: string | null;
+  displaySettings: TicketDisplaySettings;
+  isGenerating: boolean;
+  onBack: () => void;
+  onConfirm: () => void;
+  onSettings: () => void;
+  onSettingsChange: (value: TicketDisplaySettings) => void;
+  open: boolean;
+  plan: HotspotPlan | null;
+  previewInput: TicketPdfInput | null;
+  quantity: number;
+  router: RouterSummary | null;
+  serverName: string;
+  showSettings: boolean;
+}) {
+  if (!open || !plan || !router || !previewInput) return null;
+
+  return (
+    <div className="dialog-backdrop ticket-creation-preview-backdrop" role="presentation">
+      <section
+        aria-busy={isGenerating}
+        aria-labelledby="ticket-creation-preview-title"
+        aria-modal="true"
+        className="router-form-dialog ticket-creation-preview-dialog"
+        role="dialog"
+      >
+        <header className="connection-dialog__header">
+          <div className="router-card__icon"><FileText aria-hidden="true" /></div>
+          <div>
+            <h2 id="ticket-creation-preview-title">Aperçu avant création</h2>
+            <p>Aucun utilisateur MikroTik n'est créé tant que vous n'avez pas confirmé.</p>
+          </div>
+        </header>
+
+        <div className={`ticket-creation-preview-layout ${showSettings ? "ticket-creation-preview-layout--settings" : ""}`}>
+          <div className="ticket-creation-preview-main">
+            <div className="ticket-creation-preview-summary">
+              <SummaryItem label="Routeur" value={router.name} />
+              <SummaryItem label="Serveur Hotspot" value={serverName === "all" ? "All" : serverName} />
+              <SummaryItem label="Forfait" value={plan.name} />
+              <SummaryItem label="Quantité" value={`${quantity} ticket(s)`} />
+              <SummaryItem label="Durée d'utilisation" value={formatPlanDurationLabel(plan.durationMinutes)} />
+              <SummaryItem label="Durée de validité" value={formatPlanDurationLabel(plan.validityMinutes ?? plan.durationMinutes)} />
+              <SummaryItem label="Prix" value={previewInput.priceLabel ?? "Non défini"} />
+              <SummaryItem label="Format" value={displaySettings.showQrCode ? "Économique avec QR" : "Économique sans QR"} />
+              <SummaryItem label="Mise en page" value="40 par page - 5 colonnes × 8 lignes" />
+            </div>
+            <TicketPdfPreviewFrame input={previewInput} />
+          </div>
+
+          {showSettings ? (
+            <aside className="ticket-creation-preview-settings">
+              <TicketDisplaySettingsForm
+                companyName={companyName}
+                onChange={onSettingsChange}
+                value={displaySettings}
+              />
+            </aside>
+          ) : null}
+        </div>
+
+        <div className="confirm-dialog__actions ticket-creation-preview-actions">
+          <Button disabled={isGenerating} icon={ChevronLeft} onClick={onBack} variant="ghost">Retour et modifier</Button>
+          <Button disabled={isGenerating} icon={Settings} onClick={onSettings} variant="secondary">
+            {showSettings ? "Masquer les paramètres" : "Paramètres du ticket"}
+          </Button>
+          <Button disabled={isGenerating} icon={Ticket} onClick={onConfirm} variant="primary">
+            {isGenerating ? "Création sur RouterOS…" : "Confirmer et créer"}
+          </Button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function TicketPdfPreviewFrame({ input }: { input: TicketPdfInput }) {
+  const [url, setUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    const bytes = generateTicketPdf(input);
+    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    const nextUrl = URL.createObjectURL(new Blob([buffer], { type: "application/pdf" }));
+    setUrl(nextUrl);
+    return () => URL.revokeObjectURL(nextUrl);
+  }, [input]);
+
+  return (
+    <div className="ticket-pdf-preview-frame">
+      <div className="ticket-pdf-preview-frame__heading">
+        <strong>Aperçu fidèle du PDF A4</strong>
+        <span>Les codes définitifs remplaceront XXXXXX après confirmation.</span>
+      </div>
+      {url ? <iframe src={`${url}#toolbar=0&navpanes=0&view=FitH`} title="Aperçu PDF des vouchers" /> : null}
     </div>
   );
 }
@@ -1652,7 +1834,9 @@ function buildPrintTicketFromGeneratedTicket(
   return {
     batchId,
     code: ticket.username,
-    contactLabel: displaySettings?.showContact === false ? undefined : ownerPhone?.trim() || undefined,
+    contactLabel: displaySettings?.showContact
+      ? displaySettings.contactNumber.trim() || ownerPhone?.trim() || undefined
+      : undefined,
     dataLimitLabel: plan.dataLimitMb ? `${plan.dataLimitMb} MB` : null,
     durationLabel: plan.durationMinutes >= 60 && plan.durationMinutes % 60 === 0 ? `${plan.durationMinutes / 60} h` : `${plan.durationMinutes} min`,
     hotspotAddress: displaySettings?.showInstructions === false ? undefined : hotspotAddress?.trim() || undefined,
@@ -1664,6 +1848,50 @@ function buildPrintTicketFromGeneratedTicket(
     planName: plan.name,
     priceLabel: displaySettings?.showPrice === false || plan.priceHint === null ? null : `${plan.priceHint} CFA`,
     zoneName
+  };
+}
+
+function buildCreationPreviewPdfInput(input: {
+  accountId: string;
+  displaySettings: TicketDisplaySettings;
+  hotspotAddress: string;
+  options: TicketGenerationState["options"];
+  ownerPhone: string;
+  plan: HotspotPlan;
+  router: RouterSummary;
+  titleLabel: string;
+}): TicketPdfInput {
+  const username = "X".repeat(Math.max(3, Math.min(12, input.options.codeLength)));
+  const password = input.options.usernameEqualsPassword ? username : "Y".repeat(username.length);
+  const currency = input.displaySettings.currency.trim() || "CFA";
+  return {
+    accountId: input.accountId,
+    batchId: "preview-only",
+    createdByProfile: "preview",
+    createdByProfileId: "preview",
+    dataLimitLabel: input.plan.dataLimitMb ? `${input.plan.dataLimitMb} MB` : null,
+    displaySettings: input.displaySettings,
+    durationLabel: formatPlanDurationLabel(input.plan.durationMinutes),
+    fileName: "apercu-ticketpro.pdf",
+    format: "a4",
+    generatedAt: new Date().toISOString(),
+    hotspotAddress: input.hotspotAddress,
+    ownerPhone: input.ownerPhone,
+    planName: input.plan.name,
+    priceLabel: input.plan.priceHint === null || !input.displaySettings.showPrice
+      ? null
+      : `${input.plan.priceHint.toLocaleString("fr-FR")} ${currency}`,
+    qrCodeEnabled: input.displaySettings.showQrCode,
+    routerId: input.router.id,
+    template: input.displaySettings.showQrCode ? "qr" : "economy",
+    tickets: Array.from({ length: 40 }, () => ({
+      password,
+      passwordSecretRef: `preview:///${username}/password`,
+      username
+    })),
+    titleLabel: input.titleLabel,
+    validityLabel: formatPlanDurationLabel(input.plan.validityMinutes ?? input.plan.durationMinutes),
+    zoneName: input.router.name
   };
 }
 
@@ -1711,6 +1939,16 @@ function formatPlanDurationLabel(minutes: number): string {
   if (minutes >= 1440 && minutes % 1440 === 0) return `${minutes / 1440} j`;
   if (minutes >= 60 && minutes % 60 === 0) return `${minutes / 60} h`;
   return `${minutes} min`;
+}
+
+function minutesToRouterOsDuration(minutes: number): string {
+  const normalized = Math.max(1, Math.round(minutes));
+  const days = Math.floor(normalized / 1440);
+  const hours = Math.floor((normalized % 1440) / 60);
+  const remainingMinutes = normalized % 60;
+  return [days ? `${days}d` : "", hours ? `${hours}h` : "", remainingMinutes ? `${remainingMinutes}m` : ""]
+    .filter(Boolean)
+    .join("") || "1m";
 }
 
 function catalogSlug(value: string): string {

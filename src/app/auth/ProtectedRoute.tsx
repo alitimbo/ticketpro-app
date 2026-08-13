@@ -3,6 +3,7 @@ import { Navigate, Outlet, useParams } from "react-router-dom";
 import type { Permission } from "../../domain/auth";
 import { getDefaultPathForRole } from "../../services/auth";
 import { RouterRepository, useAppDatabase } from "../../services/database";
+import { canAccessRouterInOrganization } from "../../services/access/routerOrganizationScope";
 import { useAuth } from "./AuthProvider";
 
 type ProtectedRouteProps = {
@@ -26,13 +27,9 @@ export function ProtectedRoute({ permissions = [], requireSubscription = true }:
     () => saasAccount?.user.router_access.router_ids ?? [],
     [saasAccount]
   );
-  const requiresCloudIdentityLookup = Boolean(
-    routerId
-    && saasAccount?.user.router_access.mode === "selected"
-    && !selectedRouterIds.includes(routerId)
-  );
-  const routerAccessKey = requiresCloudIdentityLookup
-    ? `${accountSession?.accountId ?? session?.account_id ?? ""}:${routerId}:${selectedRouterIds.join(",")}`
+  const requiresRouterScopeLookup = Boolean(routerId && saasAccount?.organization.id);
+  const routerAccessKey = requiresRouterScopeLookup
+    ? `${accountSession?.accountId ?? session?.account_id ?? ""}:${saasAccount?.organization.id ?? ""}:${routerId}:${saasAccount?.user.router_access.mode ?? ""}:${selectedRouterIds.join(",")}`
     : "direct";
   const [resolvedRouterAccess, setResolvedRouterAccess] = useState<{
     allowed: boolean;
@@ -40,7 +37,7 @@ export function ProtectedRoute({ permissions = [], requireSubscription = true }:
   }>({ allowed: false, key: "" });
 
   useEffect(() => {
-    if (!requiresCloudIdentityLookup || !routerId) {
+    if (!requiresRouterScopeLookup || !routerId) {
       setResolvedRouterAccess({ allowed: true, key: routerAccessKey });
       return;
     }
@@ -50,11 +47,13 @@ export function ProtectedRoute({ permissions = [], requireSubscription = true }:
     void routerRepository.findById(routerId).then((router) => {
       if (!mounted) return;
       setResolvedRouterAccess({
-        allowed: Boolean(
-          router
-          && router.account_id === accountId
-          && selectedRouterIds.includes(router.cloud_router_id ?? router.id)
-        ),
+        allowed: canAccessRouterInOrganization({
+          accountId,
+          accessMode: saasAccount?.user.router_access.mode ?? "selected",
+          organizationId: saasAccount?.organization.id ?? "",
+          router,
+          selectedRouterIds
+        }),
         key: routerAccessKey
       });
     }).catch(() => {
@@ -66,10 +65,12 @@ export function ProtectedRoute({ permissions = [], requireSubscription = true }:
   }, [
     accountSession?.accountId,
     isInitialized,
-    requiresCloudIdentityLookup,
+    requiresRouterScopeLookup,
     routerAccessKey,
     routerId,
     routerRepository,
+    saasAccount?.organization.id,
+    saasAccount?.user.router_access.mode,
     selectedRouterIds,
     session?.account_id
   ]);
@@ -86,11 +87,11 @@ export function ProtectedRoute({ permissions = [], requireSubscription = true }:
     return <Navigate replace to="/abonnement" />;
   }
 
-  if (requiresCloudIdentityLookup && resolvedRouterAccess.key !== routerAccessKey) {
+  if (requiresRouterScopeLookup && resolvedRouterAccess.key !== routerAccessKey) {
     return <main className="login-page"><p>Vérification de l'accès au routeur…</p></main>;
   }
 
-  if (requiresCloudIdentityLookup && !resolvedRouterAccess.allowed) {
+  if (requiresRouterScopeLookup && !resolvedRouterAccess.allowed) {
     return <Navigate replace to="/routeurs" />;
   }
 

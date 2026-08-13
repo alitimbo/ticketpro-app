@@ -29,13 +29,15 @@ describe("RouterCloudRecoveryService", () => {
       database,
       "account-recovery",
       "account-recovery:profile-admin",
-      cloud
+      cloud,
+      "organization-recovery"
     );
     const concurrentService = new RouterCloudRecoveryService(
       database,
       "account-recovery",
       "account-recovery:profile-admin",
-      cloud
+      cloud,
+      "organization-recovery"
     );
 
     const [result, concurrentResult] = await Promise.all([
@@ -54,6 +56,7 @@ describe("RouterCloudRecoveryService", () => {
     expect(router).toMatchObject({
       hotspot_address: "wifi.client.test",
       notes: "",
+      organization_id: "organization-recovery",
       serial_number: "SERIAL-CLOUD-1",
       status: "warning"
     });

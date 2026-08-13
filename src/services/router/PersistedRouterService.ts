@@ -14,11 +14,14 @@ export async function createPersistedRouterService(input: {
   authSession?: AuthSession | null;
   logger?: RouterActionLogger;
   database?: DatabaseClient;
+  logActions?: boolean;
 }): Promise<RouterService> {
   const { router, connections = [] } = input;
   const password = await resolvePersistedRouterPassword(router.encrypted_password);
 
-  const databaseLogger = input.database ? new DatabaseRouterActionLogger(input.database) : null;
+  const databaseLogger = input.database && input.logActions !== false
+    ? new DatabaseRouterActionLogger(input.database)
+    : null;
   const logger = input.logger || databaseLogger
     ? {
         write: async (log: Parameters<RouterActionLogger["write"]>[0]) => {

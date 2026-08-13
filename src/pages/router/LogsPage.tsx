@@ -64,7 +64,7 @@ type Notice = {
 
 export function LogsPage() {
   const { routerId = "routeur" } = useParams();
-  const { session } = useAuth();
+  const { saasAccount, session } = useAuth();
   const { database, isInitialized, isPersistent } = useAppDatabase();
   const [logs, setLogs] = useState<AppLogEntry[]>(() =>
     isPersistent ? [] : createDemoLogs()
@@ -101,7 +101,9 @@ export function LogsPage() {
       await logRetentionService.runAutomatic(session.account_id);
       const [records, routers, policy] = await Promise.all([
         appLogRepository.listByAccount(session.account_id),
-        routerRepository.listByAccount(session.account_id),
+        saasAccount?.organization.id
+          ? routerRepository.listByOrganization(session.account_id, saasAccount.organization.id)
+          : routerRepository.listByAccount(session.account_id),
         logRetentionService.getPolicy(session.account_id)
       ]);
       const eligible = await logRetentionService.countEligible(
@@ -109,7 +111,10 @@ export function LogsPage() {
         policy.days
       );
       const routerNames = new Map(routers.map((router) => [router.id, router.name]));
-      setLogs(records.map((record) => appLogFromRecord(record, routerNames)));
+      const routerIds = new Set(routers.map((router) => router.id));
+      setLogs(records
+        .filter((record) => record.router_id !== null && routerIds.has(record.router_id))
+        .map((record) => appLogFromRecord(record, routerNames)));
       setRetentionDays(policy.days);
       setEligibleForCleanup(eligible);
       setLastCleanupAt(policy.lastCleanupAt);
@@ -133,6 +138,7 @@ export function LogsPage() {
     isPersistent,
     logRetentionService,
     routerRepository,
+    saasAccount?.organization.id,
     session
   ]);
 

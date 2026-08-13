@@ -19,6 +19,8 @@ export type SyncableLocalTicket = {
   mikrotikId: string | null;
   passwordSecretRef: string;
   planId: string;
+  planDurationMinutes?: number;
+  dataLimitMb?: number | null;
   planProfileName?: string;
   planValidityMinutes?: number;
   serverName?: string;
@@ -115,6 +117,22 @@ export class RouterTicketSyncService {
       return report;
     }
 
+    if (!canSafelyRecreateTicket(ticket)) {
+      const updates = report.updates.map((item) =>
+        item.id === ticket.id ? { ...item, status: "erreur_sync", syncStatus: "error" as const } : item
+      );
+      return {
+        ...report,
+        logs: [{
+          level: "error",
+          message: "Ce ticket a déjà été utilisé ou activé. TicketPro refuse de le recréer pour ne pas réinitialiser ses compteurs.",
+          ticketCode: ticket.code
+        }, ...report.logs],
+        summary: buildSummary(updates, report.localMissing),
+        updates
+      };
+    }
+
     try {
       const created = await this.routerService.createHotspotUser(localTicketToDraft(ticket));
       const updates = report.updates.map((item) =>
@@ -122,6 +140,8 @@ export class RouterTicketSyncService {
           ? {
               ...item,
               mikrotikId: created.id,
+              routerDeletedAt: null,
+              status: ticket.status,
               syncStatus: "router_synced" as const
             }
           : item
@@ -267,12 +287,30 @@ export class RouterTicketSyncService {
     const logs = [...initialReport.logs];
 
     for (const ticket of missingTickets) {
+      if (!canSafelyRecreateTicket(ticket)) {
+        const index = updates.findIndex((update) => update.id === ticket.id);
+        if (index >= 0) {
+          updates[index] = { ...updates[index], status: "erreur_sync", syncStatus: "error" };
+        }
+        logs.unshift({
+          level: "error",
+          message: "Réparation refusée : un ticket déjà activé ne peut jamais être recréé avec des compteurs remis à zéro.",
+          ticketCode: ticket.code
+        });
+        continue;
+      }
       try {
         const created = await this.routerService.createHotspotUser(localTicketToDraft(ticket));
         const index = updates.findIndex((update) => update.id === ticket.id);
 
         if (index >= 0) {
-          updates[index] = { ...updates[index], mikrotikId: created.id, syncStatus: "router_synced" };
+          updates[index] = {
+            ...updates[index],
+            mikrotikId: created.id,
+            routerDeletedAt: null,
+            status: ticket.status,
+            syncStatus: "router_synced"
+          };
         }
 
         logs.unshift({ level: "info", message: "Ticket recréé sur le routeur.", ticketCode: ticket.code });
@@ -333,7 +371,9 @@ export function compareLocalAndRouterTickets(
     if (!routerUser) {
       const synchronizedAt = new Date().toISOString();
       const manuallyDeleted = ticket.status === "supprimé";
-      const automaticallyCleaned = isExpectedRouterCleanup(ticket, Date.parse(synchronizedAt));
+      const residualSession = Boolean(activeUser);
+      const automaticallyCleaned = !residualSession
+        && isExpectedRouterCleanup(ticket, Date.parse(synchronizedAt));
       updates.push({
         archivedAt: automaticallyCleaned ? ticket.archivedAt ?? synchronizedAt : ticket.archivedAt,
         completedAt: automaticallyCleaned
@@ -341,15 +381,21 @@ export function compareLocalAndRouterTickets(
           : ticket.completedAt,
         id: ticket.id,
         lastRouterSyncAt: synchronizedAt,
-        routerDeletedAt: ticket.routerDeletedAt ?? synchronizedAt,
-        status: manuallyDeleted ? "supprimé" : automaticallyCleaned ? "archivé" : "supprimé_routeur",
-        syncStatus: automaticallyCleaned ? "router_synced" : "router_missing"
+        routerDeletedAt: manuallyDeleted || automaticallyCleaned
+          ? ticket.routerDeletedAt ?? synchronizedAt
+          : ticket.routerDeletedAt,
+        status: manuallyDeleted || automaticallyCleaned ? "supprimé" : "erreur_sync",
+        syncStatus: manuallyDeleted || automaticallyCleaned ? "router_synced" : "router_missing"
       });
       logs.push({
-        level: automaticallyCleaned ? "info" : "warning",
-        message: automaticallyCleaned
+        level: manuallyDeleted || automaticallyCleaned ? "info" : "error",
+        message: residualSession
+          ? "Le compte Hotspot est absent mais une session réseau résiduelle existe encore. Suppression non confirmée."
+          : manuallyDeleted
+          ? "Suppression du voucher confirmée sur RouterOS."
+          : automaticallyCleaned
           ? "Voucher arrivé en fin de vie, supprimé de RouterOS et conservé dans les archives TicketPro."
-          : "Ticket local absent du routeur.",
+          : "Ticket absent de RouterOS avant la fin de sa validité. Aucune recréation automatique n'est autorisée.",
         ticketCode: ticket.code
       });
       return;
@@ -360,9 +406,8 @@ export function compareLocalAndRouterTickets(
       : Boolean(ticket.planId && routerUser.planId && ticket.planId !== routerUser.planId);
 
     const usage = deriveTicketRuntime(routerUser, activeUser);
-    const terminal = usage.status === "consommé" || usage.status === "expiré";
     updates.push({
-      archivedAt: terminal ? ticket.archivedAt ?? new Date().toISOString() : ticket.archivedAt,
+      archivedAt: ticket.archivedAt,
       activatedAt:
         activeUser || routerOsDurationHasElapsed(routerUser.uptime)
           ? ticket.activatedAt ?? inferActivationAt(usage.expiresAt, ticket.planValidityMinutes) ?? new Date().toISOString()
@@ -440,7 +485,7 @@ function routerOsDurationHasElapsed(value: string | null | undefined): boolean {
 }
 
 function isExpectedRouterCleanup(ticket: SyncableLocalTicket, nowMs: number): boolean {
-  if (["consommé", "expiré", "archivé"].includes(ticket.status)) {
+  if (ticket.status === "archivé" || Boolean(ticket.archivedAt)) {
     return true;
   }
 
@@ -458,10 +503,7 @@ function isExpectedRouterCleanup(ticket: SyncableLocalTicket, nowMs: number): bo
     return true;
   }
 
-  return Boolean(
-    ticket.activatedAt
-    && (ticket.remainingSeconds === 0 || ticket.dataRemainingBytes === 0)
-  );
+  return false;
 }
 
 function deriveTicketRuntime(user: HotspotUser, active: ActiveHotspotUser | undefined): {
@@ -492,14 +534,14 @@ function deriveTicketRuntime(user: HotspotUser, active: ActiveHotspotUser | unde
     dataRemainingBytes,
     expiresAt,
     remainingSeconds,
-    status: active
-      ? "en_cours_utilisation"
-      : quotaConsumed || timeConsumed
+    status: user.status === "error"
+      ? "erreur_sync"
+      : lifecycleExpired || user.status === "expired"
+      ? "expiré"
+      : quotaConsumed || timeConsumed || user.status === "exhausted"
         ? "consommé"
-        : lifecycleExpired
-          ? "expiré"
-          : user.status === "expired"
-            ? "expiré"
+        : active
+          ? "en_cours_utilisation"
           : user.status === "disabled"
             ? "désactivé"
               : uptimeSeconds > 0 ? "activé" : "disponible",
@@ -548,11 +590,41 @@ export function syncStatusLabel(status: RouterTicketSyncStatus): string {
 function localTicketToDraft(ticket: SyncableLocalTicket): HotspotUserDraft {
   return {
     comment: `Resynchronisation lot ${ticket.batchId}`,
+    limitBytesTotal: ticket.dataLimitMb && ticket.dataLimitMb > 0
+      ? Math.round(ticket.dataLimitMb * 1024 * 1024)
+      : null,
+    limitUptime: minutesToRouterOsDuration(ticket.planDurationMinutes),
     passwordSecretRef: ticket.passwordSecretRef,
     planId: ticket.planProfileName ?? ticket.planId,
     serverName: ticket.serverName ?? "all",
-    username: ticket.code
+    username: ticket.code,
+    validityMinutes: ticket.planValidityMinutes ?? null
   };
+}
+
+export function canSafelyRecreateTicket(ticket: SyncableLocalTicket): boolean {
+  const neverActivated = !ticket.activatedAt
+    && !ticket.completedAt
+    && !ticket.expiresAt
+    && !ticket.mikrotikId
+    && !ticket.lastRouterSyncAt
+    && (ticket.uptimeSeconds ?? 0) === 0
+    && (ticket.downloadedBytes ?? 0) === 0
+    && (ticket.uploadedBytes ?? 0) === 0;
+  return neverActivated
+    && ["local_only", "error"].includes(ticket.syncStatus)
+    && ["disponible", "imprimé"].includes(ticket.status);
+}
+
+function minutesToRouterOsDuration(minutes: number | null | undefined): string | null {
+  if (!minutes || minutes <= 0) return null;
+  const totalSeconds = Math.max(60, Math.round(minutes * 60));
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const remainingMinutes = Math.floor((totalSeconds % 3600) / 60);
+  return [days > 0 ? `${days}d` : "", hours > 0 ? `${hours}h` : "", remainingMinutes > 0 ? `${remainingMinutes}m` : ""]
+    .filter(Boolean)
+    .join("") || "1m";
 }
 
 function buildSummary(updates: SyncedTicketUpdate[], localMissing: RouterOnlyTicket[]): TicketSyncSummary {

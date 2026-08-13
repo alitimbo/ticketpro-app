@@ -66,6 +66,7 @@ export class FakeRouterAdapter implements RouterAdapter {
   private readonly servers: HotspotServer[] = [
     {
       addressPool: "clients-hotspot",
+      dnsName: "wifi.ticketpro.local",
       id: "*1",
       interfaceName: "bridge-hotspot",
       isEnabled: true,

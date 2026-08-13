@@ -7,6 +7,12 @@ import { Button, SidebarItem, StatusDot } from "../../shared/ui";
 import ticketProLogo from "../../../src-tauri/icons/icon.png";
 import { AppUpdateNotice } from "./AppUpdateNotice";
 import { WireGuardRecoveryBootstrap } from "./WireGuardRecoveryBootstrap";
+import {
+  disconnectEmbeddedVpn,
+  EmbeddedVpnProvisioningService,
+  getVpnProviderStatus,
+  waitForEmbeddedVpnProvisioning
+} from "../../services/vpn";
 
 type DesktopLayoutProps = {
   scope: "global" | "router";
@@ -15,6 +21,7 @@ type DesktopLayoutProps = {
 export function DesktopLayout({ scope }: DesktopLayoutProps) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [isSwitchingOrganization, setIsSwitchingOrganization] = useState(false);
+  const [organizationSwitchFeedback, setOrganizationSwitchFeedback] = useState<string | null>(null);
   const navigate = useNavigate();
   const { routerId = "" } = useParams();
   const { accountSession, logoutAccount, saasAccount, session, switchOrganization } = useAuth();
@@ -29,6 +36,44 @@ export function DesktopLayout({ scope }: DesktopLayoutProps) {
   };
 
   const canSelectRouter = Boolean(session?.permissions.includes("global.routers.select"));
+
+  const handleOrganizationChange = async (membershipId: string) => {
+    if (membershipId === saasAccount?.user.membership_id || isSwitchingOrganization) return;
+    setIsSwitchingOrganization(true);
+    setOrganizationSwitchFeedback("Préparation du changement d'organisation…");
+    try {
+      await waitForEmbeddedVpnProvisioning();
+      const result = await switchOrganization(membershipId);
+      if (!result.ok) {
+        setOrganizationSwitchFeedback(result.message ?? "Changement d'organisation impossible.");
+        return;
+      }
+
+      try {
+        const currentVpn = await getVpnProviderStatus();
+        if (currentVpn.provider === "EMBEDDED") {
+          await disconnectEmbeddedVpn();
+        }
+        setOrganizationSwitchFeedback("Organisation sélectionnée. Mise à jour de la connexion sécurisée…");
+        const vpn = await new EmbeddedVpnProvisioningService().ensureConnected();
+        setOrganizationSwitchFeedback(
+          vpn.state === "CONNECTED"
+            ? "Organisation active et connexion sécurisée mise à jour."
+            : vpn.state === "SKIPPED"
+              ? "Organisation active. La connexion sécurisée sera vérifiée au prochain lancement."
+              : "Organisation active. La connexion sécurisée termine sa mise à jour."
+        );
+      } catch (error) {
+        const detail = error instanceof Error && error.message.trim()
+          ? error.message.trim()
+          : "erreur VPN inconnue";
+        setOrganizationSwitchFeedback(`Organisation active, mais la connexion sécurisée n'a pas été mise à jour : ${detail}`);
+      }
+      navigate("/", { replace: true });
+    } finally {
+      setIsSwitchingOrganization(false);
+    }
+  };
 
   return (
     <div className={sidebarCollapsed ? "app-shell app-shell--sidebar-collapsed" : "app-shell"}>
@@ -85,12 +130,7 @@ export function DesktopLayout({ scope }: DesktopLayoutProps) {
                 <select
                   aria-label="Changer d'organisation"
                   disabled={isSwitchingOrganization}
-                  onChange={(event) => {
-                    setIsSwitchingOrganization(true);
-                    void switchOrganization(event.target.value).then((result) => {
-                      if (result.ok) navigate("/", { replace: true });
-                    }).finally(() => setIsSwitchingOrganization(false));
-                  }}
+                  onChange={(event) => void handleOrganizationChange(event.target.value)}
                   value={saasAccount.user.membership_id}
                 >
                   {saasAccount.organizations.map((organization) => (
@@ -102,7 +142,7 @@ export function DesktopLayout({ scope }: DesktopLayoutProps) {
                 {isSwitchingOrganization ? <LoaderCircle aria-hidden="true" className="organization-switcher__loader" /> : <ChevronDown aria-hidden="true" />}
               </span>
               <span className="organization-switcher__status" aria-live="polite">
-                {isSwitchingOrganization ? "Changement en cours…" : "Changer d'organisation"}
+                {organizationSwitchFeedback ?? (isSwitchingOrganization ? "Changement en cours…" : "Changer d'organisation")}
               </span>
             </label>
           ) : null}

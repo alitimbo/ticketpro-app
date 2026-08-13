@@ -50,7 +50,8 @@ export class RouterCloudRecoveryService {
     private readonly database: DatabaseClient,
     private readonly accountId: string,
     private readonly internalProfileId: string,
-    private readonly cloud: RouterRecoveryCloudClient = defaultCloudClient
+    private readonly cloud: RouterRecoveryCloudClient = defaultCloudClient,
+    private readonly organizationId: string | null = null
   ) {
     this.connections = new RouterConnectionRepository(database);
     this.plans = new HotspotPlanRepository(database);
@@ -61,7 +62,12 @@ export class RouterCloudRecoveryService {
 
   async backupRouter(routerId: string): Promise<SaasRouterRecoverySnapshot> {
     const router = await this.routers.findById(routerId);
-    if (!router || router.account_id !== this.accountId || router.deleted_at) {
+    if (
+      !router
+      || router.account_id !== this.accountId
+      || router.deleted_at
+      || (this.organizationId && router.organization_id !== this.organizationId)
+    ) {
       throw new Error("Routeur local introuvable pour la sauvegarde cloud.");
     }
     const [connections, plans, vpnPeer] = await Promise.all([
@@ -120,11 +126,16 @@ export class RouterCloudRecoveryService {
     if ((router.cloud_router_id ?? router.id) !== saved.id) {
       await this.routers.setCloudId(this.accountId, router.id, saved.id);
     }
+    if (this.organizationId && router.organization_id !== this.organizationId) {
+      await this.routers.setOrganizationId(this.accountId, router.id, this.organizationId);
+    }
     return saved;
   }
 
   async backupAll(): Promise<void> {
-    const routers = await this.routers.listByAccount(this.accountId);
+    const routers = this.organizationId
+      ? await this.routers.listByOrganization(this.accountId, this.organizationId)
+      : await this.routers.listByAccount(this.accountId);
     let firstError: unknown = null;
     for (let index = 0; index < routers.length; index += 5) {
       const results = await Promise.allSettled(
@@ -137,22 +148,34 @@ export class RouterCloudRecoveryService {
     }
   }
 
+  /** Scope local router records to the organization currently selected in SaaS. */
+  async listCloudRouterIds(): Promise<Set<string>> {
+    const snapshots = await this.cloud.getSnapshots();
+    return new Set(snapshots.map((router) => router.id));
+  }
+
   async restoreMissingRouters(): Promise<RouterRecoveryResult> {
-    const activeRun = activeRecoveryRuns.get(this.accountId);
+    const recoveryScope = `${this.accountId}:${this.organizationId ?? "legacy"}`;
+    const activeRun = activeRecoveryRuns.get(recoveryScope);
     if (activeRun) return activeRun;
 
     const run = this.restoreMissingRoutersOnce().finally(() => {
-      if (activeRecoveryRuns.get(this.accountId) === run) {
-        activeRecoveryRuns.delete(this.accountId);
+      if (activeRecoveryRuns.get(recoveryScope) === run) {
+        activeRecoveryRuns.delete(recoveryScope);
       }
     });
-    activeRecoveryRuns.set(this.accountId, run);
+    activeRecoveryRuns.set(recoveryScope, run);
     return run;
   }
 
   private async restoreMissingRoutersOnce(): Promise<RouterRecoveryResult> {
     const remoteRouters = await this.cloud.getSnapshots();
-    const localRouters = await this.routers.listByAccount(this.accountId);
+    const accountRouters = await this.routers.listByAccount(this.accountId);
+    const localRouters = this.organizationId
+      ? accountRouters.filter((router) => (
+          router.organization_id === this.organizationId || !router.organization_id
+        ))
+      : accountRouters;
     const localStableIdentities = new Set<string>();
     const localByStableIdentity = new Map<string, (typeof localRouters)[number]>();
     const localByCloudId = new Map<string, (typeof localRouters)[number]>();
@@ -179,6 +202,9 @@ export class RouterCloudRecoveryService {
         const existing = localByCloudId.get(remote.id)
           ?? localByStableIdentity.get(remote.stable_identity);
         if (existing) {
+          if (this.organizationId && existing.organization_id !== this.organizationId) {
+            await this.routers.setOrganizationId(this.accountId, existing.id, this.organizationId);
+          }
           await this.restoreMissingDependents(remote, existing.id, vpnNetwork);
           result.skippedRouterIds.push(remote.id);
           continue;
@@ -194,7 +220,8 @@ export class RouterCloudRecoveryService {
           localRouterId,
           this.accountId,
           this.internalProfileId,
-          encryptedPassword
+          encryptedPassword,
+          this.organizationId
         ));
         await this.restoreMissingDependents(remote, localRouterId, vpnNetwork);
         localStableIdentities.add(remote.stable_identity);
@@ -318,7 +345,8 @@ function routerInputFromRecovery(
   localRouterId: string,
   accountId: string,
   internalProfileId: string,
-  encryptedPassword: string
+  encryptedPassword: string,
+  organizationId: string | null
 ): CreateRouterInput {
   return {
     account_id: accountId,
@@ -337,6 +365,7 @@ function routerInputFromRecovery(
     model: remote.model,
     name: remote.name,
     notes: remote.notes ?? "",
+    organization_id: organizationId,
     routeros_version: remote.routeros_version,
     serial_number: remote.serial_number,
     status: "warning",

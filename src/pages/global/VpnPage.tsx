@@ -73,8 +73,18 @@ const initialNetworkForm: NetworkForm = {
   serverPublicKey: ""
 };
 
+// Les PC peuvent appartenir à une autre organisation que le routeur tout en
+// restant filtrés par le pare-feu multi-tenant du hub. Le MikroTik doit donc
+// accepter le super-réseau du hub, pas seulement son sous-réseau d'organisation.
+// Les réseaux externes ou historiques conservent leur routage configuré.
+function routerAllowedIpsForNetwork(addressPool: string): string {
+  return /^10\.250\.\d{1,3}\.\d{1,3}\/(?:2[4-9]|3[0-2])$/.test(addressPool)
+    ? "10.250.0.0/16"
+    : addressPool;
+}
+
 export function VpnPage() {
-  const { accountSession, session } = useAuth();
+  const { accountSession, saasAccount, session } = useAuth();
   const { database, isInitialized } = useAppDatabase();
   const accountId = accountSession?.accountId ?? session?.account_id ?? null;
   const networkRepository = useMemo(() => new VpnNetworkRepository(database), [database]);
@@ -83,13 +93,21 @@ export function VpnPage() {
   const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
   const recoveryService = useMemo(
     () => accountId && session
-      ? new RouterCloudRecoveryService(database, accountId, session.internal_profile_id)
+      ? new RouterCloudRecoveryService(
+          database,
+          accountId,
+          session.internal_profile_id,
+          undefined,
+          saasAccount?.organization.id ?? null
+        )
       : null,
-    [accountId, database, session]
+    [accountId, database, saasAccount?.organization.id, session]
   );
   const reconciliationService = useMemo(
-    () => session ? new RouterStateReconciliationService(database, session) : null,
-    [database, session]
+    () => session ? new RouterStateReconciliationService(database, session, {
+      organizationId: saasAccount?.organization.id ?? null
+    }) : null,
+    [database, saasAccount?.organization.id, session]
   );
   const operatorRecoveryService = useMemo(
     () => accountId
@@ -109,8 +127,12 @@ export function VpnPage() {
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
+  const [bootstrappedScope, setBootstrappedScope] = useState<string | null>(null);
   const [operation, setOperation] = useState<VpnOperation | null>(null);
   const [vpnProvider, setVpnProvider] = useState<"EMBEDDED" | "LEGACY">("EMBEDDED");
+  const activeVpnScope = `${accountId ?? ""}:${saasAccount?.organization.id ?? "legacy"}`;
+  const activeVpnScopeRef = useRef(activeVpnScope);
+  activeVpnScopeRef.current = activeVpnScope;
   const operationRef = useRef<VpnOperation | null>(null);
   const bootstrapAccountRef = useRef<string | null>(null);
   const operatorRecoveryRef = useRef<string | null>(null);
@@ -131,24 +153,38 @@ export function VpnPage() {
 
   const refreshRemotePeers = async () => {
     if (!accountId) return;
+    const requestedScope = activeVpnScopeRef.current;
     try {
-      setRemotePeers(await listSaasVpnPeers());
+      const nextPeers = await listSaasVpnPeers();
+      if (activeVpnScopeRef.current !== requestedScope) return;
+      setRemotePeers(nextPeers);
       setRemoteStatusError(false);
     } catch {
+      if (activeVpnScopeRef.current !== requestedScope) return;
       setRemoteStatusError(true);
     }
   };
 
   const load = async () => {
     if (!accountId || !isInitialized) return;
+    const requestedScope = activeVpnScope;
+    setIsLoaded(false);
+    setPeers([]);
+    setRouters([]);
 
     const [storedNetwork, storedPeers, storedRouters] = await Promise.all([
       networkRepository.findByAccount(accountId),
       peerRepository.listByAccount(accountId),
-      routerRepository.listByAccount(accountId)
+      saasAccount?.organization.id
+        ? routerRepository.listByOrganization(accountId, saasAccount.organization.id)
+        : routerRepository.listByAccount(accountId)
     ]);
+    if (activeVpnScopeRef.current !== requestedScope) return;
+    const routerIds = new Set(storedRouters.map((router) => router.id));
     setNetwork(storedNetwork);
-    setPeers(storedPeers);
+    setPeers(storedPeers.filter((peer) => peer.peer_type !== "router" || (
+      peer.router_id !== null && routerIds.has(peer.router_id)
+    )));
     setRouters(storedRouters);
     if (storedNetwork) {
       setForm({
@@ -167,7 +203,7 @@ export function VpnPage() {
     void load().catch((loadError: unknown) =>
       setError(loadError instanceof Error ? loadError.message : "Impossible de charger le VPN.")
     );
-  }, [accountId, isInitialized, networkRepository, peerRepository, routerRepository]);
+  }, [accountId, isInitialized, networkRepository, peerRepository, routerRepository, saasAccount?.organization.id]);
 
   useEffect(() => {
     if (!accountId || !network) return;
@@ -182,8 +218,10 @@ export function VpnPage() {
     }
     setIsSaving(true);
     setError(null);
+    const activeScope = activeVpnScope;
     try {
       const remote = await bootstrapSaasVpn();
+      if (activeVpnScopeRef.current !== activeScope) return;
       const input = {
         id: network?.id ?? `vpn-${crypto.randomUUID()}`,
         account_id: accountId,
@@ -199,8 +237,11 @@ export function VpnPage() {
       if (network) await networkRepository.update(input);
       else await networkRepository.create(input);
       await load();
+      setBootstrappedScope(activeScope);
       setMessage("Réseau VPN configuré automatiquement et isolé pour votre organisation.");
     } catch (saveError: unknown) {
+      bootstrapAccountRef.current = null;
+      setBootstrappedScope(null);
       setError(saveError instanceof Error ? saveError.message : "Le réseau VPN n'a pas pu être configuré.");
     } finally {
       setIsSaving(false);
@@ -208,15 +249,23 @@ export function VpnPage() {
   };
 
   useEffect(() => {
-    const needsSecureBootstrap = !network || Boolean(network.provisioning_api_token_encrypted);
-    if (!accountId || !isLoaded || !needsSecureBootstrap || bootstrapAccountRef.current === accountId) return;
-    bootstrapAccountRef.current = accountId;
+    const bootstrapScope = activeVpnScope;
+    if (!accountId || !isLoaded || bootstrapAccountRef.current === bootstrapScope) return;
+    setBootstrappedScope(null);
+    bootstrapAccountRef.current = bootstrapScope;
     void saveNetwork();
-  }, [accountId, isLoaded, network]);
+  }, [accountId, isLoaded, saasAccount?.organization.id]);
 
   useEffect(() => {
-    if (!accountId || !network || !operatorRecoveryService || !isInitialized) return;
-    const recoveryKey = `${accountId}:${network.id}`;
+    const activeScope = activeVpnScope;
+    if (
+      !accountId
+      || !network
+      || !operatorRecoveryService
+      || !isInitialized
+      || bootstrappedScope !== activeScope
+    ) return;
+    const recoveryKey = `${activeScope}:${network.id}`;
     if (operatorRecoveryRef.current === recoveryKey) return;
     operatorRecoveryRef.current = recoveryKey;
 
@@ -244,7 +293,7 @@ export function VpnPage() {
             : "La récupération du tunnel WireGuard existant a échoué."
         );
       });
-  }, [accountId, isInitialized, network, operatorRecoveryService]);
+  }, [accountId, bootstrappedScope, isInitialized, network, operatorRecoveryService, saasAccount?.organization.id]);
 
   const persistVpnConnection = async (
     router: RouterRecord,
@@ -438,7 +487,7 @@ export function VpnPage() {
         assignedAddress: peer.assigned_address,
         interfaceName: "ticketpro-vpn",
         privateKey: keyPair?.privateKey,
-        serverAllowedIps: network.address_pool,
+        serverAllowedIps: routerAllowedIpsForNetwork(network.address_pool),
         serverEndpoint: network.server_endpoint,
         serverPort: network.server_port,
         serverPublicKey: network.server_public_key
@@ -746,7 +795,7 @@ export function VpnPage() {
           assignedAddress: replacement.assigned_address,
           interfaceName: "ticketpro-vpn",
           privateKey: keyPair.privateKey,
-          serverAllowedIps: network.address_pool,
+          serverAllowedIps: routerAllowedIpsForNetwork(network.address_pool),
           serverEndpoint: network.server_endpoint,
           serverPort: network.server_port,
           serverPublicKey: network.server_public_key

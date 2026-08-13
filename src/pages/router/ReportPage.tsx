@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import {
   CalendarDays,
@@ -9,6 +9,7 @@ import {
   Filter,
   Printer,
   RefreshCw,
+  Router as RouterIcon,
   Ticket,
   Trash2,
   UserRound
@@ -19,14 +20,19 @@ import {
   GeneratedFileRepository,
   HotspotPlanRepository,
   PrintHistoryRepository,
+  RouterConnectionRepository,
   RouterRepository,
-  TicketRepository
+  TicketBatchRepository,
+  TicketRepository,
+  TicketStateHistoryRepository
 } from "../../services/database/repositories";
 import { TauriFileService } from "../../services/files";
 import { AuditLogService } from "../../services/logging";
 import { generateReportPdf } from "../../services/pdf";
+import { createPersistedRouterService } from "../../services/router";
+import { RouterTicketSyncService } from "../../services/sync";
 import { Badge, Button, Card, EmptyState, PageHeader, StatCard } from "../../shared/ui";
-import type { IconComponent } from "../../shared/ui";
+import type { AppStatus, IconComponent } from "../../shared/ui";
 import {
   buildReportSummary,
   buildReportCsv,
@@ -45,12 +51,23 @@ import {
   type ReportMetricId,
   type ReportTicket
 } from "./reportPageModel";
-import { ticketFromRecord, ticketStatusLabel, ticketStatusToBadge } from "./ticketsPageModel";
+import {
+  formatBytes,
+  formatSeconds,
+  ticketFromRecord,
+  ticketStatusLabel,
+  ticketStatusToBadge
+} from "./ticketsPageModel";
+import { persistTicketSyncReport } from "./ticketSyncPersistence";
 
 type SelectedReportTickets = {
   title: string;
   tickets: ReportTicket[];
 };
+
+type ReportLiveStatus = "connecting" | "degraded" | "live" | "offline";
+
+const reportLiveRefreshIntervalMs = 15_000;
 
 export function ReportPage() {
   const { routerId = "routeur-demo" } = useParams();
@@ -67,33 +84,48 @@ export function ReportPage() {
   const [messageIsError, setMessageIsError] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [liveStatus, setLiveStatus] = useState<ReportLiveStatus>(isPersistent ? "connecting" : "offline");
+  const [lastLiveSyncAt, setLastLiveSyncAt] = useState<string | null>(null);
+  const [liveError, setLiveError] = useState<string | null>(null);
+  const [routerOnlyCount, setRouterOnlyCount] = useState(0);
+  const liveSyncRunningRef = useRef(false);
 
   const ticketRepository = useMemo(() => new TicketRepository(database), [database]);
   const planRepository = useMemo(() => new HotspotPlanRepository(database), [database]);
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
+  const routerConnectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
+  const ticketBatchRepository = useMemo(() => new TicketBatchRepository(database), [database]);
+  const ticketStateHistoryRepository = useMemo(() => new TicketStateHistoryRepository(database), [database]);
   const printHistoryRepository = useMemo(() => new PrintHistoryRepository(database), [database]);
   const generatedFileRepository = useMemo(() => new GeneratedFileRepository(database), [database]);
   const auditLogService = useMemo(() => new AuditLogService(database), [database]);
   const fileService = useMemo(() => new TauriFileService(), []);
 
-  const loadReport = async () => {
+  const loadReport = useCallback(async (options: { silent?: boolean } = {}) => {
     if (!isPersistent || !isInitialized || !session) {
       return;
     }
+    if (liveSyncRunningRef.current) return;
 
-    setIsLoading(true);
-    setMessage(null);
-    setMessageIsError(false);
+    liveSyncRunningRef.current = true;
+    if (!options.silent) setIsLoading(true);
+    setLiveStatus("connecting");
+    setLiveError(null);
+    if (!options.silent) {
+      setMessage(null);
+      setMessageIsError(false);
+    }
 
     try {
       const profileScope = session.permissions.includes("router.report.read")
         ? undefined
         : session.internal_profile_id;
-      const [router, records, plans, printHistory] = await Promise.all([
+      const [router, records, plans, printHistory, connections] = await Promise.all([
         routerRepository.findById(routerId),
         ticketRepository.listForReportByAccount(session.account_id, profileScope),
         planRepository.listByRouter(routerId),
-        printHistoryRepository.listByAccount(session.account_id)
+        printHistoryRepository.listByAccount(session.account_id),
+        routerConnectionRepository.listByRouter(routerId)
       ]);
 
       if (!router || router.account_id !== session.account_id) {
@@ -115,8 +147,7 @@ export function ReportPage() {
           dates.push(entry.created_at);
           printDatesByBatch.set(entry.batch_id!, dates);
         });
-      setTickets(
-        records
+      let reportTickets = records
           .filter((record) => record.router_id === routerId)
           .map((record) => {
             const ticket = ticketFromRecord(record, plansById.get(record.plan_id) ?? null, router.name);
@@ -128,19 +159,75 @@ export function ReportPage() {
                 (record.printed_count > 0 ? [record.updated_at] : []),
               priceHint: plansById.get(ticket.planId)?.price_hint ?? null
             };
-          })
+          });
+
+      // Keep the latest persisted snapshot visible even while RouterOS is being read.
+      setTickets(reportTickets);
+
+      const routerService = await createPersistedRouterService({
+        authSession: session,
+        connections,
+        database,
+        logActions: false,
+        router
+      });
+      const syncReport = await new RouterTicketSyncService(routerService).compareTickets(
+        reportTickets.filter((ticket) => ticket.status !== "supprimé")
       );
+      reportTickets = (await persistTicketSyncReport({
+        actorProfileId: session.internal_profile_id,
+        batchRepository: ticketBatchRepository,
+        report: syncReport,
+        ticketHistoryRepository: ticketStateHistoryRepository,
+        ticketRepository,
+        tickets: reportTickets
+      })) as ReportTicket[];
+
+      setTickets(reportTickets);
+      setRouterOnlyCount(syncReport.localMissing.length);
+      setLastLiveSyncAt(new Date().toISOString());
+      setLiveStatus("live");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Impossible de charger le rapport.");
-      setMessageIsError(true);
+      const errorMessage = error instanceof Error ? error.message : "Le routeur ne répond pas.";
+      setLiveStatus("degraded");
+      setLiveError(errorMessage);
+      if (!options.silent) {
+        setMessage(errorMessage);
+        setMessageIsError(true);
+      }
     } finally {
-      setIsLoading(false);
+      liveSyncRunningRef.current = false;
+      if (!options.silent) setIsLoading(false);
     }
-  };
+  }, [
+    database,
+    isInitialized,
+    isPersistent,
+    planRepository,
+    printHistoryRepository,
+    routerConnectionRepository,
+    routerId,
+    routerRepository,
+    session,
+    ticketBatchRepository,
+    ticketRepository,
+    ticketStateHistoryRepository
+  ]);
 
   useEffect(() => {
     void loadReport();
-  }, [isInitialized, isPersistent, planRepository, printHistoryRepository, routerId, routerRepository, session, ticketRepository]);
+    if (!isPersistent) return undefined;
+    const synchronize = () => {
+      if (document.visibilityState === "hidden") return;
+      void loadReport({ silent: true });
+    };
+    const interval = window.setInterval(synchronize, reportLiveRefreshIntervalMs);
+    window.addEventListener("focus", synchronize);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", synchronize);
+    };
+  }, [isPersistent, loadReport]);
 
   const scopedTickets = useMemo(() => scopeReportTicketsForSession(tickets, session), [session, tickets]);
   const filteredTickets = useMemo(() => filterReportTickets(scopedTickets, filters), [filters, scopedTickets]);
@@ -186,8 +273,13 @@ export function ReportPage() {
             <Button disabled={isLoading || isExporting || filteredTickets.length === 0} icon={Download} onClick={() => void exportReport("csv")}>
               Exporter CSV
             </Button>
-            <Button disabled={isLoading} icon={RefreshCw} onClick={() => void loadReport()}>
-              Rafraîchir
+            <Button
+              className={liveStatus === "connecting" ? "button--loading" : ""}
+              disabled={isLoading || liveStatus === "connecting"}
+              icon={RefreshCw}
+              onClick={() => void loadReport()}
+            >
+              Synchroniser maintenant
             </Button>
           </div>
         }
@@ -195,6 +287,26 @@ export function ReportPage() {
         eyebrow="Routeur"
         title="Rapport"
       />
+
+      <Card className={`report-live-card report-live-card--${liveStatus}`}>
+        <div className="report-live-status">
+          <span className="report-live-status__icon">
+            <RouterIcon aria-hidden="true" />
+          </span>
+          <div className="report-live-status__copy">
+            <div className="button-row">
+              <strong>Données RouterOS en direct</strong>
+              <Badge status={reportLiveBadgeStatus(liveStatus)}>{reportLiveStatusLabel(liveStatus)}</Badge>
+            </div>
+            <span>{reportLiveDescription(liveStatus, lastLiveSyncAt, liveError)}</span>
+          </div>
+          <div className="report-live-status__facts">
+            <span>Actualisation</span>
+            <strong>15 secondes</strong>
+            {routerOnlyCount > 0 ? <small>{routerOnlyCount} ticket(s) présent(s) uniquement sur le routeur</small> : null}
+          </div>
+        </div>
+      </Card>
 
       <Card>
         <div className="report-toolbar">
@@ -269,11 +381,22 @@ export function ReportPage() {
             <div className="report-ticket-list">
               {selectedTickets.tickets.slice(0, selectedTicketLimit).map((ticket) => (
                 <div className="report-ticket-row" key={ticket.id}>
-                  <strong>{ticket.code}</strong>
-                  <span>{ticket.planName}</span>
-                  <span>{internalProfileLabel(ticket.createdByProfileId)}</span>
-                  <span>{ticketActivityLabel(ticket)}</span>
-                  <Badge status={ticketStatusToBadge(ticket.status)}>{ticketStatusLabel(ticket.status)}</Badge>
+                  <div className="report-ticket-row__main">
+                    <strong>{ticket.code}</strong>
+                    <span>{ticket.planName}</span>
+                    <span>{ticket.serverName} · {ticket.profileName}</span>
+                    <span>{internalProfileLabel(ticket.createdByProfileId)}</span>
+                    <Badge status={ticketStatusToBadge(ticket.status)}>{ticketStatusLabel(ticket.status)}</Badge>
+                  </div>
+                  <div className="report-ticket-row__runtime">
+                    <span>{ticketActivityLabel(ticket)}</span>
+                    <span>Utilisé : {formatSeconds(ticket.uptimeSeconds)}</span>
+                    <span>Restant : {ticket.remainingSeconds === null ? "Illimité" : formatSeconds(ticket.remainingSeconds)}</span>
+                    <span>Trafic : {formatBytes(ticket.downloadedBytes + ticket.uploadedBytes)}</span>
+                    <span>Appareil : {ticket.macAddress || "Non lié"}</span>
+                    <span>IP : {ticket.ipAddress || "Non attribuée"}</span>
+                    <span>Lecture RouterOS : {ticket.lastRouterSyncAt ? formatReportDate(ticket.lastRouterSyncAt) : "En attente"}</span>
+                  </div>
                 </div>
               ))}
               {selectedTicketLimit < selectedTickets.tickets.length ? (
@@ -415,6 +538,39 @@ function downloadBytes(bytes: Uint8Array, fileName: string, mimeType: string): v
 function createId(prefix: string): string {
   const randomUuid = globalThis.crypto?.randomUUID?.();
   return randomUuid ? `${prefix}-${randomUuid}` : `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function reportLiveBadgeStatus(status: ReportLiveStatus): AppStatus {
+  if (status === "live") return "success";
+  if (status === "degraded") return "warning";
+  if (status === "connecting") return "active";
+  return "offline";
+}
+
+function reportLiveStatusLabel(status: ReportLiveStatus): string {
+  if (status === "live") return "En direct";
+  if (status === "degraded") return "Mode dégradé";
+  if (status === "connecting") return "Synchronisation…";
+  return "Données locales";
+}
+
+function reportLiveDescription(
+  status: ReportLiveStatus,
+  synchronizedAt: string | null,
+  error: string | null
+): string {
+  if (status === "connecting") {
+    return "Lecture des utilisateurs, sessions, compteurs, appareils et états réels du MikroTik…";
+  }
+  if (status === "degraded") {
+    return `Dernières données SQLite conservées. ${error ?? "Le routeur est momentanément inaccessible."}`;
+  }
+  if (status === "live") {
+    return synchronizedAt
+      ? `Dernière lecture RouterOS réussie : ${formatReportDate(synchronizedAt)}.`
+      : "Synchronisation RouterOS active.";
+  }
+  return "Le mode démonstration utilise uniquement les données locales.";
 }
 
 function ticketActivityLabel(ticket: ReportTicket): string {

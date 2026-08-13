@@ -26,6 +26,7 @@ export type TicketListItem = {
   createdAt: string;
   dataLimitMb: number | null;
   dataRemainingBytes: number | null;
+  deletedAt?: string | null;
   downloadedBytes: number;
   expiresAt: string | null;
   exportedAt: string | null;
@@ -81,6 +82,7 @@ export function ticketFromRecord(
     createdAt: record.created_at,
     dataLimitMb: plan?.data_limit_mb ?? null,
     dataRemainingBytes: record.data_remaining_bytes ?? null,
+    deletedAt: record.deleted_at,
     downloadedBytes: record.downloaded_bytes,
     expiresAt: record.expires_at,
     exportedAt: record.exported_at ?? null,
@@ -272,7 +274,7 @@ export function buildTicketLifecycleLogs(ticket: TicketListItem): TicketLifecycl
       createdAt: ticket.completedAt,
       id: `${ticket.id}-completed`,
       level: "info",
-      message: ticket.status === "consommé" ? "Durée ou quota entièrement consommé." : "Session complétée."
+      message: ticket.status === "consommé" ? "Ticket épuisé : durée ou quota entièrement consommé." : "Session complétée."
     });
   }
 
@@ -338,7 +340,7 @@ export function ticketStatusLabel(status: TicketListStatus): string {
     activé: "Activé",
     archivé: "Archivé",
     complété: "Complété",
-    consommé: "Consommé",
+    consommé: "Épuisé",
     disponible: "Disponible",
     désactivé: "Désactivé",
     en_cours_utilisation: "En cours d'utilisation",

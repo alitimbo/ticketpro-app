@@ -59,6 +59,7 @@ export function SecureConnectionPanel({ onProviderChange }: SecureConnectionPane
     [installationId, inventory]
   );
   const activeDevices = inventory?.active_count ?? 0;
+  const collaboratorDevices = inventory?.collaborator_device_count ?? 0;
   const maxDevices = inventory?.max_devices ?? 0;
   const unlimitedDevices = inventory?.device_limit_mode === "unlimited";
 
@@ -283,13 +284,20 @@ export function SecureConnectionPanel({ onProviderChange }: SecureConnectionPane
       <Card
         actions={(
           <Badge status={!unlimitedDevices && activeDevices >= maxDevices && maxDevices > 0 ? "warning" : "success"}>
-            {unlimitedDevices ? `${activeDevices} appareils · Illimité` : `${activeDevices} / ${maxDevices} appareils`}
+            {unlimitedDevices
+              ? `${activeDevices} poste${activeDevices > 1 ? "s" : ""} propriétaire · Illimité`
+              : `${activeDevices} / ${maxDevices} poste${maxDevices > 1 ? "s" : ""} propriétaire`}
           </Badge>
         )}
         className="device-inventory-card"
-        description="Chaque installation possède sa propre clé et sa propre adresse VPN. Aucune clé n'est partagée entre les PC."
+        description="Chaque installation possède sa propre clé et sa propre adresse VPN. Les accès des collaborateurs invités sont séparés et ne consomment pas le quota de postes du propriétaire."
         title="Mes appareils"
       >
+        {collaboratorDevices > 0 ? (
+          <div className="notice notice--info">
+            {collaboratorDevices} accès collaborateur{collaboratorDevices > 1 ? "s" : ""} actif{collaboratorDevices > 1 ? "s" : ""} : révocables individuellement, sans impact sur votre forfait.
+          </div>
+        ) : null}
         {!inventory ? (
           <div className="secure-panel-loading"><LoaderCircle aria-hidden="true" /> Chargement des appareils…</div>
         ) : inventory.devices.length === 0 ? (

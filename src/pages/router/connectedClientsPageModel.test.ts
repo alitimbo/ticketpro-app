@@ -237,4 +237,30 @@ describe("connectedClientsPageModel", () => {
       duration: "long"
     })).toHaveLength(1);
   });
+
+  it("affiche la consommation cumulée du voucher et la session courante séparément", () => {
+    const clients = buildConnectedClientViewModels(
+      [{ ...activeUsers[0], downloadedBytes: 20 * 1024 * 1024, uptime: "12m" }],
+      [{
+        ...hotspotUsers[0],
+        downloadedBytes: 70 * 1024 * 1024,
+        limitBytesTotal: 100 * 1024 * 1024,
+        limitUptime: "1h",
+        uploadedBytes: 5 * 1024 * 1024,
+        uptime: "45m"
+      }],
+      plans,
+      { id: "routeur-demo", name: "Routeur démo" }
+    );
+
+    expect(clients[0]).toMatchObject({
+      consumptionPercent: 75,
+      currentSessionUptime: "12m",
+      dataRemainingBytes: 25 * 1024 * 1024,
+      downloadedBytes: 70 * 1024 * 1024,
+      sessionTimeLeft: "15 min",
+      totalBytes: 75 * 1024 * 1024,
+      uptime: "45 min"
+    });
+  });
 });

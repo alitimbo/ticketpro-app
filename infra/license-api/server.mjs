@@ -557,6 +557,7 @@ ensureColumn("organization_users", "created_by_user_id", "TEXT");
 ensureColumn("organization_sessions", "active_membership_id", "TEXT");
 ensureColumn("organization_subscriptions", "max_devices", "INTEGER NOT NULL DEFAULT 1");
 ensureColumn("organization_subscriptions", "device_limit_mode", "TEXT NOT NULL DEFAULT 'limited'");
+migrateOrganizationVpnPeersForSharedDevices();
 
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_licenses_reseller ON licenses(reseller_id, status);
@@ -1104,6 +1105,30 @@ const statements = {
     SELECT COUNT(*) AS count FROM organization_devices
     WHERE organization_id = ? AND status <> 'revoked'
   `),
+  countOrganizationOwnerDevices: db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM organization_devices AS device
+    JOIN organization_memberships AS membership
+      ON membership.organization_id = device.organization_id
+      AND membership.user_id = device.registered_by_user_id
+    WHERE device.organization_id = ?
+      AND device.status <> 'revoked'
+      AND membership.authority_role = 'owner'
+  `),
+  countOrganizationMemberDevices: db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM organization_devices AS device
+    JOIN organization_memberships AS membership
+      ON membership.organization_id = device.organization_id
+      AND membership.user_id = device.registered_by_user_id
+    WHERE device.organization_id = ?
+      AND device.status <> 'revoked'
+      AND membership.authority_role = 'member'
+  `),
+  countOrganizationDevicesForUser: db.prepare(`
+    SELECT COUNT(*) AS count FROM organization_devices
+    WHERE organization_id = ? AND registered_by_user_id = ? AND status <> 'revoked'
+  `),
   insertOrganizationDevice: db.prepare(`
     INSERT OR IGNORE INTO organization_devices (
       id, organization_id, registered_by_user_id, installation_id, name,
@@ -1115,6 +1140,11 @@ const statements = {
     UPDATE organization_devices
     SET name = ?, platform = ?, os_version = ?, app_version = ?, status = 'active',
       last_seen_at = ?, updated_at = ?
+    WHERE organization_id = ? AND id = ? AND status <> 'revoked'
+  `),
+  transferOrganizationDeviceRegistration: db.prepare(`
+    UPDATE organization_devices
+    SET registered_by_user_id = ?, updated_at = ?, last_seen_at = ?
     WHERE organization_id = ? AND id = ? AND status <> 'revoked'
   `),
   heartbeatOrganizationDevice: db.prepare(`
@@ -1142,11 +1172,25 @@ const statements = {
     WHERE device.organization_id = ?
     ORDER BY device.created_at ASC
   `),
+  listOrganizationDevicesForUser: db.prepare(`
+    SELECT device.*, peer.id AS peer_id, peer.gateway_id, peer.public_key,
+      peer.vpn_ip, peer.key_version, peer.config_version, peer.desired_state,
+      peer.applied_state, peer.last_handshake_at, peer.last_error_code
+    FROM organization_devices AS device
+    LEFT JOIN organization_vpn_peers AS peer ON peer.device_id = device.id
+    WHERE device.organization_id = ? AND device.registered_by_user_id = ?
+    ORDER BY device.created_at ASC
+  `),
   listOrganizationVpnPeersForReconciliation: db.prepare(`
     SELECT peer.*, device.organization_id, device.name AS device_name,
-      device.status AS device_status
+      device.status AS device_status,
+      membership.status AS membership_status,
+      membership.invitation_status AS membership_invitation_status
     FROM organization_vpn_peers AS peer
     JOIN organization_devices AS device ON device.id = peer.device_id
+    LEFT JOIN organization_memberships AS membership
+      ON membership.organization_id = device.organization_id
+      AND membership.user_id = device.registered_by_user_id
     ORDER BY peer.updated_at ASC
   `),
   findOrganizationVpnPeerByDevice: db.prepare(`
@@ -1157,7 +1201,7 @@ const statements = {
   findOrganizationVpnPeerByPublicKey: db.prepare(`
     SELECT peer.*, device.organization_id FROM organization_vpn_peers AS peer
     JOIN organization_devices AS device ON device.id = peer.device_id
-    WHERE peer.public_key = ? LIMIT 1
+    WHERE peer.public_key = ? AND device.organization_id = ? LIMIT 1
   `),
   insertOrganizationVpnPeer: db.prepare(`
     INSERT OR IGNORE INTO organization_vpn_peers (
@@ -1425,6 +1469,67 @@ function ensureColumn(table, column, definition) {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all();
   if (!columns.some((item) => item.name === column)) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
+/**
+ * A Windows installation has one WireGuard identity, even when its user is a
+ * member of several organizations. Older installations made public_key and
+ * vpn_ip globally unique, preventing the same device from joining a second
+ * organization. Keep the device-level uniqueness, but allow the same global
+ * identity to be represented once per organization membership.
+ */
+function migrateOrganizationVpnPeersForSharedDevices() {
+  const table = db.prepare(`
+    SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'organization_vpn_peers'
+  `).get();
+  const definition = String(table?.sql ?? "");
+  if (!definition.includes("public_key TEXT NOT NULL UNIQUE") && !definition.includes("vpn_ip TEXT UNIQUE")) {
+    return;
+  }
+
+  db.exec("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;");
+  try {
+    db.exec(`
+      CREATE TABLE organization_vpn_peers_shared (
+        id TEXT PRIMARY KEY,
+        device_id TEXT NOT NULL UNIQUE REFERENCES organization_devices(id) ON DELETE CASCADE,
+        gateway_id TEXT NOT NULL DEFAULT 'gateway-africa-west-1',
+        public_key TEXT NOT NULL,
+        vpn_ip TEXT,
+        key_version INTEGER NOT NULL DEFAULT 1 CHECK(key_version > 0),
+        config_version INTEGER NOT NULL DEFAULT 1 CHECK(config_version > 0),
+        desired_state TEXT NOT NULL CHECK(desired_state IN ('enabled', 'disabled')),
+        applied_state TEXT NOT NULL CHECK(applied_state IN ('pending', 'enabled', 'disabled', 'error')),
+        last_handshake_at TEXT,
+        last_error_code TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        revoked_at TEXT
+      );
+      INSERT INTO organization_vpn_peers_shared (
+        id, device_id, gateway_id, public_key, vpn_ip, key_version,
+        config_version, desired_state, applied_state, last_handshake_at,
+        last_error_code, created_at, updated_at, revoked_at
+      )
+      SELECT
+        id, device_id, gateway_id, public_key, vpn_ip, key_version,
+        config_version, desired_state, applied_state, last_handshake_at,
+        last_error_code, created_at, updated_at, revoked_at
+      FROM organization_vpn_peers;
+      DROP TABLE organization_vpn_peers;
+      ALTER TABLE organization_vpn_peers_shared RENAME TO organization_vpn_peers;
+      CREATE INDEX idx_organization_vpn_peers_public_key
+        ON organization_vpn_peers(public_key);
+      CREATE INDEX idx_organization_vpn_peers_vpn_ip
+        ON organization_vpn_peers(vpn_ip);
+    `);
+    db.exec("COMMIT;");
+  } catch (error) {
+    db.exec("ROLLBACK;");
+    throw error;
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
   }
 }
 
@@ -1699,6 +1804,55 @@ async function revokeUnmanagedOrganizationOperatorPeers(organizationId, actual =
   return hubState;
 }
 
+async function deactivateOrganizationMemberDevices(
+  organizationId,
+  userId,
+  reason,
+  { permanent = false } = {}
+) {
+  const changedAt = nowIso();
+  const devices = statements.listOrganizationDevicesForUser.all(organizationId, userId)
+    .filter((device) => device.status !== "revoked");
+  let hubSynchronized = 0;
+  for (const device of devices) {
+    if (device.peer_id) {
+      statements.markOrganizationVpnPeerPending.run("disabled", changedAt, device.id);
+    }
+    if (permanent) {
+      statements.revokeOrganizationDevice.run(changedAt, changedAt, organizationId, device.id);
+    }
+    if (!device.peer_id) continue;
+    try {
+      await vpnHubRequest("/v1/peers", {
+        account_id: organizationId,
+        action: permanent ? "revoke" : "disable",
+        name: device.name,
+        peer_type: "operator",
+        public_key: device.public_key,
+        resource_id: `device:${device.id}`
+      });
+      if (permanent) {
+        statements.markOrganizationVpnPeerDisabled.run(changedAt, nowIso(), device.id);
+      } else {
+        statements.markOrganizationVpnPeerSuspended.run(nowIso(), device.id);
+      }
+      hubSynchronized += 1;
+    } catch (error) {
+      // La base devient immédiatement fail-closed. La réconciliation reprendra
+      // la désactivation si le hub est temporairement indisponible.
+      statements.markOrganizationVpnPeerError.run(
+        "VPN_MEMBER_ACCESS_REVOCATION_FAILED",
+        nowIso(),
+        device.id
+      );
+      if (process.env.NODE_ENV !== "test") {
+        console.error(`Révocation VPN impossible pour ${device.id} (${reason}):`, error);
+      }
+    }
+  }
+  return { changed_device_count: devices.length, hub_synchronized_count: hubSynchronized };
+}
+
 async function reconcileOrganizationVpnPeers() {
   if (vpnReconciliationRunning) return;
   vpnReconciliationRunning = true;
@@ -1709,7 +1863,9 @@ async function reconcileOrganizationVpnPeers() {
       organizationIds.add(peer.organization_id);
       const subscription = currentOrganizationSubscription(peer.organization_id);
       const subscriptionActive = organizationSubscriptionLifecycle(subscription).isActive;
-      const shouldEnable = peer.device_status === "active" && subscriptionActive;
+      const membershipActive = peer.membership_status === "active"
+        && peer.membership_invitation_status === "accepted";
+      const shouldEnable = peer.device_status === "active" && membershipActive && subscriptionActive;
       const desiredState = shouldEnable ? "enabled" : "disabled";
       if (peer.desired_state !== desiredState || peer.applied_state === "error") {
         statements.markOrganizationVpnPeerPending.run(desiredState, nowIso(), peer.device_id);
@@ -1718,7 +1874,7 @@ async function reconcileOrganizationVpnPeers() {
         if (shouldEnable) {
           await vpnHubRequest("/v1/tenants", {
             account_id: peer.organization_id,
-            operator_limit: deviceLimitForHub(subscription),
+            operator_limit: organizationOperatorLimitForHub(peer.organization_id, subscription),
             router_limit: Number(subscription.router_limit)
           });
           const provisioned = await vpnHubRequest("/v1/peers", {
@@ -1876,6 +2032,43 @@ function deviceLimitValue(record) {
 
 function deviceLimitForHub(record) {
   return deviceLimitValue(record);
+}
+
+// Le forfait appartient au propriétaire de l'organisation. Un collaborateur
+// invité n'achète pas un deuxième abonnement lorsqu'il ouvre TicketPro : son
+// poste reçoit un accès VPN auditable et révocable, distinct de la capacité
+// commerciale du propriétaire.
+function organizationDeviceAccessScope(context) {
+  return context.membership.authority_role === "owner" ? "owner" : "collaborator";
+}
+
+function organizationDeviceLimitForContext(context) {
+  return organizationDeviceAccessScope(context) === "owner"
+    ? deviceLimitValue(context.subscription)
+    : null;
+}
+
+function organizationDeviceLimitModeForContext(context) {
+  return organizationDeviceLimitForContext(context) === null ? "unlimited" : "limited";
+}
+
+function organizationDeviceCountForContext(context) {
+  if (organizationDeviceAccessScope(context) === "owner") {
+    return Number(statements.countOrganizationOwnerDevices.get(context.organization.id).count);
+  }
+  return Number(
+    statements.countOrganizationDevicesForUser.get(context.organization.id, context.user.id).count
+  );
+}
+
+// WireGuard Hub applique un plafond technique. Le plafond commercial ne doit
+// jamais empêcher un collaborateur déjà autorisé d'atteindre les routeurs qui
+// lui ont été attribués. Les postes invités sont donc ajoutés au plafond du hub
+// tout en restant des appareils indépendants, journalisés et révocables.
+function organizationOperatorLimitForHub(organizationId, subscription) {
+  const ownerLimit = deviceLimitForHub(subscription);
+  if (ownerLimit === null) return null;
+  return ownerLimit + Number(statements.countOrganizationMemberDevices.get(organizationId).count);
 }
 
 function planResponse(plan) {
@@ -4071,11 +4264,11 @@ const handlers = [
       throw new HttpError(403, "Cette organisation n'est pas accessible.");
     }
     const switchedAt = nowIso();
-    statements.setOrganizationSessionMembership.run(membership.id, switchedAt, session.id);
-    statements.touchOrganizationMembership.run(switchedAt, switchedAt, membership.id);
+    const nextSession = createOrganizationSession(request, user.id, membership.id);
+    statements.revokeOrganizationSession.run(switchedAt, session.id);
     return organizationAuthResponse(
       user,
-      { ...session, active_membership_id: membership.id },
+      nextSession,
       membership
     );
   }),
@@ -4226,20 +4419,30 @@ const handlers = [
       db.exec("ROLLBACK");
       throw error;
     }
+    const vpnAccess = status === "disabled"
+      ? await deactivateOrganizationMemberDevices(
+        context.organization.id,
+        member.id,
+        "membership_disabled"
+      )
+      : { changed_device_count: 0, hub_synchronized_count: 0 };
     logEvent(request, null, "organization_member_updated", context.organization.id, null, {
       member_id: member.id,
       app_role: appRole,
       router_access_mode: access.mode,
       router_count: access.routerIds.length,
       sessions_revoked: true,
-      status
+      status,
+      affected_device_count: vpnAccess.changed_device_count
     });
     return {
       member: organizationUserResponse(
         statements.findOrganizationUserById.get(member.id),
         statements.findOrganizationMembershipById.get(membership.id)
       ),
-      sessions_revoked: true
+      sessions_revoked: true,
+      vpn_access_revoked: status === "disabled",
+      affected_device_count: vpnAccess.changed_device_count
     };
   }),
 
@@ -4320,12 +4523,23 @@ const handlers = [
       db.exec("ROLLBACK");
       throw error;
     }
+    const vpnAccess = await deactivateOrganizationMemberDevices(
+      context.organization.id,
+      member.id,
+      "membership_removed",
+      { permanent: true }
+    );
     logEvent(request, null, "organization_member_removed", context.organization.id, null, {
       invitation_pending: membership.invitation_status === "pending",
       member_id: member.id,
-      sessions_revoked: true
+      sessions_revoked: true,
+      revoked_device_count: vpnAccess.changed_device_count
     });
-    return { ok: true };
+    return {
+      ok: true,
+      vpn_access_revoked: true,
+      revoked_device_count: vpnAccess.changed_device_count
+    };
   }),
 
   route("POST", "/v1/saas/invitations/inspect", async (request, body) => {
@@ -5345,7 +5559,7 @@ const handlers = [
     });
     const tenant = await vpnHubRequest("/v1/tenants", {
       account_id: organization.id,
-      operator_limit: deviceLimitForHub(subscription),
+      operator_limit: organizationOperatorLimitForHub(organization.id, subscription),
       router_limit: Number(subscription.router_limit)
     });
     logEvent(request, null, "saas_vpn_bootstrapped", organization.id, null, {
@@ -5379,8 +5593,31 @@ const handlers = [
     }
 
     let device = statements.findOrganizationDeviceByInstallation.get(organization.id, installationId);
-    const maxDevices = deviceLimitValue(subscription);
+    const maxDevices = organizationDeviceLimitForContext(context);
+    const deviceAccessScope = organizationDeviceAccessScope(context);
     const now = nowIso();
+    let transferredFromUserId = null;
+    if (device && device.registered_by_user_id !== user.id) {
+      const existingPeer = statements.findOrganizationVpnPeerByDevice.get(organization.id, device.id);
+      // Une même machine peut avoir servi à un propriétaire puis à un membre
+      // invité. Nous autorisons ce passage uniquement si elle prouve posséder
+      // déjà la même identité WireGuard : aucun secret ni nouvel accès n'est
+      // créé. Cela évite le blocage des installations historiques partagées.
+      if (!existingPeer || existingPeer.public_key !== publicKey || device.status === "revoked") {
+        throw new HttpError(409, "Cette installation TicketPro appartient déjà à un autre membre.", {
+          code: "DEVICE_INSTALLATION_OWNED_BY_ANOTHER_USER"
+        });
+      }
+      transferredFromUserId = device.registered_by_user_id;
+      statements.transferOrganizationDeviceRegistration.run(
+        user.id,
+        now,
+        now,
+        organization.id,
+        device.id
+      );
+      device = statements.findOrganizationDeviceById.get(organization.id, device.id);
+    }
     if (!device) {
       const requestedReplacementDeviceId = typeof body.replacement_device_id === "string"
         ? body.replacement_device_id.trim()
@@ -5401,13 +5638,11 @@ const handlers = [
           });
         }
       }
-      const registeredCount = Number(
-        statements.countOrganizationRegisteredDevices.get(organization.id).count
-      );
+      const registeredCount = organizationDeviceCountForContext(context);
       if (maxDevices !== null && registeredCount >= maxDevices) {
         const replacementDeviceId = requestedReplacementDeviceId;
         if (!replacementDeviceId) {
-          throw new HttpError(409, "La limite d'appareils de votre abonnement est atteinte.", {
+          throw new HttpError(409, "La limite de postes sécurisés du propriétaire est atteinte.", {
             code: "DEVICE_LIMIT_REACHED",
             active_count: registeredCount,
             max_devices: maxDevices
@@ -5496,7 +5731,7 @@ const handlers = [
     try {
       tenant = await vpnHubRequest("/v1/tenants", {
         account_id: organization.id,
-        operator_limit: maxDevices,
+        operator_limit: organizationOperatorLimitForHub(organization.id, subscription),
         router_limit: Number(subscription.router_limit)
       });
       await revokeUnmanagedOrganizationOperatorPeers(organization.id);
@@ -5525,15 +5760,15 @@ const handlers = [
       device_id: device.id,
       installation_id_hash: hash(installationId),
       key_version: Number(vpnPeer.key_version),
-      organization_user_id: user.id
+      organization_user_id: user.id,
+      transferred_from_user_id: transferredFromUserId
     });
     return {
       device: organizationDeviceResponse(joinedDevice),
-      active_device_count: Number(
-        statements.countOrganizationRegisteredDevices.get(organization.id).count
-      ),
-      device_limit_mode: deviceLimitMode(subscription),
+      active_device_count: organizationDeviceCountForContext(context),
+      device_limit_mode: organizationDeviceLimitModeForContext(context),
       max_devices: maxDevices,
+      device_access_scope: deviceAccessScope,
       vpn: {
         address: provisioned.assigned_address,
         allowed_ips: [tenant.address_pool],
@@ -5548,20 +5783,26 @@ const handlers = [
   }),
 
   route("GET", "/v1/saas/devices", async (request) => {
-    const { organization } = requireOrganizationPermission(request, "global.vpn");
-    const subscription = currentOrganizationSubscription(organization.id);
+    const context = requireOrganizationPermission(request, "global.vpn");
+    const { organization, user } = context;
+    const isOwner = organizationDeviceAccessScope(context) === "owner";
     return {
-      devices: statements.listOrganizationDevices.all(organization.id).map(organizationDeviceResponse),
-      active_count: Number(
-        statements.countOrganizationRegisteredDevices.get(organization.id).count
-      ),
-      device_limit_mode: deviceLimitMode(subscription),
-      max_devices: deviceLimitValue(subscription)
+      devices: (isOwner
+        ? statements.listOrganizationDevices.all(organization.id)
+        : statements.listOrganizationDevicesForUser.all(organization.id, user.id)
+      ).map(organizationDeviceResponse),
+      active_count: organizationDeviceCountForContext(context),
+      collaborator_device_count: isOwner
+        ? Number(statements.countOrganizationMemberDevices.get(organization.id).count)
+        : 0,
+      device_access_scope: organizationDeviceAccessScope(context),
+      device_limit_mode: organizationDeviceLimitModeForContext(context),
+      max_devices: organizationDeviceLimitForContext(context)
     };
   }),
 
   route("POST", "/v1/saas/devices/heartbeat", async (request, body) => {
-    const { organization } = requireOrganizationPermission(request, "global.routers.select");
+    const { organization, user } = requireOrganizationPermission(request, "global.routers.select");
     const installationId = requireInstallationId(body);
     const appVersion = String(body.app_version ?? body.appVersion ?? "").trim();
     if (!appVersion || appVersion.length > 64) {
@@ -5569,6 +5810,11 @@ const handlers = [
     }
     const device = statements.findOrganizationDeviceByInstallation.get(organization.id, installationId);
     if (!device) throw new HttpError(404, "Appareil introuvable.", { code: "DEVICE_NOT_FOUND" });
+    if (device.registered_by_user_id !== user.id) {
+      throw new HttpError(403, "Cet appareil n'appartient pas à votre accès TicketPro.", {
+        code: "DEVICE_HEARTBEAT_FORBIDDEN"
+      });
+    }
     const now = nowIso();
     statements.heartbeatOrganizationDevice.run(appVersion, now, now, organization.id, device.id);
     const subscription = currentOrganizationSubscription(organization.id);
@@ -5631,7 +5877,7 @@ const handlers = [
         });
       }
       const activeCount = Number(
-        statements.countOrganizationRegisteredDevices.get(organization.id).count
+        statements.countOrganizationOwnerDevices.get(organization.id).count
       );
       if (activeCount !== 0) {
         throw new HttpError(409, "Un autre appareil actif peut gérer cette révocation.", {
@@ -5639,7 +5885,10 @@ const handlers = [
           active_count: activeCount
         });
       }
-      const conflictingPeer = statements.findOrganizationVpnPeerByPublicKey.get(newPublicKey);
+      const conflictingPeer = statements.findOrganizationVpnPeerByPublicKey.get(
+        newPublicKey,
+        organization.id
+      );
       if (conflictingPeer && conflictingPeer.device_id !== device.id) {
         throw new HttpError(409, "Cette clé VPN appartient déjà à un autre appareil.", {
           code: "VPN_PUBLIC_KEY_ALREADY_REGISTERED"
@@ -5647,10 +5896,10 @@ const handlers = [
       }
     }
 
-    const maxDevices = deviceLimitValue(subscription);
+    const maxDevices = organizationDeviceLimitForContext(context);
     const tenant = await vpnHubRequest("/v1/tenants", {
       account_id: organization.id,
-      operator_limit: maxDevices,
+      operator_limit: organizationOperatorLimitForHub(organization.id, subscription),
       router_limit: Number(subscription.router_limit)
     });
     statements.markOrganizationVpnPeerPending.run("enabled", nowIso(), device.id);
@@ -5715,10 +5964,8 @@ const handlers = [
     });
     return {
       device: organizationDeviceResponse(joinedDevice),
-      active_device_count: Number(
-        statements.countOrganizationRegisteredDevices.get(organization.id).count
-      ),
-      device_limit_mode: deviceLimitMode(subscription),
+      active_device_count: organizationDeviceCountForContext(context),
+      device_limit_mode: organizationDeviceLimitModeForContext(context),
       max_devices: maxDevices,
       vpn: {
         address: provisioned.assigned_address ?? vpnPeer.vpn_ip,
@@ -5735,9 +5982,10 @@ const handlers = [
 
   route("POST", "/v1/saas/devices/rotate-key", async (request, body) => {
     if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. Réessayez plus tard.");
-    const { organization, subscription, user } = requireOrganizationPermission(request, "global.vpn", {
+    const context = requireOrganizationPermission(request, "global.vpn", {
       requireActiveSubscription: true
     });
+    const { organization, subscription, user, membership } = context;
     const installationId = requireInstallationId(body);
     const previousPublicKey = requireVpnPublicKey({ public_key: body.previous_public_key });
     const newPublicKey = requireVpnPublicKey({ public_key: body.public_key });
@@ -5753,6 +6001,11 @@ const handlers = [
     if (!device || device.status === "revoked") {
       throw new HttpError(404, "Appareil actif introuvable.", { code: "DEVICE_NOT_FOUND" });
     }
+    if (device.registered_by_user_id !== user.id && membership.authority_role !== "owner") {
+      throw new HttpError(403, "Vous ne pouvez renouveler que la clé de votre propre appareil.", {
+        code: "DEVICE_KEY_ROTATION_FORBIDDEN"
+      });
+    }
     let vpnPeer = statements.findOrganizationVpnPeerByDevice.get(organization.id, device.id);
     if (!vpnPeer) throw new HttpError(404, "Pair VPN introuvable.", { code: "VPN_PEER_NOT_FOUND" });
     const alreadyRotated = vpnPeer.public_key === newPublicKey;
@@ -5762,17 +6015,20 @@ const handlers = [
         key_version: Number(vpnPeer.key_version)
       });
     }
-    const conflictingPeer = statements.findOrganizationVpnPeerByPublicKey.get(newPublicKey);
+    const conflictingPeer = statements.findOrganizationVpnPeerByPublicKey.get(
+      newPublicKey,
+      organization.id
+    );
     if (conflictingPeer && conflictingPeer.device_id !== device.id) {
       throw new HttpError(409, "Cette clé VPN appartient déjà à un autre appareil.", {
         code: "VPN_PUBLIC_KEY_ALREADY_REGISTERED"
       });
     }
 
-    const maxDevices = deviceLimitValue(subscription);
+    const maxDevices = organizationDeviceLimitForContext(context);
     const tenant = await vpnHubRequest("/v1/tenants", {
       account_id: organization.id,
-      operator_limit: maxDevices,
+      operator_limit: organizationOperatorLimitForHub(organization.id, subscription),
       router_limit: Number(subscription.router_limit)
     });
     statements.markOrganizationVpnPeerPending.run("enabled", nowIso(), device.id);
@@ -5818,10 +6074,8 @@ const handlers = [
     });
     return {
       device: organizationDeviceResponse(joinedDevice),
-      active_device_count: Number(
-        statements.countOrganizationRegisteredDevices.get(organization.id).count
-      ),
-      device_limit_mode: deviceLimitMode(subscription),
+      active_device_count: organizationDeviceCountForContext(context),
+      device_limit_mode: organizationDeviceLimitModeForContext(context),
       max_devices: maxDevices,
       vpn: {
         address: provisioned.assigned_address ?? vpnPeer.vpn_ip,
@@ -5838,10 +6092,16 @@ const handlers = [
 
   route("POST", "/v1/saas/devices/revoke", async (request, body) => {
     if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. RÃ©essayez plus tard.");
-    const { organization, user } = requireOrganizationPermission(request, "global.vpn");
+    const context = requireOrganizationPermission(request, "global.vpn");
+    const { organization, user, membership } = context;
     const deviceId = requireText(body, "device_id", 200);
     const device = statements.findOrganizationDeviceById.get(organization.id, deviceId);
     if (!device) throw new HttpError(404, "Appareil introuvable.", { code: "DEVICE_NOT_FOUND" });
+    if (device.registered_by_user_id !== user.id && membership.authority_role !== "owner") {
+      throw new HttpError(403, "Seul le propriétaire peut révoquer l'appareil d'un autre membre.", {
+        code: "DEVICE_REVOCATION_FORBIDDEN"
+      });
+    }
     const vpnPeer = statements.findOrganizationVpnPeerByDevice.get(organization.id, device.id);
     if (!vpnPeer) throw new HttpError(404, "Pair VPN introuvable.", { code: "VPN_PEER_NOT_FOUND" });
     const now = nowIso();

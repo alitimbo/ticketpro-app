@@ -67,6 +67,8 @@ export type HotspotServer = {
   interfaceName: string;
   addressPool: string;
   profileName: string;
+  /** DNS captif lu depuis le profil Hotspot RouterOS associé. */
+  dnsName?: string;
   isEnabled: boolean;
 };
 
@@ -101,7 +103,7 @@ export type HotspotUser = {
   passwordSecretRef: string;
   planId: string;
   profileName: string;
-  status: "available" | "active" | "disabled" | "expired";
+  status: "available" | "active" | "disabled" | "error" | "exhausted" | "expired";
   comment: string | null;
   createdAt: string;
   downloadedBytes?: number;

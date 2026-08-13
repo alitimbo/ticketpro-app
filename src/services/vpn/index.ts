@@ -33,6 +33,7 @@ export type {
 } from "./WireGuardWindowsService";
 export {
   EmbeddedVpnProvisioningService,
+  waitForEmbeddedVpnProvisioning,
   type EmbeddedVpnProvisioningDependencies,
   type EmbeddedVpnProvisioningResult
 } from "./EmbeddedVpnProvisioningService";
