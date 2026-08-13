@@ -173,17 +173,41 @@ export type SaasRouterRecoverySnapshot = {
   name: string;
   notes: string | null;
   plans: Array<{
+    created_at: string;
+    created_by_profile_id: string | null;
+    currency: string;
     data_limit_mb: number | null;
     download_limit: string | null;
     duration_minutes: number;
     id: string;
+    last_synced_at: string | null;
+    mikrotik_id: string | null;
     mikrotik_profile_name: string | null;
     name: string;
     price_hint: number | null;
+    revision: number;
     shared_users: number;
     status: string;
     upload_limit: string | null;
+    updated_at: string;
+    updated_by_profile_id: string | null;
     validity_minutes: number | null;
+    history?: Array<{
+      action: "created" | "updated" | "deleted" | "restored" | "synchronized";
+      actor_profile_id: string | null;
+      created_at: string;
+      currency: string;
+      id: string;
+      mikrotik_id: string | null;
+      mikrotik_profile_name: string | null;
+      name: string;
+      plan_id: string;
+      price_hint: number | null;
+      revision: number;
+      router_id: string;
+      snapshot_json: string;
+      source: string;
+    }>;
   }>;
   routeros_version: string | null;
   serial_number: string | null;
@@ -196,6 +220,98 @@ export type SaasRouterRecoverySnapshot = {
     public_key: string;
     status: "active" | "draft" | "revoked";
   } | null;
+};
+
+export type SaasTicketBatchSnapshot = {
+  code_length: number;
+  created_at: string;
+  created_by_email: string;
+  created_by_name: string;
+  created_by_user_id: string;
+  currency: string;
+  hotspot_server_name: string;
+  id: string;
+  operator_profile: string;
+  plan_id: string;
+  prefix: string | null;
+  price_snapshot: number | null;
+  quantity: number;
+  status: string;
+  sync_status: string;
+  updated_at: string;
+};
+
+export type SaasTicketSnapshot = {
+  activated_at: string | null;
+  archived_at: string | null;
+  batch_id: string;
+  completed_at: string | null;
+  created_at: string;
+  created_by_email: string;
+  created_by_name: string;
+  created_by_role: string;
+  created_by_user_id: string;
+  data_remaining_bytes: number | null;
+  deleted_at: string | null;
+  downloaded_bytes: number;
+  expires_at: string | null;
+  exported_at: string | null;
+  hotspot_server_name: string;
+  id: string;
+  ip_address: string | null;
+  last_router_sync_at: string | null;
+  mac_address: string | null;
+  mikrotik_id: string | null;
+  mikrotik_profile_name: string | null;
+  password_is_username: boolean;
+  plan_id: string;
+  printed_count: number;
+  remaining_seconds: number | null;
+  router_deleted_at: string | null;
+  status: string;
+  sync_status: string;
+  updated_at: string;
+  uploaded_bytes: number;
+  uptime_seconds: number;
+  username: string;
+};
+
+export type SaasRouterTicketCatalog = {
+  batches: SaasTicketBatchSnapshot[];
+  router_id: string;
+  tickets: SaasTicketSnapshot[];
+};
+
+export type SaasGeneratedFileSnapshot = {
+  batch_id: string | null;
+  created_at: string;
+  created_by_email: string;
+  created_by_name: string;
+  created_by_role: string;
+  created_by_user_id: string;
+  deleted_at: string | null;
+  file_name: string;
+  format: string;
+  id: string;
+  metadata_json: string | null;
+  router_id: string;
+  sync_status: string;
+  type: string;
+  updated_at: string;
+};
+
+export type SaasActivityLogSnapshot = {
+  category: string;
+  created_at: string;
+  created_by_email: string;
+  created_by_name: string;
+  created_by_role: string;
+  created_by_user_id: string;
+  id: string;
+  level: "critical" | "error" | "info" | "warning";
+  router_id: string;
+  technical_message: string | null;
+  user_message: string;
 };
 
 export class SaasRequestError extends Error {
@@ -694,6 +810,86 @@ export async function saveSaasRouterRecoverySnapshot(
     token
   );
   return result.router;
+}
+
+export async function getSaasRouterTicketCatalog(routerId: string): Promise<SaasRouterTicketCatalog> {
+  const token = await requireSessionToken();
+  return request<SaasRouterTicketCatalog>(
+    `/v1/saas/router-ticket-catalog?router_id=${encodeURIComponent(routerId)}`,
+    undefined,
+    token,
+    "GET"
+  );
+}
+
+export async function saveSaasRouterTicketCatalog(input: {
+  batches: Array<Omit<SaasTicketBatchSnapshot,
+    "created_by_email" | "created_by_name" | "created_by_user_id" | "operator_profile">>;
+  router_id: string;
+  tickets: Array<Omit<SaasTicketSnapshot,
+    "created_by_email" | "created_by_name" | "created_by_role" | "created_by_user_id">>;
+}): Promise<SaasRouterTicketCatalog> {
+  const token = await requireSessionToken();
+  return request<SaasRouterTicketCatalog>(
+    "/v1/saas/router-ticket-catalog",
+    input,
+    token
+  );
+}
+
+export async function getSaasRouterFiles(routerId: string): Promise<SaasGeneratedFileSnapshot[]> {
+  const token = await requireSessionToken();
+  const result = await request<{ files: SaasGeneratedFileSnapshot[] }>(
+    `/v1/saas/router-files?router_id=${encodeURIComponent(routerId)}`,
+    undefined,
+    token,
+    "GET"
+  );
+  return result.files;
+}
+
+export async function saveSaasRouterFiles(input: {
+  files: Array<Omit<SaasGeneratedFileSnapshot,
+    "created_by_email" | "created_by_name" | "created_by_role" | "created_by_user_id" | "router_id">>;
+  router_id: string;
+}): Promise<SaasGeneratedFileSnapshot[]> {
+  const token = await requireSessionToken();
+  const result = await request<{ files: SaasGeneratedFileSnapshot[] }>(
+    "/v1/saas/router-files",
+    input,
+    token
+  );
+  return result.files;
+}
+
+export async function getSaasRouterActivityLogs(routerId: string): Promise<SaasActivityLogSnapshot[]> {
+  const token = await requireSessionToken();
+  const result = await request<{ logs: SaasActivityLogSnapshot[] }>(
+    `/v1/saas/router-activity-logs?router_id=${encodeURIComponent(routerId)}`,
+    undefined,
+    token,
+    "GET"
+  );
+  return result.logs;
+}
+
+export async function saveSaasRouterActivityLogs(input: {
+  logs: Array<Omit<SaasActivityLogSnapshot,
+    "created_by_email" | "created_by_name" | "created_by_role" | "created_by_user_id" | "router_id">>;
+  router_id: string;
+}): Promise<void> {
+  const token = await requireSessionToken();
+  await request("/v1/saas/router-activity-logs", input, token);
+}
+
+export async function cleanSaasRouterActivityLogs(routerId: string, before: string): Promise<number> {
+  const token = await requireSessionToken();
+  const result = await request<{ removed: number }>(
+    "/v1/saas/router-activity-logs/clean",
+    { before, router_id: routerId },
+    token
+  );
+  return result.removed;
 }
 
 export async function removeSaasRouterRecoverySnapshot(routerId: string): Promise<void> {

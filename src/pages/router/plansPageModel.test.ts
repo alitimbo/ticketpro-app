@@ -3,6 +3,7 @@ import {
   applyTemplate,
   duplicatePlan,
   emptyPlanFormValues,
+  formatPlanDisplayName,
   formValuesToPlanDraft,
   planFromHotspotPlan,
   quickPlanTemplates,
@@ -16,6 +17,7 @@ describe("plansPageModel", () => {
 
     expect(validatePlanForm(values)).toBeNull();
     expect(draft).toMatchObject({
+      currency: "CFA",
       dataLimitMb: 2048,
       downloadLimit: "5M",
       durationMinutes: 180,
@@ -37,6 +39,12 @@ describe("plansPageModel", () => {
 
   it("valide les champs obligatoires", () => {
     expect(validatePlanForm({ ...emptyPlanFormValues, name: "" })).toBe("Entrez le nom du plan.");
+    expect(validatePlanForm({ ...emptyPlanFormValues, currency: "", name: "Test" })).toBe(
+      "Choisissez une devise pour ce plan."
+    );
+    expect(validatePlanForm({ ...emptyPlanFormValues, currency: "€", name: "Test" })).toContain(
+      "entre 2 et 12"
+    );
     expect(validatePlanForm({ ...emptyPlanFormValues, name: "Test", sharedUsers: "0" })).toBe(
       "Entrez un nombre d’appareils valide."
     );
@@ -65,5 +73,11 @@ describe("plansPageModel", () => {
       name: "1h copie",
       status: "active"
     });
+  });
+
+  it("masque le suffixe monétaire du nom technique sans modifier le profil RouterOS", () => {
+    expect(formatPlanDisplayName("1h-100-cfa")).toBe("1h-100");
+    expect(formatPlanDisplayName("1h-100-CFA")).toBe("1h-100");
+    expect(formatPlanDisplayName("Forfait soirée")).toBe("Forfait soirée");
   });
 });

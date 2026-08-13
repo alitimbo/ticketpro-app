@@ -150,10 +150,12 @@ export function validateTicketGeneration(
 
 export function buildTicketBatch(input: {
   accountId: string;
+  currency?: string;
   id: string;
   operatorProfileId: string;
   operatorRole: UserRole;
   planId: string;
+  priceSnapshot?: number | null;
   quantity: number;
   routerId: string;
   serverName?: string;
@@ -163,12 +165,14 @@ export function buildTicketBatch(input: {
   return {
     account_id: input.accountId,
     code_length: input.options.codeLength,
+    currency: normalizeCurrency(input.currency),
     created_by_profile: input.operatorRole,
     created_by_profile_id: input.operatorProfileId,
     generated_file_id: `${input.id}-pdf`,
     id: input.id,
     operator_profile: input.operatorRole,
     plan_id: input.planId,
+    price_snapshot: input.priceSnapshot ?? null,
     prefix: normalizePrefix(input.options.prefix) || null,
     quantity: input.quantity,
     router_id: input.routerId,
@@ -275,9 +279,10 @@ export function createBatchId(): string {
 
 export function buildFileName(input: {
   batchId: string;
+  currency?: string;
   generatedAt?: Date;
   planName: string;
-  priceCfa: number | null;
+  price: number | null;
   quantity: number;
   routerName: string;
 }): string {
@@ -288,7 +293,10 @@ export function buildFileName(input: {
     .replace("T", "-")
     .slice(0, 15);
   const batchSuffix = sanitizeFileSegment(input.batchId.replace(/^batch-/, "")).slice(0, 8) || "lot";
-  const price = input.priceCfa === null ? "prix-non-defini" : `${Math.max(0, Math.round(input.priceCfa))}CFA`;
+  const currency = sanitizeFileSegment(normalizeCurrency(input.currency)) || "CFA";
+  const price = input.price === null
+    ? `prix-non-defini-${currency}`
+    : `${Math.max(0, Math.round(input.price))}${currency}`;
 
   return [
     sanitizeFileSegment(input.routerName) || "Routeur",
@@ -298,6 +306,10 @@ export function buildFileName(input: {
     timestamp,
     batchSuffix
   ].join("-") + ".pdf";
+}
+
+export function normalizeCurrency(value: string | null | undefined): string {
+  return value?.trim().slice(0, 12) || "CFA";
 }
 
 function sanitizeFileSegment(value: string): string {
@@ -325,6 +337,7 @@ export function buildTicketPdfInput(input: {
     batchId: input.batch.id,
     createdByProfile: input.batch.created_by_profile,
     createdByProfileId: input.batch.created_by_profile_id,
+    currency: normalizeCurrency(input.batch.currency),
     dataLimitLabel: formatDataLimit(input.plan.dataLimitMb),
     durationLabel: formatDuration(input.plan.durationMinutes),
     fileName: input.fileName,
@@ -333,7 +346,9 @@ export function buildTicketPdfInput(input: {
     hotspotAddress: input.router.hotspotAddress?.trim() || "Adresse Hotspot à configurer",
     ownerPhone: input.ownerPhone.trim(),
     planName: input.plan.name,
-    priceLabel: input.plan.priceHint === null ? null : `CFA${input.plan.priceHint}`,
+    priceLabel: input.plan.priceHint === null
+      ? null
+      : `${input.plan.priceHint.toLocaleString("fr-FR")} ${normalizeCurrency(input.batch.currency)}`,
     qrCodeEnabled: false,
     routerId: input.router.id,
     template: defaultTicketGenerationOptions.pdfTemplate,

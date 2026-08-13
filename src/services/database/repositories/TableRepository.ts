@@ -8,6 +8,7 @@ export type LocalTableName =
   | "app_settings"
   | "billing_invoices"
   | "generated_files"
+  | "hotspot_plan_history"
   | "hotspot_plans"
   | "internal_profiles"
   | "license_state"
@@ -105,9 +106,31 @@ const tableColumns: Record<LocalTableName, string[]> = {
     "upload_limit",
     "shared_users",
     "price_hint",
+    "currency",
+    "mikrotik_id",
     "mikrotik_profile_name",
+    "created_by_profile_id",
+    "updated_by_profile_id",
+    "revision",
+    "last_synced_at",
     "status",
     "sync_status"
+  ],
+  hotspot_plan_history: [
+    "id",
+    "plan_id",
+    "router_id",
+    "action",
+    "revision",
+    "actor_profile_id",
+    "source",
+    "mikrotik_id",
+    "mikrotik_profile_name",
+    "name",
+    "currency",
+    "price_hint",
+    "snapshot_json",
+    "created_at"
   ],
   internal_profiles: [
     "id",

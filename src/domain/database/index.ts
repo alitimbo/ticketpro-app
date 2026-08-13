@@ -23,6 +23,7 @@ export type {
   CreateTicketBatchInput,
   CreateTicketInput,
   GeneratedFileRecord,
+  HotspotPlanHistoryRecord,
   HotspotPlanRecord,
   InternalProfileRecord,
   LicenseStateRecord,

@@ -50,6 +50,14 @@ const routerOrganizationScopeMigrationPath = resolve(
   process.cwd(),
   "src-tauri/migrations/025_router_organization_scope.sql"
 );
+const ticketBatchCurrencyMigrationPath = resolve(
+  process.cwd(),
+  "src-tauri/migrations/026_ticket_batch_currency.sql"
+);
+const hotspotPlanIdentityAuditMigrationPath = resolve(
+  process.cwd(),
+  "src-tauri/migrations/027_hotspot_plan_identity_audit.sql"
+);
 
 describe("migration comptes et abonnements", () => {
   const migration = readFileSync(migrationPath, "utf8");
@@ -67,6 +75,8 @@ describe("migration comptes et abonnements", () => {
   const ticketRuntimeTrackingMigration = readFileSync(ticketRuntimeTrackingMigrationPath, "utf8");
   const routerCloudIdentityMigration = readFileSync(routerCloudIdentityMigrationPath, "utf8");
   const routerOrganizationScopeMigration = readFileSync(routerOrganizationScopeMigrationPath, "utf8");
+  const ticketBatchCurrencyMigration = readFileSync(ticketBatchCurrencyMigrationPath, "utf8");
+  const hotspotPlanIdentityAuditMigration = readFileSync(hotspotPlanIdentityAuditMigrationPath, "utf8");
 
   it("ajoute la grille tarifaire evolutive des abonnements logiciel", () => {
     expect(migration).toContain("price_per_router_cfa");
@@ -191,5 +201,23 @@ describe("migration comptes et abonnements", () => {
     expect(routerOrganizationScopeMigration).toContain("idx_routers_account_organization");
     expect(routerOrganizationScopeMigration).toContain("uq_routers_account_organization_cloud_id");
     expect(routerOrganizationScopeMigration).not.toContain("DROP TABLE");
+  });
+
+  it("fige la devise choisie au moment de la génération d'un lot", () => {
+    expect(ticketBatchCurrencyMigration).toContain("ALTER TABLE ticket_batches ADD COLUMN currency TEXT");
+    expect(ticketBatchCurrencyMigration).toContain("ALTER TABLE ticket_batches ADD COLUMN price_snapshot INTEGER");
+    expect(ticketBatchCurrencyMigration).toContain("DEFAULT 'CFA'");
+    expect(ticketBatchCurrencyMigration).not.toContain("DROP TABLE");
+  });
+
+  it("rend la devise des plans obligatoire et conserve leur identite MikroTik et leur historique", () => {
+    expect(hotspotPlanIdentityAuditMigration).toContain("ADD COLUMN currency TEXT NOT NULL DEFAULT 'CFA'");
+    expect(hotspotPlanIdentityAuditMigration).toContain("ADD COLUMN mikrotik_id TEXT");
+    expect(hotspotPlanIdentityAuditMigration).toContain("ADD COLUMN revision INTEGER NOT NULL DEFAULT 1");
+    expect(hotspotPlanIdentityAuditMigration).toContain("CREATE TABLE IF NOT EXISTS hotspot_plan_history");
+    expect(hotspotPlanIdentityAuditMigration).toContain("actor_profile_id");
+    expect(hotspotPlanIdentityAuditMigration).toContain("trg_hotspot_plan_history_immutable_update");
+    expect(hotspotPlanIdentityAuditMigration).toContain("trg_hotspot_plan_history_immutable_delete");
+    expect(hotspotPlanIdentityAuditMigration).not.toContain("DROP TABLE");
   });
 });

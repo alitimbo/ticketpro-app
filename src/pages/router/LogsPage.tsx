@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import {
   AlertTriangle,
@@ -24,6 +24,7 @@ import {
   defaultLogRetentionDays,
   LogRetentionService
 } from "../../services/logging";
+import { OrganizationOperationsSyncService } from "../../services/sync";
 import {
   ActionMenu,
   Badge,
@@ -82,6 +83,7 @@ export function LogsPage() {
   const [retentionDays, setRetentionDays] = useState(defaultLogRetentionDays);
   const [eligibleForCleanup, setEligibleForCleanup] = useState(0);
   const [lastCleanupAt, setLastCleanupAt] = useState<string | null>(null);
+  const migratedRouterIdsRef = useRef(new Set<string>());
 
   const appLogRepository = useMemo(() => new AppLogRepository(database), [database]);
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
@@ -90,22 +92,41 @@ export function LogsPage() {
     () => new LogRetentionService(database),
     [database]
   );
+  const organizationOperations = useMemo(
+    () => session
+      ? new OrganizationOperationsSyncService(
+          database,
+          session.account_id,
+          session.internal_profile_id,
+          session.internal_profile_role
+        )
+      : null,
+    [database, session]
+  );
 
-  const loadPersistedLogs = async () => {
+  const loadPersistedLogs = useCallback(async (options: { silent?: boolean } = {}) => {
     if (!isPersistent || !isInitialized || !session) {
       return;
     }
 
-    setIsLoading(true);
+    if (!options.silent) setIsLoading(true);
     try {
+      const policy = await logRetentionService.getPolicy(session.account_id);
       await logRetentionService.runAutomatic(session.account_id);
-      const [records, routers, policy] = await Promise.all([
-        appLogRepository.listByAccount(session.account_id),
-        saasAccount?.organization.id
+      const routers = await (saasAccount?.organization.id
           ? routerRepository.listByOrganization(session.account_id, saasAccount.organization.id)
-          : routerRepository.listByAccount(session.account_id),
-        logRetentionService.getPolicy(session.account_id)
-      ]);
+          : routerRepository.listByAccount(session.account_id));
+      const retentionCutoff = new Date();
+      retentionCutoff.setDate(retentionCutoff.getDate() - policy.days);
+      await Promise.all(routers.map(async (router) => {
+        await organizationOperations?.cleanLogs(router.id, retentionCutoff.toISOString()).catch(() => undefined);
+        if (!migratedRouterIdsRef.current.has(router.id)) {
+          await organizationOperations?.publishLogs(router.id).catch(() => undefined);
+          migratedRouterIdsRef.current.add(router.id);
+        }
+        await organizationOperations?.pullLogs(router.id).catch(() => undefined);
+      }));
+      const records = await appLogRepository.listByAccount(session.account_id);
       const eligible = await logRetentionService.countEligible(
         session.account_id,
         policy.days
@@ -125,22 +146,36 @@ export function LogsPage() {
         text: "Impossible de charger les journaux locaux. Réessayez dans un instant."
       });
     } finally {
-      setIsLoading(false);
+      if (!options.silent) setIsLoading(false);
     }
-  };
-
-  useEffect(() => {
-    void loadPersistedLogs();
   }, [
     appLogRepository,
-    database,
     isInitialized,
     isPersistent,
     logRetentionService,
+    organizationOperations,
     routerRepository,
     saasAccount?.organization.id,
     session
   ]);
+
+  useEffect(() => {
+    void loadPersistedLogs();
+  }, [loadPersistedLogs]);
+
+  useEffect(() => {
+    if (!isPersistent) return undefined;
+    const synchronize = () => {
+      if (document.visibilityState === "hidden") return;
+      void loadPersistedLogs({ silent: true });
+    };
+    const interval = window.setInterval(synchronize, 15_000);
+    window.addEventListener("focus", synchronize);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", synchronize);
+    };
+  }, [isPersistent, loadPersistedLogs]);
 
   const scopedLogs = useMemo(() => scopeLogsForSession(logs, session), [logs, session]);
   const filteredLogs = useMemo(
@@ -256,6 +291,12 @@ export function LogsPage() {
       let removedCount = 0;
 
       if (isPersistent && session) {
+        const organizationRouters = await (saasAccount?.organization.id
+          ? routerRepository.listByOrganization(session.account_id, saasAccount.organization.id)
+          : routerRepository.listByAccount(session.account_id));
+        await Promise.all(
+          organizationRouters.map((router) => organizationOperations?.cleanLogs(router.id, cutoff.toISOString()))
+        );
         const result = await logRetentionService.cleanNow(
           session.account_id,
           retentionDays
@@ -684,7 +725,9 @@ function LogRow({
           </div>
           <p>
             {formatLogDate(log.createdAt)} · {categoryLabel(log.category)} ·{" "}
-            {profileLabel(log.userProfile)}
+            {log.actorLabel
+              ? `${log.actorLabel} (${profileLabel(log.userProfile)})`
+              : profileLabel(log.userProfile)}
             {log.routerName ? ` · ${log.routerName}` : ""}
           </p>
         </div>

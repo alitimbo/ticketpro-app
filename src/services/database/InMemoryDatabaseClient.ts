@@ -15,6 +15,7 @@ const tableNames: LocalTableName[] = [
   "app_settings",
   "billing_invoices",
   "generated_files",
+  "hotspot_plan_history",
   "hotspot_plans",
   "internal_profiles",
   "license_state",
@@ -177,6 +178,10 @@ export class InMemoryDatabaseClient implements DatabaseClient {
 
     if (normalized.includes("where batch_id = ?1")) {
       return rows.filter((row) => row.batch_id === params[0]) as T[];
+    }
+
+    if (normalized.includes("where plan_id = ?1")) {
+      return rows.filter((row) => row.plan_id === params[0]) as T[];
     }
 
     if (

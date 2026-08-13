@@ -76,6 +76,12 @@ export class RouterCloudRecoveryService {
       this.vpnPeers.findByRouter(this.accountId, router.id)
     ]);
     const credential = await decryptLocalSecret(router.encrypted_password);
+    const planHistoryById = new Map(
+      await Promise.all(plans.map(async (plan) => [
+        plan.id,
+        (await this.plans.listHistory(plan.id)).slice(0, 500)
+      ] as const))
+    );
     const saved = await this.cloud.saveSnapshot({
       api_port: router.api_port,
       api_ssl_port: router.api_ssl_port,
@@ -98,16 +104,25 @@ export class RouterCloudRecoveryService {
       name: router.name,
       notes: router.notes,
       plans: plans.map((plan) => ({
+        created_at: plan.created_at,
+        created_by_profile_id: plan.created_by_profile_id,
+        currency: plan.currency,
         data_limit_mb: plan.data_limit_mb,
         download_limit: plan.download_limit,
         duration_minutes: plan.duration_minutes,
+        history: planHistoryById.get(plan.id) ?? [],
         id: plan.id,
+        last_synced_at: plan.last_synced_at,
+        mikrotik_id: plan.mikrotik_id,
         mikrotik_profile_name: plan.mikrotik_profile_name,
         name: plan.name,
         price_hint: plan.price_hint,
+        revision: plan.revision,
         shared_users: plan.shared_users,
         status: plan.status,
         upload_limit: plan.upload_limit,
+        updated_at: plan.updated_at,
+        updated_by_profile_id: plan.updated_by_profile_id,
         validity_minutes: plan.validity_minutes
       })),
       routeros_version: router.routeros_version,
@@ -252,18 +267,43 @@ export class RouterCloudRecoveryService {
 
     const localPlans = await this.plans.listByRouter(localRouterId);
     for (const plan of remote.plans) {
-      if (!localPlans.some((local) =>
+      const matchingLocal = localPlans.find((local) =>
         local.id === plan.id
         || (
           local.mikrotik_profile_name
           && local.mikrotik_profile_name === plan.mikrotik_profile_name
         )
-      )) {
+      );
+      let localPlanId = matchingLocal?.id ?? plan.id;
+      if (!matchingLocal) {
         const occupiedPlan = await this.plans.findById(plan.id);
-        const localPlanId = occupiedPlan && occupiedPlan.router_id !== localRouterId
+        localPlanId = occupiedPlan && occupiedPlan.router_id !== localRouterId
           ? `plan-${crypto.randomUUID()}`
           : plan.id;
-        await this.plans.create(planInputFromRecovery(localRouterId, localPlanId, plan));
+        await this.plans.create(
+          planInputFromRecovery(localRouterId, localPlanId, plan),
+          {
+            action: "restored",
+            actorProfileId: this.internalProfileId,
+            source: "vps-recovery"
+          }
+        );
+      } else if ((plan.revision ?? 1) > matchingLocal.revision) {
+        await this.plans.update({
+          ...planInputFromRecovery(localRouterId, localPlanId, plan),
+          sync_status: matchingLocal.sync_status
+        }, {
+          action: "restored",
+          actorProfileId: this.internalProfileId,
+          source: "vps-recovery-newer-revision"
+        });
+      }
+      if (plan.history?.length) {
+        await this.plans.importHistory(plan.history.map((entry) => ({
+          ...entry,
+          plan_id: localPlanId,
+          router_id: localRouterId
+        })));
       }
     }
 
@@ -407,18 +447,26 @@ function planInputFromRecovery(
   plan: SaasRouterRecoverySnapshot["plans"][number]
 ): CreateHotspotPlanInput {
   return {
+    created_at: plan.created_at,
+    created_by_profile_id: plan.created_by_profile_id,
+    currency: plan.currency,
     data_limit_mb: plan.data_limit_mb,
     download_limit: plan.download_limit,
     duration_minutes: plan.duration_minutes,
     id: localPlanId,
+    last_synced_at: plan.last_synced_at,
+    mikrotik_id: plan.mikrotik_id,
     mikrotik_profile_name: plan.mikrotik_profile_name,
     name: plan.name,
     price_hint: plan.price_hint,
+    revision: plan.revision,
     router_id: routerId,
     shared_users: plan.shared_users,
     status: plan.status,
     sync_status: "synced",
     upload_limit: plan.upload_limit,
+    updated_at: plan.updated_at,
+    updated_by_profile_id: plan.updated_by_profile_id,
     validity_minutes: plan.validity_minutes
   };
 }

@@ -5,10 +5,12 @@ import { formatInternationalPhone, normalizeInternationalPhone } from "../../sha
 
 export function TicketDisplaySettingsForm({
   companyName,
+  lockedCurrency,
   onChange,
   value
 }: {
   companyName?: string | null;
+  lockedCurrency?: string | null;
   onChange: (value: TicketDisplaySettings) => void;
   value: TicketDisplaySettings;
 }) {
@@ -64,7 +66,19 @@ export function TicketDisplaySettingsForm({
         </div>
         <label className="form-field ticket-settings-short-field">
           Devise
-          <input maxLength={12} value={value.currency} onChange={(event) => update({ currency: event.target.value })} />
+          <input
+            disabled={Boolean(lockedCurrency)}
+            maxLength={12}
+            value={lockedCurrency || value.currency}
+            onChange={(event) => {
+              if (!lockedCurrency) {
+                update({ currency: event.target.value });
+              }
+            }}
+          />
+          {lockedCurrency ? (
+            <small>Devise définie par le plan sélectionné. Modifiez ou dupliquez le plan pour la changer.</small>
+          ) : null}
         </label>
       </section>
 

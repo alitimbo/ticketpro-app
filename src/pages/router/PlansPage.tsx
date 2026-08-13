@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import {
   Copy,
@@ -31,11 +31,12 @@ import {
   TicketRepository,
   useAppDatabase
 } from "../../services/database";
-import { ActionMenu, Badge, Button, Card, EmptyState, FilterButton, PageHeader, StatusDot } from "../../shared/ui";
+import { ActionMenu, AsyncStateCard, Badge, Button, Card, EmptyState, FilterButton, PageHeader, StatusDot } from "../../shared/ui";
 import {
   applyTemplate,
   emptyPlanFormValues,
   formValuesToPlanDraft,
+  formatPlanDisplayName,
   formatPlanMinutes,
   planFromHotspotPlan,
   planFromRecord,
@@ -46,7 +47,8 @@ import {
   type PlanFormValues,
   type PlanViewModel
 } from "./plansPageModel";
-import { RouterCloudRecoveryService } from "../../services/recovery";
+import { reconcileRouterPlanCatalog, RouterCloudRecoveryService } from "../../services/recovery";
+import type { HotspotPlanHistoryRecord } from "../../domain/database";
 
 type PlanFormState = {
   error: string | null;
@@ -64,8 +66,14 @@ export function PlansPage() {
   const [formState, setFormState] = useState<PlanFormState | null>(null);
   const [logs, setLogs] = useState<RouterActionLog[]>([]);
   const [message, setMessage] = useState<string | null>(null);
-  const [persistedService, setPersistedService] = useState<RouterService | null>(null);
+  const [persistedServiceEntry, setPersistedServiceEntry] = useState<{
+    routerId: string;
+    service: RouterService;
+  } | null>(null);
+  const [catalogStatus, setCatalogStatus] = useState<"loading" | "ready" | "error">("loading");
+  const catalogRequestIdRef = useRef(0);
   const [selectedPlan, setSelectedPlan] = useState<PlanViewModel | null>(null);
+  const [selectedPlanHistory, setSelectedPlanHistory] = useState<HotspotPlanHistoryRecord[]>([]);
   const [syncingPlanId, setSyncingPlanId] = useState<string | null>(null);
   const [formOperation, setFormOperation] = useState<"create" | "edit" | null>(null);
   const planRepository = useMemo(() => new HotspotPlanRepository(database), [database]);
@@ -97,7 +105,7 @@ export function PlansPage() {
   );
 
   const getPersistedService = async (): Promise<RouterService> => {
-    if (persistedService) return persistedService;
+    if (persistedServiceEntry?.routerId === routerId) return persistedServiceEntry.service;
     if (!isInitialized || !session) {
       throw new Error("La base locale ou la session n'est pas encore prête.");
     }
@@ -114,7 +122,7 @@ export function PlansPage() {
       logger: { write: (log) => setLogs((current) => [...current, log]) },
       router
     });
-    setPersistedService(serviceForRouter);
+    setPersistedServiceEntry({ routerId, service: serviceForRouter });
     return serviceForRouter;
   };
 
@@ -129,12 +137,14 @@ export function PlansPage() {
 
   useEffect(() => {
     if (!isPersistent || !isInitialized || !session) {
-      setPersistedService(null);
+      setPersistedServiceEntry(null);
       return undefined;
     }
 
     let mounted = true;
     const accountId = session?.account_id;
+    setPersistedServiceEntry(null);
+    setCatalogStatus("loading");
 
     async function prepareService() {
       const router = await routerRepository.findById(routerId);
@@ -152,7 +162,7 @@ export function PlansPage() {
       });
 
       if (mounted) {
-        setPersistedService(serviceForRouter);
+        setPersistedServiceEntry({ routerId, service: serviceForRouter });
       }
     }
 
@@ -167,50 +177,77 @@ export function PlansPage() {
     };
   }, [connectionRepository, isInitialized, isPersistent, routerId, routerRepository, session]);
 
-  useEffect(() => {
-    if (isPersistent && (!isInitialized || !routerId || !session)) {
-      return undefined;
-    }
+  const refreshPlans = async () => {
+    if (isPersistent && (!isInitialized || !routerId || !session)) return;
+    const requestId = ++catalogRequestIdRef.current;
+    setCatalogStatus("loading");
+    setMessage(null);
 
-    let mounted = true;
-    const accountId = session?.account_id;
-
-    async function loadPlans() {
+    try {
       if (isPersistent) {
-        const [router, records, ticketRecords] = await Promise.all([
+        const activeService = await getPersistedService();
+        const [router, remotePlans, ticketRecords] = await Promise.all([
           routerRepository.findById(routerId),
-          planRepository.listByRouter(routerId),
+          activeService.getHotspotPlans(),
           ticketRepository.listByRouter(routerId)
         ]);
-
-        if (!mounted) {
-          return;
+        if (requestId !== catalogRequestIdRef.current) return;
+        if (!router || router.account_id !== session?.account_id) {
+          throw new Error("Routeur introuvable pour cette organisation.");
         }
 
-        if (!accountId || !router || router.account_id !== accountId) {
-          setPlans([]);
-          return;
+        const reconciliation = await reconcileRouterPlanCatalog({
+          plans: remotePlans,
+          repository: planRepository,
+          routerId
+        });
+        if (requestId !== catalogRequestIdRef.current) return;
+        const visibleRecords = [
+          ...reconciliation.liveRecords,
+          ...reconciliation.retainedPendingRecords
+        ];
+        setPlans(visibleRecords.map((record) => planFromRecord(
+          record,
+          ticketRecords.filter((ticket) =>
+            ticket.plan_id === record.id && ticket.account_id === session.account_id
+          ).length
+        )));
+        setCatalogStatus("ready");
+        setMessage(
+          `${remotePlans.length} profil(s) relu(s) en direct sur RouterOS.`
+          + (reconciliation.removedCount > 0
+            ? ` ${reconciliation.removedCount} plan(s) absent(s) retiré(s) du catalogue local.`
+            : "")
+        );
+        if (
+          reconciliation.createdCount > 0
+          || reconciliation.identityUpdatedCount > 0
+          || reconciliation.removedCount > 0
+        ) {
+          await backupRouterSnapshot();
         }
-
-        setPlans(records.map((record) => planFromRecord(record, ticketRecords.filter((ticket) => ticket.plan_id === record.id && ticket.account_id === accountId).length)));
         return;
       }
 
       const remotePlans = await service.getHotspotPlans();
-
-      if (!mounted) {
-        return;
-      }
-
+      if (requestId !== catalogRequestIdRef.current) return;
       setPlans(remotePlans.map((plan, index) => planFromHotspotPlan(plan, index === 0 ? 3 : 0)));
+      setCatalogStatus("ready");
+    } catch (error) {
+      if (requestId !== catalogRequestIdRef.current) return;
+      setCatalogStatus("error");
+      setMessage(error instanceof Error
+        ? `Lecture RouterOS impossible : ${error.message}`
+        : "Lecture en direct des profils RouterOS impossible.");
     }
+  };
 
-    void loadPlans();
-
-    return () => {
-      mounted = false;
-    };
-  }, [isInitialized, isPersistent, planRepository, routerId, routerRepository, service, session, ticketRepository]);
+  useEffect(() => {
+    if (isPersistent && persistedServiceEntry?.routerId !== routerId) return;
+    void refreshPlans();
+    // Refresh when the concrete service for this router becomes available.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPersistent, persistedServiceEntry, routerId]);
 
   const openCreateForm = () => {
     setFormState({
@@ -239,6 +276,7 @@ export function PlansPage() {
       if (isPersistent) {
         const activeService = await getPersistedService();
         let draft = formValuesToPlanDraft(planToFormValues(plan));
+        let remoteMikrotikId = plan.mikrotikId;
         if (plan.syncStatus === "synced") {
           const remotePlan = (await activeService.getHotspotPlans()).find(
             (candidate) =>
@@ -248,10 +286,12 @@ export function PlansPage() {
           if (!remotePlan) {
             throw new Error("Le profil est absent du MikroTik.");
           }
+          remoteMikrotikId = remotePlan.id;
           // Pour un plan déjà synchronisé, le bouton relit RouterOS. Le nom
           // commercial et le prix restent locaux, car RouterOS ne les stocke
           // pas toujours dans le profil Hotspot.
           draft = {
+            currency: plan.currency,
             dataLimitMb: remotePlan.dataLimitMb,
             downloadLimit: remotePlan.downloadLimit,
             durationMinutes: remotePlan.durationMinutes,
@@ -264,16 +304,30 @@ export function PlansPage() {
             validityMinutes: remotePlan.validityMinutes
           };
         } else {
-          await updateRemotePlanIdempotently(activeService, plan.profileName, draft);
+          const remotePlan = await updateRemotePlanIdempotently(activeService, plan.profileName, draft);
+          remoteMikrotikId = remotePlan.id;
         }
         const record = await planRepository.update({
-          ...planRecordFromDraft(draft, routerId, plan.id, "synced")
+          ...planRecordFromDraft(draft, routerId, plan.id, "synced", {
+            createdByProfileId: plan.createdByProfileId,
+            lastSyncedAt: new Date().toISOString(),
+            mikrotikId: remoteMikrotikId,
+            revision: plan.revision,
+            updatedByProfileId: session?.internal_profile_id ?? null
+          })
+        }, {
+          action: "synchronized",
+          actorProfileId: session?.internal_profile_id ?? null,
+          source: "routeros-manual-sync"
         });
         const syncedPlan = planFromRecord(record, plan.linkedTickets);
         setPlans((current) =>
           current.map((item) => (item.id === plan.id ? syncedPlan : item))
         );
         setSelectedPlan((current) => (current?.id === plan.id ? syncedPlan : current));
+        if (selectedPlan?.id === plan.id) {
+          setSelectedPlanHistory(await planRepository.listHistory(plan.id));
+        }
         await backupRouterSnapshot();
       } else {
         await service.updateHotspotPlan(plan.id, { status: plan.status });
@@ -315,15 +369,30 @@ export function PlansPage() {
 
       if (submittedForm.mode === "create") {
         const planId = `plan-${crypto.randomUUID()}`;
-        const localRecord = planRecordFromDraft(draft, routerId, planId, isPersistent ? "pending" : "local");
-        const storedRecord = isPersistent ? await planRepository.create(localRecord) : null;
+        const localRecord = planRecordFromDraft(draft, routerId, planId, isPersistent ? "pending" : "local", {
+          actorProfileId: session?.internal_profile_id ?? null
+        });
+        let storedRecord = isPersistent
+          ? await planRepository.create(localRecord, {
+              actorProfileId: session?.internal_profile_id ?? null,
+              source: "plans-form"
+            })
+          : null;
         let syncStatus: PlanViewModel["syncStatus"] = isPersistent ? "pending" : "synced";
 
         if (isPersistent) {
           try {
-            await createRemotePlanIdempotently(await getPersistedService(), draft);
+            const remotePlan = await createRemotePlanIdempotently(await getPersistedService(), draft);
             syncStatus = "synced";
-            await planRepository.update({ ...localRecord, sync_status: syncStatus });
+            storedRecord = await planRepository.update({
+              ...localRecord,
+              mikrotik_id: remotePlan.id,
+              sync_status: syncStatus
+            }, {
+              action: "synchronized",
+              actorProfileId: session?.internal_profile_id ?? null,
+              source: "routeros-create"
+            });
           } catch {
             setMessage("Plan enregistré localement ; synchronisation à reprendre.");
           }
@@ -331,7 +400,7 @@ export function PlansPage() {
 
         const created = isPersistent
           ? planFromRecord({ ...storedRecord!, sync_status: syncStatus })
-          : planFromHotspotPlan(await service.createHotspotPlan(draft), 0);
+          : planFromHotspotPlan({ ...await service.createHotspotPlan(draft), currency: draft.currency }, 0);
         const viewModel = created;
 
         setPlans((current) => [viewModel, ...current]);
@@ -344,13 +413,24 @@ export function PlansPage() {
       } else if (submittedForm.plan) {
         let syncStatus: PlanViewModel["syncStatus"] = isPersistent ? "pending" : "synced";
         let updatedRouterUsers = 0;
-        const localRecord = planRecordFromDraft(draft, routerId, submittedForm.plan.id, isPersistent ? "pending" : "local");
-        const storedRecord = isPersistent ? await planRepository.update(localRecord) : null;
+        const localRecord = planRecordFromDraft(draft, routerId, submittedForm.plan.id, isPersistent ? "pending" : "local", {
+          createdByProfileId: submittedForm.plan.createdByProfileId,
+          lastSyncedAt: submittedForm.plan.lastSyncedAt,
+          mikrotikId: submittedForm.plan.mikrotikId,
+          revision: submittedForm.plan.revision,
+          updatedByProfileId: session?.internal_profile_id ?? null
+        });
+        let storedRecord = isPersistent
+          ? await planRepository.update(localRecord, {
+              actorProfileId: session?.internal_profile_id ?? null,
+              source: "plans-form"
+            })
+          : null;
 
         if (isPersistent) {
           try {
             const activeService = await getPersistedService();
-            await updateRemotePlanIdempotently(
+            const remotePlan = await updateRemotePlanIdempotently(
               activeService,
               submittedForm.plan.profileName,
               draft
@@ -363,7 +443,15 @@ export function PlansPage() {
             });
             updatedRouterUsers = voucherSync.updatedRouterUsers;
             syncStatus = "synced";
-            await planRepository.update({ ...localRecord, sync_status: syncStatus });
+            storedRecord = await planRepository.update({
+              ...localRecord,
+              mikrotik_id: remotePlan.id,
+              sync_status: syncStatus
+            }, {
+              action: "synchronized",
+              actorProfileId: session?.internal_profile_id ?? null,
+              source: "routeros-update"
+            });
           } catch {
             setMessage("Plan modifié localement ; synchronisation à reprendre.");
           }
@@ -371,7 +459,10 @@ export function PlansPage() {
 
         const updated = isPersistent
           ? planFromRecord({ ...storedRecord!, sync_status: syncStatus }, submittedForm.plan.linkedTickets)
-          : planFromHotspotPlan(await service.updateHotspotPlan(submittedForm.plan.id, draft), submittedForm.plan.linkedTickets);
+          : planFromHotspotPlan({
+              ...await service.updateHotspotPlan(submittedForm.plan.id, draft),
+              currency: draft.currency
+            }, submittedForm.plan.linkedTickets);
         const viewModel = updated;
 
         setPlans((current) => current.map((plan) => (plan.id === viewModel.id ? viewModel : plan)));
@@ -392,6 +483,17 @@ export function PlansPage() {
     }
   };
 
+  const openPlanDetails = async (plan: PlanViewModel) => {
+    setSelectedPlan(plan);
+    setSelectedPlanHistory([]);
+    if (!isPersistent) return;
+    try {
+      setSelectedPlanHistory(await planRepository.listHistory(plan.id));
+    } catch {
+      setMessage("Le plan est disponible, mais son historique local n'a pas pu être chargé.");
+    }
+  };
+
   const duplicate = async (plan: PlanViewModel) => {
     const draft = formValuesToPlanDraft({
       ...planToFormValues(plan),
@@ -400,15 +502,30 @@ export function PlansPage() {
       status: "active"
     });
     const planId = `plan-${crypto.randomUUID()}`;
-    const localRecord = planRecordFromDraft(draft, routerId, planId, isPersistent ? "pending" : "local");
-    const storedRecord = isPersistent ? await planRepository.create(localRecord) : null;
+    const localRecord = planRecordFromDraft(draft, routerId, planId, isPersistent ? "pending" : "local", {
+      actorProfileId: session?.internal_profile_id ?? null
+    });
+    let storedRecord = isPersistent
+      ? await planRepository.create(localRecord, {
+          actorProfileId: session?.internal_profile_id ?? null,
+          source: "plan-duplicate"
+        })
+      : null;
     let syncStatus: PlanViewModel["syncStatus"] = isPersistent ? "pending" : "synced";
 
     if (isPersistent) {
       try {
-        await createRemotePlanIdempotently(await getPersistedService(), draft);
+        const remotePlan = await createRemotePlanIdempotently(await getPersistedService(), draft);
         syncStatus = "synced";
-        await planRepository.update({ ...localRecord, sync_status: syncStatus });
+        storedRecord = await planRepository.update({
+          ...localRecord,
+          mikrotik_id: remotePlan.id,
+          sync_status: syncStatus
+        }, {
+          action: "synchronized",
+          actorProfileId: session?.internal_profile_id ?? null,
+          source: "routeros-duplicate"
+        });
       } catch {
         setMessage("Copie enregistrée localement ; synchronisation à reprendre.");
       }
@@ -416,7 +533,7 @@ export function PlansPage() {
 
     const created = isPersistent
       ? planFromRecord({ ...storedRecord!, sync_status: syncStatus })
-      : planFromHotspotPlan(await service.createHotspotPlan(draft), 0);
+      : planFromHotspotPlan({ ...await service.createHotspotPlan(draft), currency: draft.currency }, 0);
     const copy = created;
 
     setPlans((current) => [copy, ...current]);
@@ -428,13 +545,15 @@ export function PlansPage() {
     const nextStatus = plan.status === "active" ? "disabled" : "active";
     const draft = formValuesToPlanDraft({ ...planToFormValues(plan), status: nextStatus });
     let syncStatus: PlanViewModel["syncStatus"] = isPersistent ? "pending" : "synced";
+    let remoteMikrotikId = plan.mikrotikId;
     if (isPersistent) {
       try {
-        await updateRemotePlanIdempotently(
+        const remotePlan = await updateRemotePlanIdempotently(
           await getPersistedService(),
           plan.profileName,
           draft
         );
+        remoteMikrotikId = remotePlan.id;
         syncStatus = "synced";
       } catch {
         syncStatus = "pending";
@@ -444,11 +563,23 @@ export function PlansPage() {
     const updated = isPersistent
       ? planFromRecord(
           await planRepository.update({
-            ...planRecordFromDraft(draft, routerId, plan.id, syncStatus)
+            ...planRecordFromDraft(draft, routerId, plan.id, syncStatus, {
+              createdByProfileId: plan.createdByProfileId,
+              lastSyncedAt: syncStatus === "synced" ? new Date().toISOString() : plan.lastSyncedAt,
+              mikrotikId: remoteMikrotikId,
+              revision: plan.revision,
+              updatedByProfileId: session?.internal_profile_id ?? null
+            })
+          }, {
+            actorProfileId: session?.internal_profile_id ?? null,
+            source: "plan-status"
           }),
           plan.linkedTickets
         )
-      : planFromHotspotPlan(await service.updateHotspotPlan(plan.id, { status: nextStatus }), plan.linkedTickets);
+      : planFromHotspotPlan({
+          ...await service.updateHotspotPlan(plan.id, { status: nextStatus }),
+          currency: plan.currency
+        }, plan.linkedTickets);
     setPlans((current) =>
       current.map((item) => (item.id === plan.id ? updated : item))
     );
@@ -484,7 +615,10 @@ export function PlansPage() {
         );
         return;
       }
-      await planRepository.remove(plan.id);
+      await planRepository.remove(plan.id, {
+        actorProfileId: session?.internal_profile_id ?? null,
+        source: "plans-page"
+      });
       await backupRouterSnapshot();
     } else {
       await service.deleteHotspotPlan(plan.id);
@@ -497,36 +631,50 @@ export function PlansPage() {
     <div className="page-stack">
       <PageHeader
         actions={
-          canManagePlans ? (
-            <Button icon={Plus} onClick={openCreateForm} variant="primary">
-              Nouveau plan
+          <div className="filter-row">
+            <Button
+              className={catalogStatus === "loading" ? "button--loading" : ""}
+              disabled={catalogStatus === "loading"}
+              icon={catalogStatus === "loading" ? LoaderCircle : RotateCw}
+              onClick={() => void refreshPlans()}
+            >
+              {catalogStatus === "loading" ? "Lecture RouterOS…" : "Actualiser RouterOS"}
             </Button>
-          ) : null
+            {canManagePlans ? (
+              <Button disabled={catalogStatus !== "ready"} icon={Plus} onClick={openCreateForm} variant="primary">
+                Nouveau plan
+              </Button>
+            ) : null}
+          </div>
         }
-        description="Créez des plans simples qui serviront ensuite à générer les tickets."
+        description={canManagePlans
+          ? "Créez des plans simples qui serviront ensuite à générer les tickets."
+          : "Consultez les plans disponibles pour ce routeur."}
         eyebrow="Routeur"
         title="Plans"
       />
 
-      <Card title="Templates rapides" description="Choisissez un modèle puis ajustez les champs si besoin.">
-        <div className="filter-row">
-          {quickPlanTemplates.map((template) => (
-            <FilterButton
-              key={template.name}
-              onClick={() =>
-                setFormState({
-                  error: null,
-                  mode: "create",
-                  plan: null,
-                  values: applyTemplate(emptyPlanFormValues, template)
-                })
-              }
-            >
-              {template.name}
-            </FilterButton>
-          ))}
-        </div>
-      </Card>
+      {canManagePlans ? (
+        <Card title="Templates rapides" description="Choisissez un modèle puis ajustez les champs si besoin.">
+          <div className="filter-row">
+            {quickPlanTemplates.map((template) => (
+              <FilterButton
+                key={template.name}
+                onClick={() =>
+                  setFormState({
+                    error: null,
+                    mode: "create",
+                    plan: null,
+                    values: applyTemplate(emptyPlanFormValues, template)
+                  })
+                }
+              >
+                {template.name}
+              </FilterButton>
+            ))}
+          </div>
+        </Card>
+      ) : null}
 
       {message ? <p className="form-error">{message}</p> : null}
 
@@ -535,7 +683,18 @@ export function PlansPage() {
         <span className="muted-inline">Logs : {logs.length}</span>
       </div>
 
-      {plans.length > 0 ? (
+      {catalogStatus !== "ready" ? (
+        <AsyncStateCard
+          description="TicketPro lit les profils Hotspot directement sur le MikroTik puis réconcilie la base locale."
+          errorDescription="Les données locales sont conservées. Vérifiez la connexion au routeur puis relancez la lecture."
+          errorTitle="Catalogue RouterOS indisponible"
+          loadingDescription="Les durées, débits, quotas et profils supprimés sont vérifiés avant l’affichage."
+          loadingTitle="Lecture des plans RouterOS en cours…"
+          onRetry={() => void refreshPlans()}
+          status={catalogStatus}
+          title="Synchronisation des plans"
+        />
+      ) : plans.length > 0 ? (
         <div className="plans-grid">
           {plans.map((plan) => (
             <PlanCard
@@ -545,7 +704,7 @@ export function PlansPage() {
               onDisable={() => void toggleStatus(plan)}
               onDuplicate={() => void duplicate(plan)}
               onEdit={() => openEditForm(plan)}
-              onView={() => setSelectedPlan(plan)}
+              onView={() => void openPlanDetails(plan)}
               onSync={() => void syncPlan(plan)}
               plan={plan}
             />
@@ -576,7 +735,14 @@ export function PlansPage() {
         onChange={(values) => formState && setFormState({ ...formState, error: null, values })}
         onSubmit={() => void submitForm()}
       />
-      <PlanDetailDialog onClose={() => setSelectedPlan(null)} plan={selectedPlan} />
+      <PlanDetailDialog
+        history={selectedPlanHistory}
+        onClose={() => {
+          setSelectedPlan(null);
+          setSelectedPlanHistory([]);
+        }}
+        plan={selectedPlan}
+      />
     </div>
   );
 }
@@ -597,7 +763,7 @@ function PlanCard({ canManage, onDelete, onDisable, onDuplicate, onEdit, onSync,
     <article className="plan-card">
       <header className="plan-card__header">
         <div>
-          <h3>{plan.name}</h3>
+          <h3>{formatPlanDisplayName(plan.name)}</h3>
           <p>
             {formatPlanMinutes(plan.durationMinutes)} · validité {formatPlanMinutes(plan.validityMinutes ?? plan.durationMinutes)} · {plan.dataLimitMb ? `${plan.dataLimitMb} MB` : "Illimité"}
           </p>
@@ -629,7 +795,7 @@ function PlanCard({ canManage, onDelete, onDisable, onDuplicate, onEdit, onSync,
         <Badge status={plan.syncStatus === "synced" ? "success" : plan.syncStatus === "conflict" ? "error" : "warning"}>
           {plan.syncStatus === "synced" ? "Synchronisé" : plan.syncStatus === "conflict" ? "Conflit" : "À synchroniser"}
         </Badge>
-        <span>{plan.priceHint ? `${plan.priceHint} CFA` : "Prix non défini"}</span>
+        <span>{plan.priceHint !== null ? `${plan.priceHint} ${plan.currency}` : `Prix non défini · ${plan.currency}`}</span>
         <span>{plan.linkedTickets} ticket(s)</span>
       </div>
 
@@ -656,9 +822,11 @@ function PlanCard({ canManage, onDelete, onDisable, onDuplicate, onEdit, onSync,
 }
 
 function PlanDetailDialog({
+  history,
   onClose,
   plan
 }: {
+  history: HotspotPlanHistoryRecord[];
   onClose: () => void;
   plan: PlanViewModel | null;
 }) {
@@ -666,13 +834,13 @@ function PlanDetailDialog({
 
   return (
     <div className="dialog-backdrop" role="presentation">
-      <section aria-modal="true" className="client-detail-dialog" role="dialog">
+      <section aria-labelledby="plan-detail-title" aria-modal="true" className="client-detail-dialog plan-detail-dialog" role="dialog">
         <header className="connection-dialog__header">
           <div className="router-card__icon">
             <ListChecks aria-hidden="true" />
           </div>
           <div>
-            <h2>{plan.name}</h2>
+            <h2 id="plan-detail-title">{formatPlanDisplayName(plan.name)}</h2>
             <p>Paramètres appliqués aux vouchers</p>
           </div>
           <Badge status={plan.syncStatus === "synced" ? "success" : "warning"}>
@@ -680,6 +848,7 @@ function PlanDetailDialog({
           </Badge>
         </header>
 
+        <div className="plan-detail-dialog__body">
         <dl className="client-detail-grid">
           <PlanDetailLine label="État commercial" value={plan.status === "active" ? "Actif" : "Inactif"} />
           <PlanDetailLine label="Durée d’utilisation" value={formatPlanMinutes(plan.durationMinutes)} />
@@ -696,10 +865,40 @@ function PlanDetailDialog({
           <PlanDetailLine label="Appareils simultanés" value={String(plan.sharedUsers)} />
           <PlanDetailLine
             label="Prix indicatif"
-            value={plan.priceHint === null ? "Non défini" : `${plan.priceHint} CFA`}
+            value={plan.priceHint === null ? `Non défini · ${plan.currency}` : `${plan.priceHint} ${plan.currency}`}
           />
+          <PlanDetailLine label="Identifiant MikroTik" value={plan.mikrotikId ?? "En attente de synchronisation"} />
+          <PlanDetailLine label="Profil MikroTik" value={plan.profileName} />
+          <PlanDetailLine label="Révision TicketPro" value={String(plan.revision)} />
+          <PlanDetailLine label="Créé le" value={formatPlanAuditDate(plan.createdAt)} />
+          <PlanDetailLine label="Dernière modification" value={formatPlanAuditDate(plan.updatedAt)} />
+          <PlanDetailLine label="Dernière synchronisation" value={formatPlanAuditDate(plan.lastSyncedAt)} />
+          <PlanDetailLine label="Créé par" value={plan.createdByProfileId ?? "Historique antérieur"} />
+          <PlanDetailLine label="Modifié par" value={plan.updatedByProfileId ?? "Historique antérieur"} />
           <PlanDetailLine label="Tickets liés" value={String(plan.linkedTickets)} />
         </dl>
+
+        <div className="router-section-heading">
+          <h3>Historique ({history.length})</h3>
+        </div>
+        {history.length > 0 ? (
+          <div className="print-history-list">
+            {history.slice(0, 10).map((entry) => (
+              <div className="print-history-row" key={entry.id}>
+                <div>
+                  <strong>{formatPlanHistoryAction(entry.action)}</strong>
+                  <span>{entry.name} · {entry.price_hint === null ? "Prix non défini" : `${entry.price_hint} ${entry.currency}`}</span>
+                </div>
+                <small>
+                  Révision {entry.revision} · {formatPlanAuditDate(entry.created_at)} · {entry.actor_profile_id ?? "Système"}
+                </small>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="muted-inline">Aucun événement historique disponible pour ce plan.</p>
+        )}
+        </div>
 
         <div className="confirm-dialog__actions">
           <Button onClick={onClose} variant="primary">Fermer</Button>
@@ -716,6 +915,23 @@ function PlanDetailLine({ label, value }: { label: string; value: string }) {
       <dd>{value}</dd>
     </div>
   );
+}
+
+function formatPlanAuditDate(value: string | null): string {
+  if (!value) return "Non disponible";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("fr-FR");
+}
+
+function formatPlanHistoryAction(action: HotspotPlanHistoryRecord["action"]): string {
+  const labels: Record<HotspotPlanHistoryRecord["action"], string> = {
+    created: "Création",
+    deleted: "Suppression",
+    restored: "Restauration",
+    synchronized: "Synchronisation RouterOS",
+    updated: "Modification"
+  };
+  return labels[action];
 }
 
 type PlanFormDialogProps = {
@@ -800,8 +1016,19 @@ function PlanFormDialog({ canSubmit, formState, isSubmitting, onCancel, onChange
             <input value={values.sharedUsers} onChange={(event) => update({ sharedUsers: event.target.value })} />
           </label>
           <label className="form-field">
-            Prix indicatif CFA
-            <input value={values.priceHint} onChange={(event) => update({ priceHint: event.target.value })} />
+            Prix indicatif
+            <div className="inline-inputs">
+              <input min="0" type="number" value={values.priceHint} onChange={(event) => update({ priceHint: event.target.value })} />
+              <input
+                aria-label="Devise du plan"
+                maxLength={12}
+                placeholder="CFA, XOF, EUR…"
+                required
+                value={values.currency}
+                onChange={(event) => update({ currency: event.target.value.toUpperCase() })}
+              />
+            </div>
+            <small>Devise obligatoire, conservée avec le plan et chaque lot généré.</small>
           </label>
           <label className="form-field">
             Statut

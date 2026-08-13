@@ -25,14 +25,27 @@ describe("reportPageModel", () => {
     expect(summary.metrics.find((metric) => metric.id === "deleted")?.value).toBeGreaterThan(0);
   });
 
-  it("calcule les valeurs théoriques CFA sans notion de paiement", () => {
+  it("calcule les valeurs théoriques par devise sans notion de paiement", () => {
     const tickets = createDemoReportTickets();
     const filters = { ...emptyReportFilters, planId: "plan-3h" };
     const createdTickets = getTicketsForMetric(filterReportTickets(tickets, filters), "created", filters);
     const summary = buildReportSummary(tickets, filters);
 
-    expect(summary.createdTheoreticalCfa).toBe(createdTickets.length * 200);
-    expect(summary.activatedTheoreticalCfa).toBeGreaterThanOrEqual(0);
+    expect(summary.createdTheoreticalByCurrency.CFA).toBe(createdTickets.length * 200);
+    expect(summary.activatedTheoreticalByCurrency.CFA ?? 0).toBeGreaterThanOrEqual(0);
+  });
+
+  it("sépare les totaux de devises différentes dans le rapport", () => {
+    const base = createDemoReportTickets()[0];
+    const filters = { ...emptyReportFilters, dateFrom: "", dateTo: "" };
+    const summary = buildReportSummary([
+      { ...base, currency: "CFA", id: "ticket-cfa", priceHint: 100 },
+      { ...base, currency: "EUR", id: "ticket-eur", priceHint: 5 }
+    ], filters);
+
+    expect(summary.createdTheoreticalByCurrency).toEqual({ CFA: 100, EUR: 5 });
+    expect(buildReportCsv([{ ...base, currency: "EUR", priceHint: 5 }])).toContain("Prix théorique;Devise");
+    expect(buildReportCsv([{ ...base, currency: "EUR", priceHint: 5 }])).toContain(";5;EUR");
   });
   it("filtre le rapport par profil interne et limite l'Agent a son activite", () => {
     const tickets = createDemoReportTickets();

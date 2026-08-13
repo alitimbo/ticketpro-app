@@ -105,10 +105,10 @@ describe("RouterStateReconciliationService", () => {
     expect(await plans.listByRouter(router.id)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ mikrotik_profile_name: "plan-journee", sync_status: "synced" }),
-        expect.objectContaining({ mikrotik_profile_name: "plan-2h", sync_status: "synced" }),
-        expect.objectContaining({ id: "stale-plan", sync_status: "conflict" })
+        expect.objectContaining({ mikrotik_profile_name: "plan-2h", sync_status: "synced" })
       ])
     );
+    expect((await plans.listByRouter(router.id)).some((plan) => plan.id === "stale-plan")).toBe(false);
     expect(backupRouter).toHaveBeenCalledWith(router.id);
     expect(await new TicketRepository(database).listByRouter(router.id)).toHaveLength(3);
   });

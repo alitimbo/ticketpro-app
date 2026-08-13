@@ -2,6 +2,7 @@ import type { HotspotPlan, HotspotPlanDraft } from "../../domain/router";
 import type { CreateHotspotPlanInput, HotspotPlanRecord } from "../../domain/database";
 
 export type PlanFormValues = {
+  currency: string;
   dataAmount: string;
   dataUnit: "go" | "mb";
   downloadLimit: string;
@@ -28,8 +29,20 @@ export type PlanTemplate = {
 };
 
 export type PlanViewModel = HotspotPlan & {
+  createdAt: string | null;
+  createdByProfileId: string | null;
+  currency: string;
+  lastSyncedAt: string | null;
   linkedTickets: number;
+  mikrotikId: string | null;
+  revision: number;
   syncStatus: HotspotPlanRecord["sync_status"];
+  updatedAt: string | null;
+  updatedByProfileId: string | null;
+};
+
+export type CommercialHotspotPlanDraft = HotspotPlanDraft & {
+  currency: string;
 };
 
 export const quickPlanTemplates: PlanTemplate[] = [
@@ -42,6 +55,7 @@ export const quickPlanTemplates: PlanTemplate[] = [
 ];
 
 export const emptyPlanFormValues: PlanFormValues = {
+  currency: "CFA",
   dataAmount: "",
   dataUnit: "mb",
   downloadLimit: "5M",
@@ -77,13 +91,14 @@ export function planToFormValues(plan: PlanViewModel): PlanFormValues {
   const data = mbToDataAmount(plan.dataLimitMb);
 
   return {
+    currency: normalizePlanCurrency(plan.currency),
     dataAmount: data.dataAmount,
     dataUnit: data.dataUnit,
     downloadLimit: plan.downloadLimit ?? "",
     durationAmount: duration.durationAmount,
     durationUnit: duration.durationUnit,
     name: plan.name,
-    priceHint: plan.priceHint ? String(plan.priceHint) : "",
+    priceHint: plan.priceHint !== null ? String(plan.priceHint) : "",
     profileName: plan.profileName,
     sharedUsers: String(plan.sharedUsers),
     status: plan.status,
@@ -93,8 +108,9 @@ export function planToFormValues(plan: PlanViewModel): PlanFormValues {
   };
 }
 
-export function formValuesToPlanDraft(values: PlanFormValues): HotspotPlanDraft {
+export function formValuesToPlanDraft(values: PlanFormValues): CommercialHotspotPlanDraft {
   return {
+    currency: normalizePlanCurrency(values.currency),
     dataLimitMb: dataToMb(values.dataAmount, values.dataUnit),
     downloadLimit: values.downloadLimit || null,
     durationMinutes: durationToMinutes(values.durationAmount, values.durationUnit),
@@ -111,7 +127,15 @@ export function formValuesToPlanDraft(values: PlanFormValues): HotspotPlanDraft 
 export function planFromHotspotPlan(plan: HotspotPlan, linkedTickets = 0): PlanViewModel {
   return {
     ...plan,
+    createdAt: null,
+    createdByProfileId: null,
+    currency: normalizePlanCurrency(plan.currency),
+    lastSyncedAt: null,
     linkedTickets,
+    mikrotikId: plan.mikrotikId ?? plan.id,
+    revision: 1,
+    updatedAt: null,
+    updatedByProfileId: null,
     syncStatus: "synced"
   };
 }
@@ -124,6 +148,8 @@ export function planFromRecord(record: HotspotPlanRecord, linkedTickets = 0): Pl
       downloadLimit: record.download_limit,
       durationMinutes: record.duration_minutes,
       id: record.id,
+      currency: record.currency,
+      mikrotikId: record.mikrotik_id,
       name: record.name,
       profileName: record.mikrotik_profile_name ?? record.name,
       priceHint: record.price_hint,
@@ -134,29 +160,51 @@ export function planFromRecord(record: HotspotPlanRecord, linkedTickets = 0): Pl
     },
     linkedTickets
     ),
-    syncStatus: record.sync_status
+    createdAt: record.created_at,
+    createdByProfileId: record.created_by_profile_id,
+    currency: normalizePlanCurrency(record.currency),
+    lastSyncedAt: record.last_synced_at,
+    mikrotikId: record.mikrotik_id,
+    revision: record.revision,
+    syncStatus: record.sync_status,
+    updatedAt: record.updated_at,
+    updatedByProfileId: record.updated_by_profile_id
   };
 }
 
 export function planRecordFromDraft(
-  draft: HotspotPlanDraft,
+  draft: CommercialHotspotPlanDraft,
   routerId: string,
   id: string,
-  syncStatus: HotspotPlanRecord["sync_status"] = "local"
+  syncStatus: HotspotPlanRecord["sync_status"] = "local",
+  metadata: {
+    actorProfileId?: string | null;
+    createdByProfileId?: string | null;
+    lastSyncedAt?: string | null;
+    mikrotikId?: string | null;
+    revision?: number;
+    updatedByProfileId?: string | null;
+  } = {}
 ): CreateHotspotPlanInput {
   return {
+    created_by_profile_id: metadata.createdByProfileId ?? metadata.actorProfileId ?? null,
+    currency: normalizePlanCurrency(draft.currency),
     data_limit_mb: draft.dataLimitMb,
     download_limit: draft.downloadLimit,
     duration_minutes: draft.durationMinutes,
     id,
+    last_synced_at: metadata.lastSyncedAt ?? null,
+    mikrotik_id: metadata.mikrotikId ?? null,
     mikrotik_profile_name: draft.profileName,
     name: draft.name,
     price_hint: draft.priceHint,
     router_id: routerId,
+    revision: metadata.revision ?? 1,
     shared_users: draft.sharedUsers,
     status: draft.status ?? "active",
     sync_status: syncStatus,
     upload_limit: draft.uploadLimit,
+    updated_by_profile_id: metadata.updatedByProfileId ?? metadata.actorProfileId ?? null,
     validity_minutes: draft.validityMinutes
   };
 }
@@ -164,6 +212,14 @@ export function planRecordFromDraft(
 export function validatePlanForm(values: PlanFormValues): string | null {
   if (!values.name.trim()) {
     return "Entrez le nom du plan.";
+  }
+
+  if (!values.currency.trim()) {
+    return "Choisissez une devise pour ce plan.";
+  }
+
+  if (!/^[A-Za-z0-9]{2,12}$/.test(values.currency.trim())) {
+    return "La devise doit contenir entre 2 et 12 lettres ou chiffres (ex. CFA, XOF, EUR, USD).";
   }
 
   if (durationToMinutes(values.durationAmount, values.durationUnit) <= 0) {
@@ -205,13 +261,30 @@ export function formatPlanMinutes(minutes: number | null): string {
   return `${minutes} min`;
 }
 
+export function formatPlanDisplayName(name: string): string {
+  const displayName = name.trim().replace(/[\s_-]+cfa$/i, "").trim();
+  return displayName || name.trim();
+}
+
+export function normalizePlanCurrency(value: string | null | undefined): string {
+  return value?.trim().toUpperCase() || "CFA";
+}
+
 export function duplicatePlan(plan: PlanViewModel): PlanViewModel {
   return {
     ...plan,
+    createdAt: null,
+    createdByProfileId: null,
     id: `${plan.id}-copie-${Date.now()}`,
+    lastSyncedAt: null,
     linkedTickets: 0,
+    mikrotikId: null,
     name: `${plan.name} copie`,
     profileName: `${plan.profileName}-copie`,
+    revision: 1,
+    syncStatus: "local",
+    updatedAt: null,
+    updatedByProfileId: null,
     status: "active"
   };
 }

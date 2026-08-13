@@ -210,12 +210,35 @@ export type HotspotPlanRecord = {
   upload_limit: string | null;
   shared_users: number;
   price_hint: number | null;
+  currency: string;
+  mikrotik_id: string | null;
   mikrotik_profile_name: string | null;
+  created_by_profile_id: string | null;
+  updated_by_profile_id: string | null;
+  revision: number;
+  last_synced_at: string | null;
   status: string;
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
   sync_status: SyncStatus;
+};
+
+export type HotspotPlanHistoryRecord = {
+  id: string;
+  plan_id: string;
+  router_id: string;
+  action: "created" | "updated" | "deleted" | "restored" | "synchronized";
+  revision: number;
+  actor_profile_id: string | null;
+  source: string;
+  mikrotik_id: string | null;
+  mikrotik_profile_name: string | null;
+  name: string;
+  currency: string;
+  price_hint: number | null;
+  snapshot_json: string;
+  created_at: string;
 };
 
 export type TicketBatchRecord = {
@@ -227,6 +250,8 @@ export type TicketBatchRecord = {
   quantity: number;
   prefix: string | null;
   code_length: number;
+  currency: string;
+  price_snapshot: number | null;
   status: string;
   generated_file_id: string | null;
   created_by_profile: string;
@@ -402,18 +427,41 @@ export type CreateBillingInvoiceInput = Omit<BillingInvoiceRecord, "created_at" 
 
 export type CreateHotspotPlanInput = Omit<
   HotspotPlanRecord,
-  "created_at" | "updated_at" | "deleted_at" | "sync_status"
+  | "created_at"
+  | "updated_at"
+  | "deleted_at"
+  | "sync_status"
+  | "currency"
+  | "mikrotik_id"
+  | "created_by_profile_id"
+  | "updated_by_profile_id"
+  | "revision"
+  | "last_synced_at"
 > &
-  Partial<Pick<HotspotPlanRecord, "created_at" | "updated_at" | "deleted_at" | "sync_status">>;
+  Partial<
+    Pick<
+      HotspotPlanRecord,
+      | "created_at"
+      | "updated_at"
+      | "deleted_at"
+      | "sync_status"
+      | "currency"
+      | "mikrotik_id"
+      | "created_by_profile_id"
+      | "updated_by_profile_id"
+      | "revision"
+      | "last_synced_at"
+    >
+  >;
 
 export type CreateTicketBatchInput = Omit<
   TicketBatchRecord,
-  "created_at" | "updated_at" | "deleted_at" | "sync_status"
+  "created_at" | "updated_at" | "deleted_at" | "sync_status" | "currency" | "price_snapshot"
 > &
   Partial<
     Pick<
       TicketBatchRecord,
-      "created_at" | "updated_at" | "deleted_at" | "sync_status"
+      "created_at" | "updated_at" | "deleted_at" | "sync_status" | "currency" | "price_snapshot"
     >
   >;
 

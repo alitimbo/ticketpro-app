@@ -2,6 +2,7 @@ import { AppLogRepository } from "../database/repositories/AppLogRepository";
 import type { DatabaseClient } from "../database";
 import type { UserRole } from "../../domain/auth";
 import { serializeTechnicalMessage } from "./technicalMessage";
+import { OrganizationOperationsSyncService } from "../sync/OrganizationOperationsSyncService";
 
 export type AuditLogInput = {
   accountId: string;
@@ -24,7 +25,7 @@ export class AuditLogService {
 
   async write(input: AuditLogInput): Promise<void> {
     try {
-      await this.repository.create({
+      const record = await this.repository.create({
         account_id: input.accountId,
         category: input.category,
         created_by_profile:
@@ -39,13 +40,21 @@ export class AuditLogService {
         }),
         user_message: input.message
       });
+      if (record.router_id) {
+        void new OrganizationOperationsSyncService(
+          this.database,
+          input.accountId,
+          input.internalProfileId ?? `${input.accountId}:admin`,
+          input.internalProfileRole ?? roleFromProfileId(input.internalProfileId) ?? "admin"
+        ).publishLog(record).catch(() => undefined);
+      }
     } catch {
       // Une panne d'audit ne doit pas bloquer l'action métier déjà réalisée.
     }
   }
 }
 
-function roleFromProfileId(profileId: string | null): string | null {
+function roleFromProfileId(profileId: string | null): UserRole | null {
   if (!profileId) return null;
   const role = ["admin", "operator", "agent", "guest"].find(
     (candidate) =>
@@ -53,5 +62,5 @@ function roleFromProfileId(profileId: string | null): string | null {
       profileId.endsWith(`-${candidate}`) ||
       profileId.endsWith(`:${candidate}`)
   );
-  return role ?? null;
+  return (role as UserRole | undefined) ?? null;
 }

@@ -523,7 +523,12 @@ test("le coffre cloud restaure le parc, les plans et le VPN sans exposer les sec
       { mode: "vpn", host: "10.250.7.2", port: 8728, use_ssl: false, status: "active" }
     ],
     plans: [{
+      created_at: "2026-07-29T10:00:00.000Z",
+      created_by_profile_id: "profile-owner",
+      currency: "XOF",
       id: "plan-6h",
+      last_synced_at: "2026-07-29T11:00:00.000Z",
+      mikrotik_id: "*7",
       name: "6 heures",
       duration_minutes: 360,
       validity_minutes: 1440,
@@ -532,8 +537,27 @@ test("le coffre cloud restaure le parc, les plans et le VPN sans exposer les sec
       upload_limit: "2M",
       shared_users: 1,
       price_hint: 500,
+      revision: 2,
       mikrotik_profile_name: "6h",
-      status: "active"
+      status: "active",
+      updated_at: "2026-07-29T11:00:00.000Z",
+      updated_by_profile_id: "profile-owner",
+      history: [{
+        action: "updated",
+        actor_profile_id: "profile-owner",
+        created_at: "2026-07-29T11:00:00.000Z",
+        currency: "XOF",
+        id: "history-plan-6h-2",
+        mikrotik_id: "*7",
+        mikrotik_profile_name: "6h",
+        name: "6 heures",
+        plan_id: "plan-6h",
+        price_hint: 500,
+        revision: 2,
+        router_id: "router-original",
+        snapshot_json: JSON.stringify({ currency: "XOF", mikrotik_id: "*7", revision: 2 }),
+        source: "plans-form"
+      }]
     }],
     vpn: {
       assigned_address: "10.250.7.2/32",
@@ -556,6 +580,9 @@ test("le coffre cloud restaure le parc, les plans et le VPN sans exposer les sec
   assert.equal(recovered.status, 200);
   assert.equal(recovered.payload.routers.length, 1);
   assert.equal(recovered.payload.routers[0].plans[0].mikrotik_profile_name, "6h");
+  assert.equal(recovered.payload.routers[0].plans[0].mikrotik_id, "*7");
+  assert.equal(recovered.payload.routers[0].plans[0].currency, "XOF");
+  assert.equal(recovered.payload.routers[0].plans[0].history[0].actor_profile_id, "profile-owner");
   assert.equal(recovered.payload.routers[0].vpn.assigned_address, "10.250.7.2/32");
   assert.equal(recovered.payload.routers[0].credential, "SecretRouterOS-123");
 
@@ -605,6 +632,222 @@ test("le coffre cloud restaure le parc, les plans et le VPN sans exposer les sec
   assert.equal(reactivated.status, 200);
   assert.equal(reactivated.payload.router.id, "router-original");
   assert.equal(reactivated.payload.router.credential, "SecretRouterOS-456");
+});
+
+test("les vouchers générés par un opérateur deviennent visibles par l'administrateur de l'organisation", async () => {
+  const owner = await api("/v1/saas/register-trial", {
+    body: {
+      organization_name: "Catalogue vouchers partagé",
+      name: "Administrateur Catalogue",
+      email: "catalogue.owner@example.com",
+      password: "CatalogueOwner123",
+      confirm_password: "CatalogueOwner123"
+    }
+  });
+  assert.equal(owner.status, 200);
+  const ownerToken = owner.payload.session.token;
+  const routerId = "router-catalogue-shared";
+  const router = await api("/v1/saas/routers/snapshot", {
+    token: ownerToken,
+    body: {
+      router: {
+        api_port: 8728,
+        api_ssl_port: 8729,
+        board_name: "CHR",
+        connection_mode: "vpn",
+        connections: [{ host: "10.250.9.2", mode: "vpn", port: 8728, status: "active", use_ssl: false }],
+        credential: "CatalogueRouterSecret123",
+        hotspot_address: "catalogue.test",
+        id: routerId,
+        label: "Zone Catalogue",
+        last_seen_at: "2026-08-13T18:00:00.000Z",
+        local_ip: "192.168.99.1",
+        model: "CHR",
+        name: "Routeur Catalogue",
+        notes: "Test catalogue partagé",
+        plans: [{
+          created_at: "2026-08-13T18:00:00.000Z",
+          created_by_profile_id: "profile-owner",
+          currency: "CFA",
+          data_limit_mb: null,
+          download_limit: "5M",
+          duration_minutes: 60,
+          history: [],
+          id: "plan-catalogue-1h",
+          last_synced_at: "2026-08-13T18:00:00.000Z",
+          mikrotik_id: "*A1",
+          mikrotik_profile_name: "1h",
+          name: "1 heure",
+          price_hint: 100,
+          revision: 1,
+          shared_users: 1,
+          status: "active",
+          updated_at: "2026-08-13T18:00:00.000Z",
+          updated_by_profile_id: "profile-owner",
+          upload_limit: "2M",
+          validity_minutes: 180
+        }],
+        routeros_version: "7.20",
+        serial_number: "CATALOGUE-001",
+        stable_identity: "serial:CATALOGUE-001",
+        status: "active",
+        username: "ticketpro",
+        vpn: null
+      }
+    }
+  });
+  assert.equal(router.status, 200, JSON.stringify(router.payload));
+
+  const invitation = await api("/v1/saas/team/members", {
+    token: ownerToken,
+    body: {
+      app_role: "operator",
+      email: "catalogue.operator@example.com",
+      name: "Opérateur Catalogue",
+      router_access_mode: "selected",
+      router_ids: [routerId]
+    }
+  });
+  assert.equal(invitation.status, 200);
+  const accepted = await api("/v1/saas/invitations/accept", {
+    body: {
+      confirm_password: "CatalogueOperator123",
+      invitation_token: invitation.payload.invitation_token,
+      new_password: "CatalogueOperator123"
+    }
+  });
+  assert.equal(accepted.status, 200);
+  const operator = await api("/v1/saas/auth/login", {
+    body: { email: "catalogue.operator@example.com", password: "CatalogueOperator123" }
+  });
+  assert.equal(operator.status, 200);
+
+  const synchronized = await api("/v1/saas/router-ticket-catalog", {
+    token: operator.payload.session.token,
+    body: {
+      router_id: routerId,
+      batches: [{
+        code_length: 6,
+        created_at: "2026-08-13T18:10:00.000Z",
+        currency: "CFA",
+        hotspot_server_name: "ticketpro-hotspot",
+        id: "batch-catalogue-1",
+        plan_id: "plan-catalogue-1h",
+        prefix: null,
+        price_snapshot: 100,
+        quantity: 1,
+        status: "terminé",
+        sync_status: "synced",
+        updated_at: "2026-08-13T18:10:01.000Z"
+      }],
+      tickets: [{
+        activated_at: null,
+        archived_at: null,
+        batch_id: "batch-catalogue-1",
+        completed_at: null,
+        created_at: "2026-08-13T18:10:00.000Z",
+        data_remaining_bytes: null,
+        deleted_at: null,
+        downloaded_bytes: 0,
+        expires_at: null,
+        exported_at: null,
+        hotspot_server_name: "ticketpro-hotspot",
+        id: "ticket-catalogue-482793",
+        ip_address: null,
+        last_router_sync_at: "2026-08-13T18:10:01.000Z",
+        mac_address: null,
+        mikrotik_id: "*B1",
+        mikrotik_profile_name: "1h",
+        password_is_username: true,
+        plan_id: "plan-catalogue-1h",
+        printed_count: 0,
+        remaining_seconds: 3600,
+        router_deleted_at: null,
+        status: "disponible",
+        sync_status: "synced",
+        updated_at: "2026-08-13T18:10:01.000Z",
+        uploaded_bytes: 0,
+        uptime_seconds: 0,
+        username: "482793"
+      }]
+    }
+  });
+  assert.equal(synchronized.status, 200, JSON.stringify(synchronized.payload));
+
+  const ownerCatalog = await api(`/v1/saas/router-ticket-catalog?router_id=${routerId}`, {
+    method: "GET",
+    token: ownerToken
+  });
+  assert.equal(ownerCatalog.status, 200);
+  assert.equal(ownerCatalog.payload.tickets.length, 1);
+  assert.equal(ownerCatalog.payload.tickets[0].username, "482793");
+  assert.equal(ownerCatalog.payload.tickets[0].created_by_email, "catalogue.operator@example.com");
+  assert.equal(ownerCatalog.payload.tickets[0].password_is_username, true);
+  assert.equal(Object.hasOwn(ownerCatalog.payload.tickets[0], "password"), false);
+
+  const synchronizedFiles = await api("/v1/saas/router-files", {
+    token: operator.payload.session.token,
+    body: {
+      router_id: routerId,
+      files: [{
+        batch_id: "batch-catalogue-1",
+        created_at: "2026-08-13T18:11:00.000Z",
+        deleted_at: null,
+        file_name: "routeur-catalogue-1h-100-cfa.pdf",
+        format: "a4",
+        id: "file-catalogue-1",
+        metadata_json: JSON.stringify({ format: "a4", ticket_count: 1 }),
+        sync_status: "synced",
+        type: "tickets_pdf",
+        updated_at: "2026-08-13T18:11:00.000Z"
+      }]
+    }
+  });
+  assert.equal(synchronizedFiles.status, 200, JSON.stringify(synchronizedFiles.payload));
+  const ownerFiles = await api(`/v1/saas/router-files?router_id=${routerId}`, {
+    method: "GET",
+    token: ownerToken
+  });
+  assert.equal(ownerFiles.status, 200);
+  assert.equal(ownerFiles.payload.files.length, 1);
+  assert.equal(ownerFiles.payload.files[0].created_by_email, "catalogue.operator@example.com");
+  assert.equal(ownerFiles.payload.files[0].file_name, "routeur-catalogue-1h-100-cfa.pdf");
+
+  const synchronizedLogs = await api("/v1/saas/router-activity-logs", {
+    token: operator.payload.session.token,
+    body: {
+      router_id: routerId,
+      logs: [{
+        category: "tickets",
+        created_at: "2020-08-13T18:12:00.000Z",
+        id: "log-catalogue-1",
+        level: "info",
+        technical_message: "action=ticket.batch.created",
+        user_message: "Un lot de 1 voucher a été créé."
+      }]
+    }
+  });
+  assert.equal(synchronizedLogs.status, 200, JSON.stringify(synchronizedLogs.payload));
+  const ownerLogs = await api(`/v1/saas/router-activity-logs?router_id=${routerId}`, {
+    method: "GET",
+    token: ownerToken
+  });
+  assert.equal(ownerLogs.status, 200);
+  assert.equal(ownerLogs.payload.logs.length, 1);
+  assert.equal(ownerLogs.payload.logs[0].created_by_email, "catalogue.operator@example.com");
+
+  const operatorLogs = await api(`/v1/saas/router-activity-logs?router_id=${routerId}`, {
+    method: "GET",
+    token: operator.payload.session.token
+  });
+  assert.equal(operatorLogs.status, 403);
+
+  const cleanedLogs = await api("/v1/saas/router-activity-logs/clean", {
+    token: ownerToken,
+    body: { before: new Date().toISOString(), router_id: routerId }
+  });
+  assert.equal(cleanedLogs.status, 200);
+  assert.equal(cleanedLogs.payload.removed, 1);
 });
 
 test("une inscription abandonnée sans essai ni paiement ne peut pas ouvrir de session", async () => {

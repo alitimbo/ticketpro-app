@@ -34,6 +34,39 @@ export class AppLogRepository {
     return created;
   }
 
+  async findById(id: string): Promise<AppLogRecord | null> {
+    const rows = await this.database.query<AppLogRecord>("SELECT * FROM app_logs WHERE id = ?1", [id]);
+    return rows[0] ?? null;
+  }
+
+  async upsertShared(input: CreateAppLogInput): Promise<AppLogRecord> {
+    const existing = await this.findById(input.id);
+    if (!existing) return this.create(input);
+    if (existing.account_id !== input.account_id) {
+      throw new Error("Ce journal appartient à un autre compte.");
+    }
+    await this.database.execute(
+      `UPDATE app_logs SET level = ?1, category = ?2, user_message = ?3,
+        technical_message = ?4, router_id = ?5, created_by_profile = ?6,
+        internal_profile_id = ?7, created_at = ?8 WHERE id = ?9 AND account_id = ?10`,
+      [
+        input.level,
+        input.category,
+        input.user_message,
+        input.technical_message,
+        input.router_id,
+        input.created_by_profile,
+        input.internal_profile_id,
+        input.created_at ?? existing.created_at,
+        input.id,
+        input.account_id
+      ]
+    );
+    const updated = await this.database.query<AppLogRecord>("SELECT * FROM app_logs WHERE id = ?1", [input.id]);
+    if (!updated[0]) throw new Error("Le journal partagé n'a pas pu être actualisé.");
+    return updated[0];
+  }
+
   async listByAccount(accountId: string): Promise<AppLogRecord[]> {
     return this.database.query<AppLogRecord>(
       "SELECT * FROM app_logs WHERE account_id = ?1 ORDER BY created_at DESC",

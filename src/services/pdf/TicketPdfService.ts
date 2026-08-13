@@ -17,6 +17,7 @@ export type TicketPdfInput = {
   batchId: string;
   createdByProfile: string;
   createdByProfileId: string;
+  currency?: string;
   dataLimitLabel: string | null;
   durationLabel: string;
   fileName: string;
@@ -39,6 +40,7 @@ export type TicketPdfInput = {
 export type TicketPdfArchiveMetadata = Pick<
   TicketPdfInput,
   | "dataLimitLabel"
+  | "currency"
   | "durationLabel"
   | "format"
   | "hotspotAddress"
@@ -81,6 +83,7 @@ const grids: Record<TicketPdfFormat, TicketGrid> = {
 export function buildGeneratedTicketPdfRecord(input: TicketPdfInput): CreateGeneratedFileInput {
   const metadata: TicketPdfArchiveMetadata = {
     dataLimitLabel: input.dataLimitLabel,
+    currency: input.currency?.trim() || input.displaySettings?.currency?.trim() || "CFA",
     durationLabel: input.durationLabel,
     format: input.format,
     hotspotAddress: input.hotspotAddress,
@@ -132,6 +135,7 @@ export function parseTicketPdfArchiveMetadata(value: string | null | undefined):
 
     return {
       dataLimitLabel: typeof parsed.dataLimitLabel === "string" ? parsed.dataLimitLabel : null,
+      currency: typeof parsed.currency === "string" ? parsed.currency : parsed.displaySettings?.currency ?? "CFA",
       durationLabel: parsed.durationLabel,
       format: parsed.format as TicketPdfFormat,
       hotspotAddress: parsed.hotspotAddress,

@@ -6,19 +6,25 @@ import { PersistedPlanMappingRouterAdapter } from "./PersistedPlanMappingRouterA
 
 const plan: HotspotPlanRecord = {
   created_at: "2026-01-01T00:00:00.000Z",
+  created_by_profile_id: "profile-admin",
+  currency: "CFA",
   data_limit_mb: 2048,
   deleted_at: null,
   download_limit: "5M",
   duration_minutes: 180,
   id: "plan-local-1",
+  last_synced_at: "2026-01-01T00:00:00.000Z",
+  mikrotik_id: "*1",
   mikrotik_profile_name: "plan-3h-2go",
   name: "3h - 2 Go",
   price_hint: 500,
   router_id: "router-1",
+  revision: 1,
   shared_users: 1,
   status: "active",
   sync_status: "synced",
   updated_at: "2026-01-01T00:00:00.000Z",
+  updated_by_profile_id: "profile-admin",
   upload_limit: "2M",
   validity_minutes: 300
 };

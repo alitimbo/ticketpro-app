@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
   Copy,
@@ -24,6 +24,7 @@ import {
 } from "../../services/database";
 import { TauriFileService } from "../../services/files";
 import { AuditLogService } from "../../services/logging";
+import { OrganizationOperationsSyncService, OrganizationTicketCatalogService } from "../../services/sync";
 import { parseTicketPdfArchiveMetadata, regenerateArchivedTicketPdf } from "../../services/pdf";
 import {
   ActionMenu,
@@ -61,6 +62,7 @@ export function FilesPage() {
   const [busyFileId, setBusyFileId] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [fileToDelete, setFileToDelete] = useState<ArchivedGeneratedFile | null>(null);
+  const migratedRouterIdsRef = useRef(new Set<string>());
   const generatedFileRepository = useMemo(() => new GeneratedFileRepository(database), [database]);
   const accountRepository = useMemo(() => new AccountRepository(database), [database]);
   const auditLogService = useMemo(() => new AuditLogService(database), [database]);
@@ -70,17 +72,47 @@ export function FilesPage() {
   const batchRepository = useMemo(() => new TicketBatchRepository(database), [database]);
   const ticketRepository = useMemo(() => new TicketRepository(database), [database]);
   const fileService = useMemo(() => new TauriFileService(), []);
+  const organizationOperations = useMemo(
+    () => session
+      ? new OrganizationOperationsSyncService(
+          database,
+          session.account_id,
+          session.internal_profile_id,
+          session.internal_profile_role
+        )
+      : null,
+    [database, session]
+  );
+  const organizationTicketCatalog = useMemo(
+    () => session
+      ? new OrganizationTicketCatalogService(
+          database,
+          session.account_id,
+          session.internal_profile_id,
+          session.internal_profile_role
+        )
+      : null,
+    [database, session]
+  );
 
   const loadFiles = useCallback(async () => {
     if (!isPersistent || !isInitialized || !session) {
       return;
     }
 
-      const [records, routers, batches] = await Promise.all([
-        generatedFileRepository.listByAccount(session.account_id),
-        saasAccount?.organization.id
+      const routers = await (saasAccount?.organization.id
           ? routerRepository.listByOrganization(session.account_id, saasAccount.organization.id)
-          : routerRepository.listByAccount(session.account_id),
+          : routerRepository.listByAccount(session.account_id));
+      await Promise.all(routers.map(async (router) => {
+        await organizationTicketCatalog?.pullRouter(router.id).catch(() => undefined);
+        if (!migratedRouterIdsRef.current.has(router.id)) {
+          await organizationOperations?.publishFiles(router.id).catch(() => undefined);
+          migratedRouterIdsRef.current.add(router.id);
+        }
+        await organizationOperations?.pullFiles(router.id).catch(() => undefined);
+      }));
+      const [records, batches] = await Promise.all([
+        generatedFileRepository.listByAccount(session.account_id),
         batchRepository.listByAccount(session.account_id)
       ]);
       const routerIds = new Set(routers.map((router) => router.id));
@@ -113,6 +145,8 @@ export function FilesPage() {
     generatedFileRepository,
     isInitialized,
     isPersistent,
+    organizationOperations,
+    organizationTicketCatalog,
     planRepository,
     routerRepository,
     saasAccount?.organization.id,
@@ -132,6 +166,20 @@ export function FilesPage() {
       mounted = false;
     };
   }, [loadFiles]);
+
+  useEffect(() => {
+    if (!isPersistent) return undefined;
+    const synchronize = () => {
+      if (document.visibilityState === "hidden") return;
+      void loadFiles().catch(() => undefined);
+    };
+    const interval = window.setInterval(synchronize, 15_000);
+    window.addEventListener("focus", synchronize);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", synchronize);
+    };
+  }, [isPersistent, loadFiles]);
 
   const scopedFiles = useMemo(() => scopeFilesForSession(files, session), [files, session]);
   const filteredFiles = useMemo(() => filterArchivedFiles(scopedFiles, filters), [scopedFiles, filters]);
@@ -343,6 +391,7 @@ export function FilesPage() {
     if (isPersistent && session) {
       try {
         await generatedFileRepository.remove(fileToDelete.id, session.account_id);
+        await organizationOperations?.publishFile(fileToDelete.routerId, fileToDelete.id).catch(() => undefined);
       } catch {
         setMessage("Le fichier n'a pas pu être retiré de l'historique.");
         return;
@@ -554,7 +603,12 @@ function FileArchiveRow({
         <FileMeta label="Routeur" value={file.routerName} />
         <FileMeta label="Plan" value={file.planName ?? "Non applicable"} />
         <FileMeta label="Tickets" value={file.ticketQuantity === null ? "Non applicable" : String(file.ticketQuantity)} />
-        <FileMeta label="Profil" value={profileLabel(file.operatorProfile)} />
+        <FileMeta
+          label="Créé par"
+          value={file.creatorLabel
+            ? `${file.creatorLabel} · ${profileLabel(file.operatorProfile)}`
+            : profileLabel(file.operatorProfile)}
+        />
         <FileMeta label="Date" value={formatFileDate(file.createdAt)} />
         <FileMeta label="Format" value={file.format} />
       </div>

@@ -82,6 +82,10 @@ export type HotspotDnsConfigurationResult = {
 export type HotspotPlan = {
   id: string;
   name: string;
+  /** Devise commerciale TicketPro. RouterOS ne stocke pas cette valeur. */
+  currency?: string;
+  /** Identifiant interne `.id` du profil RouterOS lorsqu'il est connu. */
+  mikrotikId?: string | null;
   durationMinutes: number;
   validityMinutes: number | null;
   dataLimitMb: number | null;

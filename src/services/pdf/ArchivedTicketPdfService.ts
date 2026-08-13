@@ -57,6 +57,7 @@ export async function regenerateArchivedTicketPdf(input: {
     batchId: input.batch.id,
     createdByProfile: input.file.created_by_profile,
     createdByProfileId: input.file.created_by_profile_id,
+    currency: metadata?.currency ?? (input.batch.currency?.trim() || "CFA"),
     dataLimitLabel: metadata?.dataLimitLabel ?? formatDataLimit(input.plan.data_limit_mb),
     displaySettings: metadata?.displaySettings ?? {
       ...defaultTicketDisplaySettings,
@@ -71,7 +72,9 @@ export async function regenerateArchivedTicketPdf(input: {
     planName: metadata?.planName ?? input.plan.name,
     priceLabel:
       metadata?.priceLabel ??
-      (input.plan.price_hint === null ? null : `${input.plan.price_hint.toLocaleString("fr-FR")} CFA`),
+      ((input.batch.price_snapshot ?? input.plan.price_hint) === null
+        ? null
+        : `${(input.batch.price_snapshot ?? input.plan.price_hint)!.toLocaleString("fr-FR")} ${input.batch.currency?.trim() || "CFA"}`),
     qrCodeEnabled: metadata?.qrCodeEnabled ?? false,
     routerId: input.router.id,
     template: metadata?.template === "qr" ? "economy" : metadata?.template ?? "economy",

@@ -10,3 +10,8 @@ export {
   type TicketSyncReport,
   type TicketSyncSummary
 } from "./RouterTicketSyncService";
+export {
+  OrganizationTicketCatalogService,
+  type OrganizationTicketCatalogSyncResult
+} from "./OrganizationTicketCatalogService";
+export { OrganizationOperationsSyncService } from "./OrganizationOperationsSyncService";

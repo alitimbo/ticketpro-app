@@ -70,8 +70,11 @@ describe("RouterCloudRecoveryService", () => {
     ]);
     expect(await new HotspotPlanRepository(database).listByRouter("router-cloud-1")).toEqual([
       expect.objectContaining({
+        currency: "CFA",
+        mikrotik_id: "*1",
         mikrotik_profile_name: "6h",
-        name: "Forfait 6 heures"
+        name: "Forfait 6 heures",
+        revision: 2
       })
     ]);
     expect(await new VpnPeerRepository(database).findByRouter(
@@ -159,16 +162,24 @@ function recoverySnapshot(): SaasRouterRecoverySnapshot {
     name: "Routeur client",
     notes: null,
     plans: [{
+      created_at: "2026-07-29T10:00:00.000Z",
+      created_by_profile_id: "profile-owner",
+      currency: "CFA",
       data_limit_mb: null,
       download_limit: "5M",
       duration_minutes: 360,
       id: "plan-cloud-1",
+      last_synced_at: "2026-07-29T11:00:00.000Z",
+      mikrotik_id: "*1",
       mikrotik_profile_name: "6h",
       name: "Forfait 6 heures",
       price_hint: 500,
+      revision: 2,
       shared_users: 1,
       status: "active",
       upload_limit: "2M",
+      updated_at: "2026-07-29T11:00:00.000Z",
+      updated_by_profile_id: "profile-owner",
       validity_minutes: 1440
     }],
     routeros_version: "7.15",

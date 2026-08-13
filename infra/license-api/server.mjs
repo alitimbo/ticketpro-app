@@ -424,6 +424,99 @@ db.exec(`
     UNIQUE (organization_id, stable_identity)
   );
 
+  CREATE TABLE IF NOT EXISTS organization_ticket_batches (
+    id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    router_id TEXT NOT NULL REFERENCES organization_routers(id) ON DELETE CASCADE,
+    plan_id TEXT NOT NULL,
+    operator_profile TEXT NOT NULL,
+    quantity INTEGER NOT NULL,
+    prefix TEXT,
+    code_length INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    hotspot_server_name TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    price_snapshot INTEGER,
+    sync_status TEXT NOT NULL,
+    created_by_user_id TEXT NOT NULL REFERENCES organization_users(id),
+    created_by_name TEXT NOT NULL,
+    created_by_email TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS organization_tickets (
+    id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    router_id TEXT NOT NULL REFERENCES organization_routers(id) ON DELETE CASCADE,
+    batch_id TEXT NOT NULL REFERENCES organization_ticket_batches(id) ON DELETE CASCADE,
+    plan_id TEXT NOT NULL,
+    username TEXT NOT NULL,
+    password_is_username INTEGER NOT NULL DEFAULT 0 CHECK(password_is_username IN (0, 1)),
+    status TEXT NOT NULL,
+    mac_address TEXT,
+    ip_address TEXT,
+    activated_at TEXT,
+    completed_at TEXT,
+    expires_at TEXT,
+    deleted_at TEXT,
+    printed_count INTEGER NOT NULL DEFAULT 0,
+    downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+    uploaded_bytes INTEGER NOT NULL DEFAULT 0,
+    mikrotik_id TEXT,
+    hotspot_server_name TEXT NOT NULL,
+    mikrotik_profile_name TEXT,
+    exported_at TEXT,
+    archived_at TEXT,
+    router_deleted_at TEXT,
+    last_router_sync_at TEXT,
+    uptime_seconds INTEGER NOT NULL DEFAULT 0,
+    remaining_seconds INTEGER,
+    data_remaining_bytes INTEGER,
+    sync_status TEXT NOT NULL,
+    created_by_user_id TEXT NOT NULL REFERENCES organization_users(id),
+    created_by_name TEXT NOT NULL,
+    created_by_email TEXT NOT NULL,
+    created_by_role TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (organization_id, router_id, username)
+  );
+
+  CREATE TABLE IF NOT EXISTS organization_generated_files (
+    id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    router_id TEXT NOT NULL REFERENCES organization_routers(id) ON DELETE CASCADE,
+    batch_id TEXT,
+    type TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    format TEXT NOT NULL,
+    metadata_json TEXT,
+    sync_status TEXT NOT NULL,
+    created_by_user_id TEXT NOT NULL REFERENCES organization_users(id),
+    created_by_name TEXT NOT NULL,
+    created_by_email TEXT NOT NULL,
+    created_by_role TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS organization_activity_logs (
+    id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    router_id TEXT NOT NULL REFERENCES organization_routers(id) ON DELETE CASCADE,
+    level TEXT NOT NULL,
+    category TEXT NOT NULL,
+    user_message TEXT NOT NULL,
+    technical_message TEXT,
+    created_by_user_id TEXT NOT NULL REFERENCES organization_users(id),
+    created_by_name TEXT NOT NULL,
+    created_by_email TEXT NOT NULL,
+    created_by_role TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS reseller_registrations (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL UNIQUE,
@@ -518,6 +611,18 @@ db.exec(`
     ON router_access_policy_history(organization_id, router_id, revision DESC);
   CREATE INDEX IF NOT EXISTS idx_organization_routers_organization
     ON organization_routers(organization_id, deleted_at, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_organization_ticket_batches_router
+    ON organization_ticket_batches(organization_id, router_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_organization_tickets_router
+    ON organization_tickets(organization_id, router_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_organization_tickets_creator
+    ON organization_tickets(organization_id, created_by_user_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_organization_generated_files_router
+    ON organization_generated_files(organization_id, router_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_organization_generated_files_creator
+    ON organization_generated_files(organization_id, created_by_user_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_organization_activity_logs_router
+    ON organization_activity_logs(organization_id, router_id, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_payment_orders_transaction ON payment_orders(transaction_id);
   CREATE INDEX IF NOT EXISTS idx_payment_orders_reseller ON payment_orders(reseller_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_payment_orders_registration ON payment_orders(reseller_registration_id);
@@ -1360,6 +1465,143 @@ const statements = {
     UPDATE organization_routers
     SET deleted_at = ?, updated_at = ?, updated_by_user_id = ?
     WHERE organization_id = ? AND id = ? AND deleted_at IS NULL
+  `),
+  findOrganizationTicketBatchById: db.prepare(`
+    SELECT * FROM organization_ticket_batches
+    WHERE organization_id = ? AND router_id = ? AND id = ?
+  `),
+  listOrganizationTicketBatches: db.prepare(`
+    SELECT * FROM organization_ticket_batches
+    WHERE organization_id = ? AND router_id = ?
+    ORDER BY created_at DESC
+  `),
+  upsertOrganizationTicketBatch: db.prepare(`
+    INSERT INTO organization_ticket_batches (
+      id, organization_id, router_id, plan_id, operator_profile, quantity,
+      prefix, code_length, status, hotspot_server_name, currency, price_snapshot,
+      sync_status, created_by_user_id, created_by_name, created_by_email,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      plan_id = excluded.plan_id,
+      operator_profile = excluded.operator_profile,
+      quantity = excluded.quantity,
+      prefix = excluded.prefix,
+      code_length = excluded.code_length,
+      status = excluded.status,
+      hotspot_server_name = excluded.hotspot_server_name,
+      currency = excluded.currency,
+      price_snapshot = excluded.price_snapshot,
+      sync_status = excluded.sync_status,
+      updated_at = excluded.updated_at
+    WHERE organization_ticket_batches.organization_id = excluded.organization_id
+      AND organization_ticket_batches.router_id = excluded.router_id
+      AND excluded.updated_at >= organization_ticket_batches.updated_at
+  `),
+  findOrganizationTicketById: db.prepare(`
+    SELECT * FROM organization_tickets
+    WHERE organization_id = ? AND router_id = ? AND id = ?
+  `),
+  findOrganizationTicketByUsername: db.prepare(`
+    SELECT * FROM organization_tickets
+    WHERE organization_id = ? AND router_id = ? AND username = ?
+  `),
+  listOrganizationTickets: db.prepare(`
+    SELECT * FROM organization_tickets
+    WHERE organization_id = ? AND router_id = ?
+    ORDER BY created_at DESC
+  `),
+  upsertOrganizationTicket: db.prepare(`
+    INSERT INTO organization_tickets (
+      id, organization_id, router_id, batch_id, plan_id, username,
+      password_is_username, status, mac_address, ip_address, activated_at,
+      completed_at, expires_at, deleted_at, printed_count, downloaded_bytes,
+      uploaded_bytes, mikrotik_id, hotspot_server_name, mikrotik_profile_name,
+      exported_at, archived_at, router_deleted_at, last_router_sync_at,
+      uptime_seconds, remaining_seconds, data_remaining_bytes, sync_status,
+      created_by_user_id, created_by_name, created_by_email, created_by_role,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      batch_id = excluded.batch_id,
+      plan_id = excluded.plan_id,
+      username = excluded.username,
+      password_is_username = excluded.password_is_username,
+      status = excluded.status,
+      mac_address = excluded.mac_address,
+      ip_address = excluded.ip_address,
+      activated_at = excluded.activated_at,
+      completed_at = excluded.completed_at,
+      expires_at = excluded.expires_at,
+      deleted_at = excluded.deleted_at,
+      printed_count = excluded.printed_count,
+      downloaded_bytes = excluded.downloaded_bytes,
+      uploaded_bytes = excluded.uploaded_bytes,
+      mikrotik_id = excluded.mikrotik_id,
+      hotspot_server_name = excluded.hotspot_server_name,
+      mikrotik_profile_name = excluded.mikrotik_profile_name,
+      exported_at = excluded.exported_at,
+      archived_at = excluded.archived_at,
+      router_deleted_at = excluded.router_deleted_at,
+      last_router_sync_at = excluded.last_router_sync_at,
+      uptime_seconds = excluded.uptime_seconds,
+      remaining_seconds = excluded.remaining_seconds,
+      data_remaining_bytes = excluded.data_remaining_bytes,
+      sync_status = excluded.sync_status,
+      updated_at = excluded.updated_at
+    WHERE organization_tickets.organization_id = excluded.organization_id
+      AND organization_tickets.router_id = excluded.router_id
+      AND excluded.updated_at >= organization_tickets.updated_at
+  `),
+  findOrganizationGeneratedFileById: db.prepare(`
+    SELECT * FROM organization_generated_files
+    WHERE organization_id = ? AND router_id = ? AND id = ?
+  `),
+  listOrganizationGeneratedFiles: db.prepare(`
+    SELECT * FROM organization_generated_files
+    WHERE organization_id = ? AND router_id = ?
+    ORDER BY created_at DESC
+    LIMIT 1000
+  `),
+  upsertOrganizationGeneratedFile: db.prepare(`
+    INSERT INTO organization_generated_files (
+      id, organization_id, router_id, batch_id, type, file_name, format,
+      metadata_json, sync_status, created_by_user_id, created_by_name,
+      created_by_email, created_by_role, created_at, updated_at, deleted_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      batch_id = excluded.batch_id,
+      type = excluded.type,
+      file_name = excluded.file_name,
+      format = excluded.format,
+      metadata_json = excluded.metadata_json,
+      sync_status = excluded.sync_status,
+      updated_at = excluded.updated_at,
+      deleted_at = excluded.deleted_at
+    WHERE organization_generated_files.organization_id = excluded.organization_id
+      AND organization_generated_files.router_id = excluded.router_id
+      AND excluded.updated_at >= organization_generated_files.updated_at
+  `),
+  findOrganizationActivityLogById: db.prepare(`
+    SELECT * FROM organization_activity_logs
+    WHERE organization_id = ? AND router_id = ? AND id = ?
+  `),
+  listOrganizationActivityLogs: db.prepare(`
+    SELECT * FROM organization_activity_logs
+    WHERE organization_id = ? AND router_id = ?
+    ORDER BY created_at DESC
+    LIMIT 2000
+  `),
+  insertOrganizationActivityLog: db.prepare(`
+    INSERT OR IGNORE INTO organization_activity_logs (
+      id, organization_id, router_id, level, category, user_message,
+      technical_message, created_by_user_id, created_by_name, created_by_email,
+      created_by_role, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  deleteOrganizationActivityLogsBefore: db.prepare(`
+    DELETE FROM organization_activity_logs
+    WHERE organization_id = ? AND router_id = ? AND created_at < ?
   `),
   linkPaymentOrderOrganization: db.prepare(`
     UPDATE payment_orders SET organization_id = ?, organization_user_id = ?, updated_at = ?
@@ -2555,6 +2797,18 @@ function requireOrganizationRouterPermission(request, permission, routerId) {
   return context;
 }
 
+function requireOrganizationRouterAnyPermission(request, permissions, routerId) {
+  const context = requireOrganizationUser(request, { requireActiveSubscription: true });
+  if (!permissions.some((permission) => organizationContextHasPermission(context, permission))) {
+    throw new HttpError(403, "Votre rôle n'autorise pas cette action.");
+  }
+  const access = organizationUserRouterAccess(context.membership);
+  if (access.mode !== "all" && !access.router_ids.includes(routerId)) {
+    throw new HttpError(403, "Ce profil n'est pas autorisé à gérer ce routeur.");
+  }
+  return context;
+}
+
 function normalizeRouterAccessPolicy(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new HttpError(400, "Politique réseau invalide.");
@@ -2814,20 +3068,287 @@ function normalizeRouterPlans(value) {
     if (!plan || typeof plan !== "object" || Array.isArray(plan)) {
       throw new HttpError(400, "Plan Hotspot invalide.");
     }
+    const planId = requireSnapshotText(plan, "id", 200);
+    const currency = normalizeSnapshotCurrency(plan.currency);
     return {
+      created_at: normalizeOptionalIsoDate(plan.created_at) ?? nowIso(),
+      created_by_profile_id: optionalSnapshotText(plan.created_by_profile_id, 200),
+      currency,
       data_limit_mb: normalizeOptionalNonNegativeInteger(plan.data_limit_mb),
       download_limit: optionalSnapshotText(plan.download_limit, 100),
       duration_minutes: normalizeNonNegativeInteger(plan.duration_minutes),
-      id: requireSnapshotText(plan, "id", 200),
+      history: normalizeRouterPlanHistory(plan.history, planId, currency),
+      id: planId,
+      last_synced_at: normalizeOptionalIsoDate(plan.last_synced_at),
+      mikrotik_id: optionalSnapshotText(plan.mikrotik_id, 200),
       mikrotik_profile_name: optionalSnapshotText(plan.mikrotik_profile_name, 200),
       name: requireSnapshotText(plan, "name", 200),
       price_hint: normalizeOptionalNonNegativeInteger(plan.price_hint),
+      revision: Math.max(1, normalizeNonNegativeInteger(plan.revision ?? 1)),
       shared_users: Math.max(1, normalizeNonNegativeInteger(plan.shared_users ?? 1)),
       status: optionalSnapshotText(plan.status, 50) ?? "active",
       upload_limit: optionalSnapshotText(plan.upload_limit, 100),
+      updated_at: normalizeOptionalIsoDate(plan.updated_at) ?? nowIso(),
+      updated_by_profile_id: optionalSnapshotText(plan.updated_by_profile_id, 200),
       validity_minutes: normalizeOptionalNonNegativeInteger(plan.validity_minutes)
     };
   });
+}
+
+function normalizeRouterPlanHistory(value, planId, fallbackCurrency) {
+  if (value === null || value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 500) {
+    throw new HttpError(400, "Historique du plan Hotspot invalide.");
+  }
+  const allowedActions = new Set(["created", "updated", "deleted", "restored", "synchronized"]);
+  return value.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new HttpError(400, "Entrée d'historique du plan invalide.");
+    }
+    const action = String(entry.action ?? "");
+    if (!allowedActions.has(action)) {
+      throw new HttpError(400, "Action d'historique du plan invalide.");
+    }
+    const snapshotJson = requireSnapshotText(entry, "snapshot_json", 20_000);
+    try {
+      JSON.parse(snapshotJson);
+    } catch {
+      throw new HttpError(400, "Instantané d'historique du plan invalide.");
+    }
+    return {
+      action,
+      actor_profile_id: optionalSnapshotText(entry.actor_profile_id, 200),
+      created_at: normalizeOptionalIsoDate(entry.created_at) ?? nowIso(),
+      currency: normalizeSnapshotCurrency(entry.currency ?? fallbackCurrency),
+      id: requireSnapshotText(entry, "id", 200),
+      mikrotik_id: optionalSnapshotText(entry.mikrotik_id, 200),
+      mikrotik_profile_name: optionalSnapshotText(entry.mikrotik_profile_name, 200),
+      name: requireSnapshotText(entry, "name", 200),
+      plan_id: planId,
+      price_hint: normalizeOptionalNonNegativeInteger(entry.price_hint),
+      revision: Math.max(1, normalizeNonNegativeInteger(entry.revision ?? 1)),
+      router_id: optionalSnapshotText(entry.router_id, 200) ?? "cloud",
+      snapshot_json: snapshotJson,
+      source: optionalSnapshotText(entry.source, 100) ?? "ticketpro"
+    };
+  });
+}
+
+function normalizeSnapshotCurrency(value) {
+  const currency = String(value ?? "CFA").trim().toUpperCase();
+  if (!/^[A-Z0-9]{2,12}$/.test(currency)) {
+    throw new HttpError(400, "Devise du plan Hotspot invalide.");
+  }
+  return currency;
+}
+
+function normalizeOrganizationTicketCatalog(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new HttpError(400, "Catalogue de vouchers invalide.");
+  }
+  const batches = Array.isArray(value.batches) ? value.batches : [];
+  const tickets = Array.isArray(value.tickets) ? value.tickets : [];
+  if (batches.length > 100 || tickets.length > 1_000) {
+    throw new HttpError(400, "Le catalogue de vouchers dépasse la taille autorisée.");
+  }
+  return {
+    batches: batches.map(normalizeOrganizationTicketBatch),
+    tickets: tickets.map(normalizeOrganizationTicket)
+  };
+}
+
+function normalizeOrganizationTicketBatch(batch) {
+  if (!batch || typeof batch !== "object" || Array.isArray(batch)) {
+    throw new HttpError(400, "Lot de vouchers invalide.");
+  }
+  return {
+    code_length: Math.max(1, normalizeNonNegativeInteger(batch.code_length)),
+    created_at: normalizeOptionalIsoDate(batch.created_at) ?? nowIso(),
+    currency: normalizeSnapshotCurrency(batch.currency),
+    hotspot_server_name: optionalSnapshotText(batch.hotspot_server_name, 200) ?? "all",
+    id: requireSnapshotText(batch, "id", 200),
+    plan_id: requireSnapshotText(batch, "plan_id", 200),
+    prefix: optionalSnapshotText(batch.prefix, 50),
+    price_snapshot: normalizeOptionalNonNegativeInteger(batch.price_snapshot),
+    quantity: Math.max(1, normalizeNonNegativeInteger(batch.quantity)),
+    status: requireSnapshotText(batch, "status", 50),
+    sync_status: optionalSnapshotText(batch.sync_status, 50) ?? "synced",
+    updated_at: normalizeOptionalIsoDate(batch.updated_at) ?? nowIso()
+  };
+}
+
+function normalizeOrganizationTicket(ticket) {
+  if (!ticket || typeof ticket !== "object" || Array.isArray(ticket)) {
+    throw new HttpError(400, "Voucher invalide.");
+  }
+  return {
+    activated_at: normalizeOptionalIsoDate(ticket.activated_at),
+    archived_at: normalizeOptionalIsoDate(ticket.archived_at),
+    batch_id: requireSnapshotText(ticket, "batch_id", 200),
+    completed_at: normalizeOptionalIsoDate(ticket.completed_at),
+    created_at: normalizeOptionalIsoDate(ticket.created_at) ?? nowIso(),
+    data_remaining_bytes: normalizeOptionalNonNegativeInteger(ticket.data_remaining_bytes),
+    deleted_at: normalizeOptionalIsoDate(ticket.deleted_at),
+    downloaded_bytes: normalizeNonNegativeInteger(ticket.downloaded_bytes),
+    expires_at: normalizeOptionalIsoDate(ticket.expires_at),
+    exported_at: normalizeOptionalIsoDate(ticket.exported_at),
+    hotspot_server_name: optionalSnapshotText(ticket.hotspot_server_name, 200) ?? "all",
+    id: requireSnapshotText(ticket, "id", 240),
+    ip_address: optionalSnapshotText(ticket.ip_address, 100),
+    last_router_sync_at: normalizeOptionalIsoDate(ticket.last_router_sync_at),
+    mac_address: optionalSnapshotText(ticket.mac_address, 100),
+    mikrotik_id: optionalSnapshotText(ticket.mikrotik_id, 200),
+    mikrotik_profile_name: optionalSnapshotText(ticket.mikrotik_profile_name, 200),
+    password_is_username: ticket.password_is_username === true || ticket.password_is_username === 1,
+    plan_id: requireSnapshotText(ticket, "plan_id", 200),
+    printed_count: normalizeNonNegativeInteger(ticket.printed_count),
+    remaining_seconds: normalizeOptionalNonNegativeInteger(ticket.remaining_seconds),
+    router_deleted_at: normalizeOptionalIsoDate(ticket.router_deleted_at),
+    status: requireSnapshotText(ticket, "status", 50),
+    sync_status: optionalSnapshotText(ticket.sync_status, 50) ?? "synced",
+    updated_at: normalizeOptionalIsoDate(ticket.updated_at) ?? nowIso(),
+    uploaded_bytes: normalizeNonNegativeInteger(ticket.uploaded_bytes),
+    uptime_seconds: normalizeNonNegativeInteger(ticket.uptime_seconds),
+    username: requireSnapshotText(ticket, "username", 200)
+  };
+}
+
+function organizationTicketBatchResponse(record) {
+  return {
+    code_length: Number(record.code_length),
+    created_at: record.created_at,
+    created_by_email: record.created_by_email,
+    created_by_name: record.created_by_name,
+    created_by_user_id: record.created_by_user_id,
+    currency: record.currency,
+    hotspot_server_name: record.hotspot_server_name,
+    id: record.id,
+    operator_profile: record.operator_profile,
+    plan_id: record.plan_id,
+    prefix: record.prefix,
+    price_snapshot: record.price_snapshot === null ? null : Number(record.price_snapshot),
+    quantity: Number(record.quantity),
+    status: record.status,
+    sync_status: record.sync_status,
+    updated_at: record.updated_at
+  };
+}
+
+function organizationTicketResponse(record) {
+  return {
+    activated_at: record.activated_at,
+    archived_at: record.archived_at,
+    batch_id: record.batch_id,
+    completed_at: record.completed_at,
+    created_at: record.created_at,
+    created_by_email: record.created_by_email,
+    created_by_name: record.created_by_name,
+    created_by_role: record.created_by_role,
+    created_by_user_id: record.created_by_user_id,
+    data_remaining_bytes: record.data_remaining_bytes === null ? null : Number(record.data_remaining_bytes),
+    deleted_at: record.deleted_at,
+    downloaded_bytes: Number(record.downloaded_bytes),
+    expires_at: record.expires_at,
+    exported_at: record.exported_at,
+    hotspot_server_name: record.hotspot_server_name,
+    id: record.id,
+    ip_address: record.ip_address,
+    last_router_sync_at: record.last_router_sync_at,
+    mac_address: record.mac_address,
+    mikrotik_id: record.mikrotik_id,
+    mikrotik_profile_name: record.mikrotik_profile_name,
+    password_is_username: Number(record.password_is_username) === 1,
+    plan_id: record.plan_id,
+    printed_count: Number(record.printed_count),
+    remaining_seconds: record.remaining_seconds === null ? null : Number(record.remaining_seconds),
+    router_deleted_at: record.router_deleted_at,
+    status: record.status,
+    sync_status: record.sync_status,
+    updated_at: record.updated_at,
+    uploaded_bytes: Number(record.uploaded_bytes),
+    uptime_seconds: Number(record.uptime_seconds),
+    username: record.username
+  };
+}
+
+function normalizeOrganizationGeneratedFile(file) {
+  if (!file || typeof file !== "object" || Array.isArray(file)) {
+    throw new HttpError(400, "Fichier généré invalide.");
+  }
+  const metadataJson = optionalSnapshotText(file.metadata_json, 16_000);
+  if (metadataJson) {
+    try {
+      JSON.parse(metadataJson);
+    } catch {
+      throw new HttpError(400, "Métadonnées du fichier invalides.");
+    }
+  }
+  return {
+    batch_id: optionalSnapshotText(file.batch_id, 240),
+    created_at: normalizeOptionalIsoDate(file.created_at) ?? nowIso(),
+    deleted_at: normalizeOptionalIsoDate(file.deleted_at),
+    file_name: requireSnapshotText(file, "file_name", 300),
+    format: requireSnapshotText(file, "format", 50),
+    id: requireSnapshotText(file, "id", 240),
+    metadata_json: metadataJson,
+    sync_status: optionalSnapshotText(file.sync_status, 50) ?? "synced",
+    type: requireSnapshotText(file, "type", 100),
+    updated_at: normalizeOptionalIsoDate(file.updated_at) ?? nowIso()
+  };
+}
+
+function organizationGeneratedFileResponse(record) {
+  return {
+    batch_id: record.batch_id,
+    created_at: record.created_at,
+    created_by_email: record.created_by_email,
+    created_by_name: record.created_by_name,
+    created_by_role: record.created_by_role,
+    created_by_user_id: record.created_by_user_id,
+    deleted_at: record.deleted_at,
+    file_name: record.file_name,
+    format: record.format,
+    id: record.id,
+    metadata_json: record.metadata_json,
+    router_id: record.router_id,
+    sync_status: record.sync_status,
+    type: record.type,
+    updated_at: record.updated_at
+  };
+}
+
+function normalizeOrganizationActivityLog(log) {
+  if (!log || typeof log !== "object" || Array.isArray(log)) {
+    throw new HttpError(400, "Journal d'activité invalide.");
+  }
+  const level = requireSnapshotText(log, "level", 20);
+  if (!new Set(["critical", "error", "info", "warning"]).has(level)) {
+    throw new HttpError(400, "Niveau de journal invalide.");
+  }
+  return {
+    category: requireSnapshotText(log, "category", 100),
+    created_at: normalizeOptionalIsoDate(log.created_at) ?? nowIso(),
+    id: requireSnapshotText(log, "id", 240),
+    level,
+    technical_message: optionalSnapshotText(log.technical_message, 4_000),
+    user_message: requireSnapshotText(log, "user_message", 1_000)
+  };
+}
+
+function organizationActivityLogResponse(record) {
+  return {
+    category: record.category,
+    created_at: record.created_at,
+    created_by_email: record.created_by_email,
+    created_by_name: record.created_by_name,
+    created_by_role: record.created_by_role,
+    created_by_user_id: record.created_by_user_id,
+    id: record.id,
+    level: record.level,
+    router_id: record.router_id,
+    technical_message: record.technical_message,
+    user_message: record.user_message
+  };
 }
 
 function normalizeRouterVpn(value) {
@@ -4888,6 +5409,301 @@ const handlers = [
       router_id: routerId
     });
     return { ok: true, router_id: routerId };
+  }),
+
+  route("GET", "/v1/saas/router-ticket-catalog", async (request) => {
+    const routerId = String(
+      new URL(request.url, "http://ticketpro.local").searchParams.get("router_id") ?? ""
+    ).trim();
+    if (!routerId || routerId.length > 200) {
+      throw new HttpError(400, "Identifiant de routeur invalide.");
+    }
+    const context = requireOrganizationRouterAnyPermission(
+      request,
+      ["router.tickets.read", "router.tickets.own"],
+      routerId
+    );
+    if (!statements.findOrganizationRouterById.get(context.organization.id, routerId)) {
+      throw new HttpError(404, "Routeur organisationnel introuvable.");
+    }
+    const canReadAll = organizationContextHasPermission(context, "router.tickets.read");
+    const tickets = statements.listOrganizationTickets
+      .all(context.organization.id, routerId)
+      .filter((ticket) => canReadAll || ticket.created_by_user_id === context.user.id);
+    const visibleBatchIds = new Set(tickets.map((ticket) => ticket.batch_id));
+    const batches = statements.listOrganizationTicketBatches
+      .all(context.organization.id, routerId)
+      .filter((batch) => canReadAll || visibleBatchIds.has(batch.id));
+    return {
+      batches: batches.map(organizationTicketBatchResponse),
+      router_id: routerId,
+      tickets: tickets.map(organizationTicketResponse)
+    };
+  }),
+
+  route("POST", "/v1/saas/router-ticket-catalog", async (request, body) => {
+    const routerId = requireText(body, "router_id", 200);
+    const context = requireOrganizationRouterAnyPermission(
+      request,
+      ["router.tickets.generate", "router.tickets.sync", "router.tickets.disable", "router.tickets.delete"],
+      routerId
+    );
+    if (!statements.findOrganizationRouterById.get(context.organization.id, routerId)) {
+      throw new HttpError(404, "Routeur organisationnel introuvable.");
+    }
+    const catalog = normalizeOrganizationTicketCatalog(body);
+    const creatorRole = context.membership.authority_role === "owner"
+      ? "admin"
+      : normalizeOrganizationAppRole(context.membership.app_role);
+
+    for (const batch of catalog.batches) {
+      const existing = statements.findOrganizationTicketBatchById.get(
+        context.organization.id,
+        routerId,
+        batch.id
+      );
+      statements.upsertOrganizationTicketBatch.run(
+        batch.id,
+        context.organization.id,
+        routerId,
+        batch.plan_id,
+        existing?.operator_profile ?? creatorRole,
+        batch.quantity,
+        batch.prefix,
+        batch.code_length,
+        batch.status,
+        batch.hotspot_server_name,
+        batch.currency,
+        batch.price_snapshot,
+        batch.sync_status,
+        existing?.created_by_user_id ?? context.user.id,
+        existing?.created_by_name ?? context.user.name,
+        existing?.created_by_email ?? context.user.email,
+        existing?.created_at ?? batch.created_at,
+        batch.updated_at
+      );
+    }
+
+    for (const ticket of catalog.tickets) {
+      const existingById = statements.findOrganizationTicketById.get(
+        context.organization.id,
+        routerId,
+        ticket.id
+      );
+      const existingByUsername = statements.findOrganizationTicketByUsername.get(
+        context.organization.id,
+        routerId,
+        ticket.username
+      );
+      if (existingById && existingByUsername && existingById.id !== existingByUsername.id) {
+        throw new HttpError(409, `Le voucher ${ticket.username} possède deux identités cloud incompatibles.`);
+      }
+      const existing = existingByUsername ?? existingById ?? null;
+      const ticketId = existing?.id ?? ticket.id;
+      const batch = statements.findOrganizationTicketBatchById.get(
+        context.organization.id,
+        routerId,
+        ticket.batch_id
+      );
+      if (!batch) {
+        throw new HttpError(409, `Le lot du voucher ${ticket.username} est introuvable.`);
+      }
+      statements.upsertOrganizationTicket.run(
+        ticketId,
+        context.organization.id,
+        routerId,
+        ticket.batch_id,
+        ticket.plan_id,
+        ticket.username,
+        ticket.password_is_username ? 1 : 0,
+        ticket.status,
+        ticket.mac_address,
+        ticket.ip_address,
+        ticket.activated_at,
+        ticket.completed_at,
+        ticket.expires_at,
+        ticket.deleted_at,
+        ticket.printed_count,
+        ticket.downloaded_bytes,
+        ticket.uploaded_bytes,
+        ticket.mikrotik_id,
+        ticket.hotspot_server_name,
+        ticket.mikrotik_profile_name,
+        ticket.exported_at,
+        ticket.archived_at,
+        ticket.router_deleted_at,
+        ticket.last_router_sync_at,
+        ticket.uptime_seconds,
+        ticket.remaining_seconds,
+        ticket.data_remaining_bytes,
+        ticket.sync_status,
+        existing?.created_by_user_id ?? context.user.id,
+        existing?.created_by_name ?? context.user.name,
+        existing?.created_by_email ?? context.user.email,
+        existing?.created_by_role ?? creatorRole,
+        existing?.created_at ?? ticket.created_at,
+        ticket.updated_at
+      );
+    }
+
+    logEvent(request, null, "organization_ticket_catalog_synchronized", context.organization.id, null, {
+      batch_count: catalog.batches.length,
+      organization_user_id: context.user.id,
+      router_id: routerId,
+      ticket_count: catalog.tickets.length
+    });
+    const canReadAll = organizationContextHasPermission(context, "router.tickets.read");
+    const visibleTickets = statements.listOrganizationTickets
+      .all(context.organization.id, routerId)
+      .filter((ticket) => canReadAll || ticket.created_by_user_id === context.user.id);
+    const visibleBatchIds = new Set(visibleTickets.map((ticket) => ticket.batch_id));
+    return {
+      batches: statements.listOrganizationTicketBatches
+        .all(context.organization.id, routerId)
+        .filter((batch) => canReadAll || visibleBatchIds.has(batch.id))
+        .map(organizationTicketBatchResponse),
+      router_id: routerId,
+      tickets: visibleTickets.map(organizationTicketResponse)
+    };
+  }),
+
+  route("GET", "/v1/saas/router-files", async (request) => {
+    const routerId = String(
+      new URL(request.url, "http://ticketpro.local").searchParams.get("router_id") ?? ""
+    ).trim();
+    if (!routerId || routerId.length > 200) {
+      throw new HttpError(400, "Identifiant de routeur invalide.");
+    }
+    const context = requireOrganizationRouterAnyPermission(
+      request,
+      ["router.files.read", "router.files.own"],
+      routerId
+    );
+    if (!statements.findOrganizationRouterById.get(context.organization.id, routerId)) {
+      throw new HttpError(404, "Routeur organisationnel introuvable.");
+    }
+    const canReadAll = organizationContextHasPermission(context, "router.files.read");
+    const files = statements.listOrganizationGeneratedFiles
+      .all(context.organization.id, routerId)
+      .filter((file) => canReadAll || file.created_by_user_id === context.user.id);
+    return { files: files.map(organizationGeneratedFileResponse), router_id: routerId };
+  }),
+
+  route("POST", "/v1/saas/router-files", async (request, body) => {
+    const routerId = requireText(body, "router_id", 200);
+    const context = requireOrganizationRouterAnyPermission(
+      request,
+      ["router.tickets.generate", "router.tickets.reprint", "router.files.read", "router.files.own"],
+      routerId
+    );
+    if (!statements.findOrganizationRouterById.get(context.organization.id, routerId)) {
+      throw new HttpError(404, "Routeur organisationnel introuvable.");
+    }
+    const files = Array.isArray(body.files) ? body.files : [];
+    if (files.length > 100) throw new HttpError(400, "Trop de fichiers à synchroniser.");
+    const creatorRole = context.membership.authority_role === "owner"
+      ? "admin"
+      : normalizeOrganizationAppRole(context.membership.app_role);
+    for (const rawFile of files) {
+      const file = normalizeOrganizationGeneratedFile(rawFile);
+      const existing = statements.findOrganizationGeneratedFileById.get(
+        context.organization.id,
+        routerId,
+        file.id
+      );
+      statements.upsertOrganizationGeneratedFile.run(
+        file.id,
+        context.organization.id,
+        routerId,
+        file.batch_id,
+        file.type,
+        file.file_name,
+        file.format,
+        file.metadata_json,
+        file.sync_status,
+        existing?.created_by_user_id ?? context.user.id,
+        existing?.created_by_name ?? context.user.name,
+        existing?.created_by_email ?? context.user.email,
+        existing?.created_by_role ?? creatorRole,
+        existing?.created_at ?? file.created_at,
+        file.updated_at,
+        file.deleted_at
+      );
+    }
+    const canReadAll = organizationContextHasPermission(context, "router.files.read");
+    const visibleFiles = statements.listOrganizationGeneratedFiles
+      .all(context.organization.id, routerId)
+      .filter((file) => canReadAll || file.created_by_user_id === context.user.id);
+    return { files: visibleFiles.map(organizationGeneratedFileResponse), router_id: routerId };
+  }),
+
+  route("GET", "/v1/saas/router-activity-logs", async (request) => {
+    const routerId = String(
+      new URL(request.url, "http://ticketpro.local").searchParams.get("router_id") ?? ""
+    ).trim();
+    if (!routerId || routerId.length > 200) {
+      throw new HttpError(400, "Identifiant de routeur invalide.");
+    }
+    const context = requireOrganizationRouterPermission(request, "router.logs.read", routerId);
+    if (!statements.findOrganizationRouterById.get(context.organization.id, routerId)) {
+      throw new HttpError(404, "Routeur organisationnel introuvable.");
+    }
+    return {
+      logs: statements.listOrganizationActivityLogs
+        .all(context.organization.id, routerId)
+        .map(organizationActivityLogResponse),
+      router_id: routerId
+    };
+  }),
+
+  route("POST", "/v1/saas/router-activity-logs", async (request, body) => {
+    const routerId = requireText(body, "router_id", 200);
+    const context = requireOrganizationRouterAnyPermission(
+      request,
+      ["router.home", "router.tickets.generate", "router.tickets.sync", "router.plans.write", "router.settings"],
+      routerId
+    );
+    if (!statements.findOrganizationRouterById.get(context.organization.id, routerId)) {
+      throw new HttpError(404, "Routeur organisationnel introuvable.");
+    }
+    const logs = Array.isArray(body.logs) ? body.logs : [];
+    if (logs.length > 100) throw new HttpError(400, "Trop de journaux à synchroniser.");
+    const creatorRole = context.membership.authority_role === "owner"
+      ? "admin"
+      : normalizeOrganizationAppRole(context.membership.app_role);
+    for (const rawLog of logs) {
+      const log = normalizeOrganizationActivityLog(rawLog);
+      statements.insertOrganizationActivityLog.run(
+        log.id,
+        context.organization.id,
+        routerId,
+        log.level,
+        log.category,
+        log.user_message,
+        log.technical_message,
+        context.user.id,
+        context.user.name,
+        context.user.email,
+        creatorRole,
+        log.created_at
+      );
+    }
+    return { accepted: logs.length, router_id: routerId };
+  }),
+
+  route("POST", "/v1/saas/router-activity-logs/clean", async (request, body) => {
+    const routerId = requireText(body, "router_id", 200);
+    const context = requireOrganizationRouterPermission(request, "router.logs.clean", routerId);
+    const cutoff = normalizeOptionalIsoDate(body.before);
+    if (!cutoff || new Date(cutoff).getTime() > Date.now()) {
+      throw new HttpError(400, "Date de nettoyage invalide.");
+    }
+    const result = statements.deleteOrganizationActivityLogsBefore.run(
+      context.organization.id,
+      routerId,
+      cutoff
+    );
+    return { removed: Number(result.changes), router_id: routerId };
   }),
 
   route("GET", "/v1/saas/router-access-policy", async (request) => {

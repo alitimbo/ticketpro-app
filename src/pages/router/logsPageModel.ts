@@ -21,6 +21,7 @@ export type AppLogLevel = "critical" | "error" | "info" | "warning";
 export type AppLogEntry = {
   accountId: string;
   action: string | null;
+  actorLabel?: string;
   category: AppLogCategory;
   createdAt: string;
   id: string;
@@ -300,6 +301,7 @@ export function appLogFromRecord(
   return {
     accountId: record.account_id ?? "",
     action: prefixedMessage.action ?? technical.action ?? technical.code,
+    actorLabel: cloudActorLabel(record.internal_profile_id),
     category: normalizeCategory(record.category),
     createdAt: record.created_at,
     id: record.id,
@@ -457,11 +459,18 @@ export function exportLogsToCsv(logs: AppLogEntry[]): string {
     categoryLabel(log.category),
     log.userMessage,
     log.routerName ?? "",
-    profileLabel(log.userProfile),
+    log.actorLabel ? `${log.actorLabel} (${profileLabel(log.userProfile)})` : profileLabel(log.userProfile),
     log.action ?? ""
   ]);
 
   return [headers, ...rows].map((row) => row.map(escapeCsv).join(",")).join("\n");
+}
+
+function cloudActorLabel(profileId: string | null): string | undefined {
+  if (!profileId) return undefined;
+  const marker = ":cloud-user:";
+  if (!profileId.includes(marker)) return undefined;
+  return profileId.slice(profileId.indexOf(marker) + marker.length) || undefined;
 }
 
 export function canCleanLogs(role: UserRole | null | undefined): boolean {

@@ -7,6 +7,7 @@ import {
 import type { AuthSession } from "../../domain/auth";
 
 export type ReportTicket = TicketListItem & {
+  currency: string;
   deletedAt: string | null;
   printedAt: string[];
   priceHint: number | null;
@@ -34,7 +35,7 @@ export type ReportMetric = {
   hint: string;
   id: ReportMetricId;
   label: string;
-  totalCfa: number | null;
+  totalByCurrency: CurrencyTotals | null;
   value: number;
 };
 
@@ -44,18 +45,20 @@ export type ReportGroupRow = {
   created: number;
   id: string;
   label: string;
-  theoreticalCfa: number;
+  theoreticalByCurrency: CurrencyTotals;
   tickets: ReportTicket[];
 };
 
 export type ReportSummary = {
-  activatedTheoreticalCfa: number;
-  createdTheoreticalCfa: number;
+  activatedTheoreticalByCurrency: CurrencyTotals;
+  createdTheoreticalByCurrency: CurrencyTotals;
   metrics: ReportMetric[];
   byDay: ReportGroupRow[];
   byOperator: ReportGroupRow[];
   byPlan: ReportGroupRow[];
 };
+
+export type CurrencyTotals = Record<string, number>;
 
 export const emptyReportFilters: ReportFilters = {
   dateFrom: "2026-07-08",
@@ -79,6 +82,7 @@ export function createDemoReportTickets(): ReportTicket[] {
 
     return {
       ...ticket,
+      currency: "CFA",
       deletedAt,
       printedAt: ticket.printedCount > 0 ? [ticket.createdAt] : [],
       priceHint: planPrices[ticket.planId] ?? null,
@@ -141,7 +145,7 @@ export function buildReportSummary(tickets: ReportTicket[], filters: ReportFilte
   const createdTickets = getTicketsForMetric(filteredTickets, "created", filters);
 
   return {
-    activatedTheoreticalCfa: sumTheoreticalValue(activatedTickets),
+    activatedTheoreticalByCurrency: sumTheoreticalValueByCurrency(activatedTickets),
     byDay: buildDailyGroupRows(filteredTickets, filters),
     byOperator: buildGroupRows(
       filteredTickets,
@@ -150,7 +154,7 @@ export function buildReportSummary(tickets: ReportTicket[], filters: ReportFilte
       (ticket) => internalProfileLabel(ticket.createdByProfileId)
     ),
     byPlan: buildGroupRows(filteredTickets, filters, (ticket) => ticket.planId, (ticket) => ticket.planName),
-    createdTheoreticalCfa: sumTheoreticalValue(createdTickets),
+    createdTheoreticalByCurrency: sumTheoreticalValueByCurrency(createdTickets),
     metrics
   };
 }
@@ -166,11 +170,22 @@ export function getTicketsForMetric(
 }
 
 export function formatCfa(value: number | null): string {
+  return formatMoney(value, "CFA");
+}
+
+export function formatMoney(value: number | null, currency: string): string {
   if (value === null) {
     return "Non défini";
   }
 
-  return `${value.toLocaleString("fr-FR")} CFA`;
+  return `${value.toLocaleString("fr-FR")} ${normalizeReportCurrency(currency)}`;
+}
+
+export function formatCurrencyTotals(totals: CurrencyTotals): string {
+  const entries = Object.entries(totals).filter(([, value]) => value !== 0);
+  return entries.length > 0
+    ? entries.map(([currency, value]) => formatMoney(value, currency)).join(" · ")
+    : "0";
 }
 
 export function formatReportDate(value: string): string {
@@ -194,6 +209,10 @@ export function profileLabel(profile: string): string {
 }
 
 export function internalProfileLabel(profileId: string): string {
+  const cloudMarker = ":cloud-user:";
+  if (profileId.includes(cloudMarker)) {
+    return profileId.slice(profileId.indexOf(cloudMarker) + cloudMarker.length) || "Collaborateur";
+  }
   const canonicalId = profileId.includes(":") ? profileId.slice(profileId.lastIndexOf(":") + 1) : profileId;
   const labels: Record<string, string> = {
     "internal-profile-admin": "Admin",
@@ -225,7 +244,8 @@ export function buildReportCsv(tickets: ReportTicket[]): string {
     "Adresse MAC",
     "Téléchargé (octets)",
     "Envoyé (octets)",
-    "Prix théorique CFA"
+    "Prix théorique",
+    "Devise"
   ];
   const rows = tickets.map((ticket) => [
     ticket.code,
@@ -246,7 +266,8 @@ export function buildReportCsv(tickets: ReportTicket[]): string {
     ticket.macAddress ?? "",
     String(ticket.downloadedBytes),
     String(ticket.uploadedBytes),
-    ticket.priceHint === null ? "" : String(ticket.priceHint)
+    ticket.priceHint === null ? "" : String(ticket.priceHint),
+    normalizeReportCurrency(ticket.currency)
   ]);
 
   return `\uFEFF${[header, ...rows].map((row) => row.map(escapeCsvCell).join(";")).join("\r\n")}\r\n`;
@@ -260,13 +281,15 @@ function buildMetric(
   filters: ReportFilters
 ): ReportMetric {
   const metricTickets = getTicketsForMetric(tickets, id, filters);
-  const totalCfa = id === "activated" || id === "created" ? sumTheoreticalValue(metricTickets) : null;
+  const totalByCurrency = id === "activated" || id === "created"
+    ? sumTheoreticalValueByCurrency(metricTickets)
+    : null;
 
   return {
     hint,
     id,
     label,
-    totalCfa,
+    totalByCurrency,
     value: metricTickets.length
   };
 }
@@ -293,7 +316,7 @@ function buildGroupRows(
         created: 0,
         id,
         label: getLabel(ticket),
-        theoreticalCfa: 0,
+        theoreticalByCurrency: {},
         tickets: []
       };
 
@@ -301,7 +324,7 @@ function buildGroupRows(
 
     if (isDateInPeriod(ticket.createdAt, filters)) {
       row.created += 1;
-      row.theoreticalCfa += ticket.priceHint ?? 0;
+      addTheoreticalValue(row.theoreticalByCurrency, ticket);
     }
 
     if (ticket.activatedAt && isDateInPeriod(ticket.activatedAt, filters)) {
@@ -373,7 +396,7 @@ function buildDailyGroupRows(tickets: ReportTicket[], filters: ReportFilters): R
         created: 0,
         id,
         label: id,
-        theoreticalCfa: 0,
+        theoreticalByCurrency: {},
         tickets: []
       };
     rows.set(id, row);
@@ -389,7 +412,7 @@ function buildDailyGroupRows(tickets: ReportTicket[], filters: ReportFilters): R
     if (isDateInPeriod(ticket.createdAt, filters)) {
       const row = getRow(ticket.createdAt);
       row.created += 1;
-      row.theoreticalCfa += ticket.priceHint ?? 0;
+      addTheoreticalValue(row.theoreticalByCurrency, ticket);
       addTicket(row, ticket);
     }
 
@@ -409,8 +432,20 @@ function buildDailyGroupRows(tickets: ReportTicket[], filters: ReportFilters): R
   return Array.from(rows.values()).sort((left, right) => right.id.localeCompare(left.id));
 }
 
-function sumTheoreticalValue(tickets: ReportTicket[]): number {
-  return tickets.reduce((sum, ticket) => sum + (ticket.priceHint ?? 0), 0);
+function sumTheoreticalValueByCurrency(tickets: ReportTicket[]): CurrencyTotals {
+  const totals: CurrencyTotals = {};
+  tickets.forEach((ticket) => addTheoreticalValue(totals, ticket));
+  return totals;
+}
+
+function addTheoreticalValue(totals: CurrencyTotals, ticket: ReportTicket): void {
+  if (ticket.priceHint === null) return;
+  const currency = normalizeReportCurrency(ticket.currency);
+  totals[currency] = (totals[currency] ?? 0) + ticket.priceHint;
+}
+
+function normalizeReportCurrency(value: string | null | undefined): string {
+  return value?.trim().slice(0, 12) || "CFA";
 }
 
 function isDateInPeriod(value: string, filters: ReportFilters): boolean {

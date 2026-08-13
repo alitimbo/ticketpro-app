@@ -10,6 +10,7 @@ export type ArchivedGeneratedFile = {
   batchId: string | null;
   canRegenerate: boolean;
   createdByProfileId: string;
+  creatorLabel?: string;
   createdAt: string;
   fileName: string;
   fileType: GeneratedFileType;
@@ -50,6 +51,7 @@ export function archivedFileFromRecord(
     batchId: record.batch_id,
     canRegenerate: record.type === "tickets_pdf" && Boolean(record.batch_id),
     createdByProfileId: record.created_by_profile_id,
+    creatorLabel: profileIdentityLabel(record.created_by_profile_id),
     createdAt: record.created_at,
     fileName: record.file_name,
     fileType: record.type as GeneratedFileType,
@@ -254,6 +256,12 @@ export function profileLabel(profile: string): string {
   };
 
   return labels[profile] ?? profile;
+}
+
+export function profileIdentityLabel(profileId: string): string | undefined {
+  const marker = ":cloud-user:";
+  if (!profileId.includes(marker)) return undefined;
+  return profileId.slice(profileId.indexOf(marker) + marker.length) || undefined;
 }
 
 function startOfDay(date: string): number {

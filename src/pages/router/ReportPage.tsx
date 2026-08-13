@@ -30,7 +30,11 @@ import { TauriFileService } from "../../services/files";
 import { AuditLogService } from "../../services/logging";
 import { generateReportPdf } from "../../services/pdf";
 import { createPersistedRouterService } from "../../services/router";
-import { RouterTicketSyncService } from "../../services/sync";
+import {
+  OrganizationOperationsSyncService,
+  OrganizationTicketCatalogService,
+  RouterTicketSyncService
+} from "../../services/sync";
 import { Badge, Button, Card, EmptyState, PageHeader, StatCard } from "../../shared/ui";
 import type { AppStatus, IconComponent } from "../../shared/ui";
 import {
@@ -39,7 +43,8 @@ import {
   createDemoReportTickets,
   emptyReportFilters,
   filterReportTickets,
-  formatCfa,
+  formatCurrencyTotals,
+  formatMoney,
   formatReportDate,
   getTicketsForMetric,
   internalProfileLabel,
@@ -100,6 +105,28 @@ export function ReportPage() {
   const generatedFileRepository = useMemo(() => new GeneratedFileRepository(database), [database]);
   const auditLogService = useMemo(() => new AuditLogService(database), [database]);
   const fileService = useMemo(() => new TauriFileService(), []);
+  const organizationTicketCatalog = useMemo(
+    () => session
+      ? new OrganizationTicketCatalogService(
+          database,
+          session.account_id,
+          session.internal_profile_id,
+          session.internal_profile_role
+        )
+      : null,
+    [database, session]
+  );
+  const organizationOperations = useMemo(
+    () => session
+      ? new OrganizationOperationsSyncService(
+          database,
+          session.account_id,
+          session.internal_profile_id,
+          session.internal_profile_role
+        )
+      : null,
+    [database, session]
+  );
 
   const loadReport = useCallback(async (options: { silent?: boolean } = {}) => {
     if (!isPersistent || !isInitialized || !session) {
@@ -117,13 +144,16 @@ export function ReportPage() {
     }
 
     try {
+      await organizationTicketCatalog?.publishRouter(routerId).catch(() => undefined);
+      await organizationTicketCatalog?.pullRouter(routerId).catch(() => undefined);
       const profileScope = session.permissions.includes("router.report.read")
         ? undefined
         : session.internal_profile_id;
-      const [router, records, plans, printHistory, connections] = await Promise.all([
+      const [router, records, plans, batches, printHistory, connections] = await Promise.all([
         routerRepository.findById(routerId),
         ticketRepository.listForReportByAccount(session.account_id, profileScope),
         planRepository.listByRouter(routerId),
+        ticketBatchRepository.listByRouter(routerId),
         printHistoryRepository.listByAccount(session.account_id),
         routerConnectionRepository.listByRouter(routerId)
       ]);
@@ -133,6 +163,8 @@ export function ReportPage() {
       }
 
       const plansById = new Map(plans.map((plan) => [plan.id, plan]));
+      const currencyByBatchId = new Map(batches.map((batch) => [batch.id, batch.currency || "CFA"]));
+      const priceByBatchId = new Map(batches.map((batch) => [batch.id, batch.price_snapshot]));
       const printDatesByBatch = new Map<string, string[]>();
       printHistory
         .filter(
@@ -153,11 +185,14 @@ export function ReportPage() {
             const ticket = ticketFromRecord(record, plansById.get(record.plan_id) ?? null, router.name);
             return {
               ...ticket,
+              currency: currencyByBatchId.get(record.batch_id) ?? "CFA",
               deletedAt: record.deleted_at,
               printedAt:
                 printDatesByBatch.get(record.batch_id) ??
                 (record.printed_count > 0 ? [record.updated_at] : []),
-              priceHint: plansById.get(ticket.planId)?.price_hint ?? null
+              priceHint: priceByBatchId.has(record.batch_id)
+                ? priceByBatchId.get(record.batch_id) ?? null
+                : plansById.get(ticket.planId)?.price_hint ?? null
             };
           });
 
@@ -187,6 +222,7 @@ export function ReportPage() {
       setRouterOnlyCount(syncReport.localMissing.length);
       setLastLiveSyncAt(new Date().toISOString());
       setLiveStatus("live");
+      await organizationTicketCatalog?.publishRouter(routerId).catch(() => undefined);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Le routeur ne répond pas.";
       setLiveStatus("degraded");
@@ -203,6 +239,8 @@ export function ReportPage() {
     database,
     isInitialized,
     isPersistent,
+    organizationTicketCatalog,
+    organizationOperations,
     planRepository,
     printHistoryRepository,
     routerConnectionRepository,
@@ -283,7 +321,7 @@ export function ReportPage() {
             </Button>
           </div>
         }
-        description="Activité des tickets sur une période. Les montants CFA sont des valeurs théoriques basées sur le prix indicatif des plans."
+        description="Activité des tickets sur une période. Les montants sont des valeurs théoriques conservées dans la devise choisie lors de chaque génération."
         eyebrow="Routeur"
         title="Rapport"
       />
@@ -313,7 +351,7 @@ export function ReportPage() {
           <div className="tickets-count">
             <strong>Tickets ({filteredTickets.length})</strong>
             <span>
-              Créés : {formatCfa(summary.createdTheoreticalCfa)} · Activés : {formatCfa(summary.activatedTheoreticalCfa)}
+              Créés : {formatCurrencyTotals(summary.createdTheoreticalByCurrency)} · Activés : {formatCurrencyTotals(summary.activatedTheoreticalByCurrency)}
             </span>
           </div>
           <label className="date-field">
@@ -338,10 +376,10 @@ export function ReportPage() {
 
       <div className="page-grid">
         <div className="span-4">
-          <StatCard icon={Ticket} label="Créés" value={String(summary.metrics.find((metric) => metric.id === "created")?.value ?? 0)} hint={formatCfa(summary.createdTheoreticalCfa)} />
+          <StatCard icon={Ticket} label="Créés" value={String(summary.metrics.find((metric) => metric.id === "created")?.value ?? 0)} hint={formatCurrencyTotals(summary.createdTheoreticalByCurrency)} />
         </div>
         <div className="span-4">
-          <StatCard icon={CheckCircle2} label="Activés" value={String(summary.metrics.find((metric) => metric.id === "activated")?.value ?? 0)} hint={formatCfa(summary.activatedTheoreticalCfa)} />
+          <StatCard icon={CheckCircle2} label="Activés" value={String(summary.metrics.find((metric) => metric.id === "activated")?.value ?? 0)} hint={formatCurrencyTotals(summary.activatedTheoreticalByCurrency)} />
         </div>
         <div className="span-4">
           <StatCard icon={Trash2} label="Supprimés" value={String(summary.metrics.find((metric) => metric.id === "deleted")?.value ?? 0)} hint="Suppression contrôlée" />
@@ -428,7 +466,9 @@ export function ReportPage() {
     }
 
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const fileName = `rapport-${routerId}-${stamp}.${format}`;
+    const currencies = Array.from(new Set(filteredTickets.map((ticket) => ticket.currency || "CFA")));
+    const currencyLabel = currencies.length === 1 ? currencies[0] : "multi-devises";
+    const fileName = `rapport-${routerId}-${sanitizeReportFileSegment(currencyLabel)}-${stamp}.${format}`;
     const relativePath = `files/${fileName}`;
     const bytes =
       format === "csv"
@@ -440,13 +480,15 @@ export function ReportPage() {
               createdAt: formatReportDate(ticket.createdAt),
               operator: internalProfileLabel(ticket.createdByProfileId),
               plan: ticket.planName,
-              priceLabel: formatCfa(ticket.priceHint),
+              priceLabel: formatMoney(ticket.priceHint, ticket.currency),
               router: ticket.routerName,
               status: ticket.status
             })),
             summary: [
               `Période: ${filters.dateFrom || "début"} au ${filters.dateTo || "aujourd'hui"}`,
               `Tickets visibles: ${filteredTickets.length}`,
+              `Valeur créée: ${formatCurrencyTotals(summary.createdTheoreticalByCurrency)}`,
+              `Valeur activée: ${formatCurrencyTotals(summary.activatedTheoreticalByCurrency)}`,
               ...summary.metrics.map((metric) => `${metric.label}: ${metric.value}`)
             ],
             title: "Rapport d'activité TicketPro"
@@ -459,6 +501,7 @@ export function ReportPage() {
       if (isPersistent && session) {
         const savedFile = await fileService.writeBytes(relativePath, bytes);
         managedPath = savedFile.relative_path;
+        const reportFileId = createId("report");
         await generatedFileRepository.create({
           account_id: session.account_id,
           batch_id: null,
@@ -467,11 +510,17 @@ export function ReportPage() {
           file_name: fileName,
           file_path: savedFile.relative_path,
           format,
-          id: createId("report"),
+          id: reportFileId,
+          metadata_json: JSON.stringify({
+            currencies,
+            generated_at: new Date().toISOString(),
+            ticket_count: filteredTickets.length
+          }),
           router_id: routerId,
           sync_status: "local",
           type: format === "csv" ? "report_csv" : "report_pdf"
         });
+        await organizationOperations?.publishFile(routerId, reportFileId).catch(() => undefined);
         historyCreated = true;
         try {
           const exported = await fileService.exportToDownloads(savedFile.relative_path);
@@ -606,7 +655,7 @@ function ReportMetricRow({ metric, onClick }: { metric: ReportMetric; onClick: (
       </span>
       <span className="report-summary-row__value">
         <strong>{metric.value}</strong>
-        {metric.totalCfa !== null ? <small>{formatCfa(metric.totalCfa)}</small> : null}
+        {metric.totalByCurrency !== null ? <small>{formatCurrencyTotals(metric.totalByCurrency)}</small> : null}
       </span>
     </button>
   );
@@ -629,7 +678,7 @@ function ReportGroupList({
         <button className="report-group-row" key={group.id} onClick={() => onOpen(group)} type="button">
           <span>
             <strong>{group.label}</strong>
-            <small>{formatCfa(group.theoreticalCfa)}</small>
+            <small>{formatCurrencyTotals(group.theoreticalByCurrency)}</small>
           </span>
           <span className="report-group-row__numbers">
             <b>{group.created}</b>
@@ -755,4 +804,13 @@ function uniqueBy<T>(values: T[], getKey: (value: T) => string): T[] {
   });
 
   return Array.from(map.values());
+}
+
+function sanitizeReportFileSegment(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^[-_.]+|[-_.]+$/g, "")
+    .slice(0, 24) || "CFA";
 }

@@ -30,6 +30,8 @@ import {
   TicketRepository,
   useAppDatabase
 } from "../../services/database";
+import { reconcileRouterPlanCatalog } from "../../services/recovery";
+import { OrganizationOperationsSyncService, OrganizationTicketCatalogService } from "../../services/sync";
 import {
   buildGeneratedTicketPdfRecord,
   generateTicketPdf,
@@ -59,6 +61,7 @@ import {
   defaultTicketGenerationOptions,
   getSelectedQuantity,
   getTicketSummary,
+  normalizeCurrency,
   normalizePrefix,
   quickQuantities,
   roleLabel,
@@ -118,6 +121,7 @@ export function TicketGenerationPage() {
   const [showPreviewSettings, setShowPreviewSettings] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [catalogStatus, setCatalogStatus] = useState<RouterCatalogStatus>("loading");
+  const catalogRequestIdRef = useRef(0);
   const [printers, setPrinters] = useState<LocalPrinter[]>([]);
   const [printSettings, setPrintSettings] = useState<PrintSettings>({
     economical: true,
@@ -155,6 +159,28 @@ export function TicketGenerationPage() {
   const generatedFiles = useMemo(() => new GeneratedFileRepository(database), [database]);
   const printHistoryRepository = useMemo(() => new PrintHistoryRepository(database), [database]);
   const displaySettingsService = useMemo(() => new TicketDisplaySettingsService(database), [database]);
+  const organizationTicketCatalog = useMemo(
+    () => session
+      ? new OrganizationTicketCatalogService(
+          database,
+          session.account_id,
+          session.internal_profile_id,
+          session.internal_profile_role
+        )
+      : null,
+    [database, session]
+  );
+  const organizationOperations = useMemo(
+    () => session
+      ? new OrganizationOperationsSyncService(
+          database,
+          session.account_id,
+          session.internal_profile_id,
+          session.internal_profile_role
+        )
+      : null,
+    [database, session]
+  );
 
   const loadPersistedRouterService = async (): Promise<RouterService> => {
     if (persistedRouterService && persistedRouterServiceIdRef.current === routerId) {
@@ -265,6 +291,7 @@ export function TicketGenerationPage() {
   }, [connectionRepository, isInitialized, isPersistent, routerId, routerRepository, session]);
 
   const refreshRouterCatalog = async () => {
+    const requestId = ++catalogRequestIdRef.current;
     setCatalogStatus("loading");
     setError(null);
     setMessage(null);
@@ -272,47 +299,35 @@ export function TicketGenerationPage() {
     try {
       catalogService = await getRouterServiceForAction();
     } catch (connectionError) {
+      if (requestId !== catalogRequestIdRef.current) return;
       setCatalogStatus("error");
       setError(connectionError instanceof Error ? connectionError.message : "Connexion au routeur indisponible.");
       return;
     }
     try {
-      const [routerServers, routerPlans, localPlanRecords] = await Promise.all([
+      const [routerServers, routerPlans] = await Promise.all([
         catalogService.getHotspotServers(),
-        catalogService.getHotspotPlans(),
-        isPersistent ? planRepository.listByRouter(routerId) : Promise.resolve([])
+        catalogService.getHotspotPlans()
       ]);
       const enabledServers = routerServers.filter((server) => server.isEnabled);
       let livePlans = routerPlans;
       if (isPersistent) {
-        const recordsByProfile = new Map(
-          localPlanRecords.map((record) => [record.mikrotik_profile_name ?? record.name, record])
-        );
-        for (const remotePlan of routerPlans) {
-          if (recordsByProfile.has(remotePlan.profileName)) continue;
-          const created = await planRepository.create({
-            data_limit_mb: remotePlan.dataLimitMb,
-            download_limit: remotePlan.downloadLimit,
-            duration_minutes: remotePlan.durationMinutes,
-            id: `plan-${routerId}-${catalogSlug(remotePlan.profileName)}`,
-            mikrotik_profile_name: remotePlan.profileName,
-            name: remotePlan.name,
-            price_hint: remotePlan.priceHint,
-            router_id: routerId,
-            shared_users: remotePlan.sharedUsers,
-            status: remotePlan.status,
-            sync_status: "synced",
-            upload_limit: remotePlan.uploadLimit,
-            validity_minutes: remotePlan.validityMinutes
-          });
-          recordsByProfile.set(remotePlan.profileName, created);
-        }
+        const reconciliation = await reconcileRouterPlanCatalog({
+          plans: routerPlans,
+          repository: planRepository,
+          routerId
+        });
+        const recordsByProfile = new Map(reconciliation.liveRecords.map(
+          (record) => [record.mikrotik_profile_name ?? record.name, record]
+        ));
         livePlans = routerPlans.map((remotePlan) => {
           const local = recordsByProfile.get(remotePlan.profileName);
           return local
             ? {
                 ...remotePlan,
+                currency: local.currency,
                 id: local.id,
+                mikrotikId: local.mikrotik_id,
                 name: local.name,
                 priceHint: local.price_hint,
                 validityMinutes: local.validity_minutes ?? remotePlan.validityMinutes
@@ -320,6 +335,7 @@ export function TicketGenerationPage() {
             : remotePlan;
         });
       }
+      if (requestId !== catalogRequestIdRef.current) return;
       setHotspotServers(routerServers);
       setPlans(livePlans);
       setState((current) => {
@@ -338,6 +354,7 @@ export function TicketGenerationPage() {
       setCatalogStatus("ready");
       setMessage(`${enabledServers.length} serveur(s) et ${livePlans.length} profil(s) relus depuis RouterOS.`);
     } catch (catalogError) {
+      if (requestId !== catalogRequestIdRef.current) return;
       setCatalogStatus("error");
       setError(catalogError instanceof Error
         ? `Impossible d'actualiser le catalogue RouterOS : ${catalogError.message}`
@@ -351,6 +368,14 @@ export function TicketGenerationPage() {
     // The catalog must be refreshed when the concrete router service changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPersistent, persistedRouterService, routerId]);
+
+  useEffect(() => {
+    if (state.step !== 2) return;
+    void refreshRouterCatalog();
+    // Entering the plan step always performs a fresh RouterOS read. This is
+    // intentionally independent from the catalog loaded on the router step.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.step]);
 
   useEffect(() => {
     if (isPersistent && (!isInitialized || !session)) {
@@ -429,6 +454,11 @@ export function TicketGenerationPage() {
 
   const selectedRouter = routers.find((router) => router.id === state.selectedRouterId) ?? routers[0] ?? null;
   const selectedPlan = plans.find((plan) => plan.id === state.selectedPlanId) ?? null;
+  const selectedPlanCurrency = normalizeCurrency(selectedPlan?.currency);
+  const effectiveDisplaySettings: TicketDisplaySettings = {
+    ...displaySettings,
+    currency: selectedPlanCurrency
+  };
   const selectedHotspotServer = hotspotServers.find((server) => server.name === state.selectedServerName) ?? null;
   const ticketHotspotAddress = state.selectedServerName === "all"
     ? selectedRouter?.hotspotAddress?.trim() || ""
@@ -450,10 +480,18 @@ export function TicketGenerationPage() {
   const ticketContact = displaySettings.showContact
     ? displaySettings.contactNumber.trim() || ownerPhone?.trim() || ""
     : "";
+
+  useEffect(() => {
+    if (!selectedPlan?.currency) return;
+    const planCurrency = normalizeCurrency(selectedPlan.currency);
+    setDisplaySettings((current) => current.currency === planCurrency
+      ? current
+      : { ...current, currency: planCurrency });
+  }, [selectedPlan?.currency, selectedPlan?.id]);
   const previewPdfInput = session && selectedRouter && selectedPlan
     ? buildCreationPreviewPdfInput({
         accountId: session.account_id,
-        displaySettings,
+        displaySettings: effectiveDisplaySettings,
         hotspotAddress: ticketHotspotAddress,
         options: state.options,
         plan: selectedPlan,
@@ -470,7 +508,10 @@ export function TicketGenerationPage() {
   };
 
   const updateDisplaySettings = (next: TicketDisplaySettings) => {
-    const normalized = normalizeTicketDisplaySettings(next);
+    const normalized = {
+      ...normalizeTicketDisplaySettings(next),
+      currency: selectedPlanCurrency
+    };
     setDisplaySettings(normalized);
     setState((current) => ({
       ...current,
@@ -542,6 +583,7 @@ export function TicketGenerationPage() {
       return;
     }
 
+    if (state.step === 1) setCatalogStatus("loading");
     updateState({ step: (state.step + 1) as TicketGenerationStep });
   };
 
@@ -550,6 +592,7 @@ export function TicketGenerationPage() {
       return;
     }
 
+    if (state.step === 3) setCatalogStatus("loading");
     updateState({ step: (state.step - 1) as TicketGenerationStep });
   };
 
@@ -608,7 +651,14 @@ export function TicketGenerationPage() {
         || liveSelectedPlan.status !== selectedPlan.status
       )) {
         setPlans((current) => current.map((plan) => plan.id === selectedPlan.id
-          ? { ...liveSelectedPlan, id: plan.id, name: plan.name, priceHint: plan.priceHint }
+          ? {
+              ...liveSelectedPlan,
+              currency: selectedPlan.currency,
+              id: plan.id,
+              mikrotikId: selectedPlan.mikrotikId,
+              name: plan.name,
+              priceHint: plan.priceHint
+            }
           : plan));
         throw new Error(`Le profil ${selectedPlan.profileName} a été modifié sur RouterOS. La liste vient d'être actualisée ; vérifiez-le avant de relancer la création.`);
       }
@@ -672,11 +722,13 @@ export function TicketGenerationPage() {
       );
       const pendingBatch = buildTicketBatch({
         accountId: session.account_id,
+        currency: selectedPlanCurrency,
         id: batchId,
         operatorProfileId: session.internal_profile_id,
         operatorRole: session.internal_profile_role,
         options: state.options,
         planId: state.selectedPlanId,
+        priceSnapshot: selectedPlan.priceHint,
         quantity: requestedQuantity,
         routerId: state.selectedRouterId,
         serverName: selectedRemoteServer,
@@ -769,11 +821,13 @@ export function TicketGenerationPage() {
       const syncStatus: SyncStatus = failedTickets.length > 0 ? "pending" : "synced";
       const batch = buildTicketBatch({
         accountId: session.account_id,
+        currency: selectedPlanCurrency,
         id: batchId,
         operatorProfileId: session.internal_profile_id,
         operatorRole: session.internal_profile_role,
         options: state.options,
         planId: state.selectedPlanId,
+        priceSnapshot: selectedPlan.priceHint,
         quantity: requestedQuantity,
         routerId: state.selectedRouterId,
         serverName: selectedRemoteServer,
@@ -781,13 +835,26 @@ export function TicketGenerationPage() {
       });
       const fileName = buildFileName({
         batchId,
+        currency: batch.currency,
         planName: selectedPlan.name,
-        priceCfa: selectedPlan.priceHint,
+        price: selectedPlan.priceHint,
         quantity: requestedQuantity,
         routerName: selectedRouter.name
       });
 
       if (isPersistent) await batchRepository.updateState(batch.id, batch.account_id, batch.status, syncStatus);
+
+      let organizationSyncError: string | null = null;
+      if (isPersistent && organizationTicketCatalog) {
+        try {
+          await organizationTicketCatalog.publishBatch(state.selectedRouterId, batch.id);
+        } catch (cloudError) {
+          organizationSyncError = readGenerationError(
+            cloudError,
+            "Les vouchers sont sur le MikroTik, mais leur partage avec l’organisation doit être relancé."
+          );
+        }
+      }
 
       setTickets([...succeededTickets, ...failedTickets]);
       let createdPdf: CreateGeneratedFileInput | null = null;
@@ -819,6 +886,8 @@ export function TicketGenerationPage() {
       setMessage(
         failedTickets.length > 0
           ? `${succeededTickets.length} ticket(s) réellement confirmés sur RouterOS. ${firstCreationError ?? ""}`
+          : organizationSyncError
+          ? `${succeededTickets.length} ticket(s) créés sur RouterOS. Synchronisation organisationnelle en attente : ${organizationSyncError}`
           : pdfError
           ? `${succeededTickets.length} ticket(s) créé(s). PDF à reprendre : ${pdfError}`
           : `${succeededTickets.length} ticket(s) créés avec succès${createdPdf ? " et PDF enregistré." : "."}`
@@ -859,13 +928,14 @@ export function TicketGenerationPage() {
     });
     const pdfInput: TicketPdfInput = {
       ...basePdfInput,
+      currency: batch.currency ?? "CFA",
       fileName,
       format: output?.format ?? "a4",
-      displaySettings,
+      displaySettings: effectiveDisplaySettings,
       ownerPhone: ticketContact,
       priceLabel: selectedPlan.priceHint === null || !displaySettings.showPrice
         ? null
-        : `${selectedPlan.priceHint.toLocaleString("fr-FR")} ${displaySettings.currency.trim() || "CFA"}`,
+        : `${selectedPlan.priceHint.toLocaleString("fr-FR")} ${batch.currency ?? "CFA"}`,
       qrCodeEnabled: displaySettings.showQrCode,
       template: displaySettings.showQrCode ? "qr" : "economy",
       titleLabel: ticketTitle,
@@ -894,6 +964,7 @@ export function TicketGenerationPage() {
     }
 
     await generatedFiles.upsert(fileRecord);
+    await organizationOperations?.publishFile(routerId, fileRecord.id).catch(() => undefined);
     if (isPersistent) {
       await Promise.all(pdfTickets.map(async (ticket) => {
         ticket.exported_at = generatedAt;
@@ -1082,6 +1153,7 @@ export function TicketGenerationPage() {
       ) : null}
       {state.step === 2 && catalogStatus === "ready" ? (
         <StepPlan
+          currency={selectedPlanCurrency}
           onRefresh={() => void refreshRouterCatalog()}
           onSelect={(selectedPlanId) => updateState({ selectedPlanId })}
           onServerSelect={(selectedServerName) => updateState({ selectedServerName })}
@@ -1099,6 +1171,7 @@ export function TicketGenerationPage() {
       ) : null}
       {state.step === 5 && selectedPlan && selectedRouter && summary ? (
         <StepConfirmation
+          currency={selectedPlanCurrency}
           logsCount={logs.length}
           options={state.options}
           plan={selectedPlan}
@@ -1110,7 +1183,7 @@ export function TicketGenerationPage() {
       ) : null}
       {state.step === 6 && result && selectedPlan && selectedRouter ? (
         <StepResult
-          displaySettings={displaySettings}
+          displaySettings={effectiveDisplaySettings}
           generatedFile={generatedFile}
           onPdf={() => void generatePdf()}
           onPrint={() => void printBatch()}
@@ -1150,6 +1223,7 @@ export function TicketGenerationPage() {
             onClick={() => {
               setResult(null);
               setTickets([]);
+              setCatalogStatus("loading");
               updateState({ step: 2, quantity: 20, customQuantity: "20", options: defaultTicketGenerationOptions });
               setGeneratedFile(null);
             }}
@@ -1162,7 +1236,7 @@ export function TicketGenerationPage() {
 
       <TicketCreationPreviewDialog
         companyName={companyName}
-        displaySettings={displaySettings}
+        displaySettings={effectiveDisplaySettings}
         isGenerating={isGenerating}
         onBack={() => {
           if (!isGenerating) setIsPreviewOpen(false);
@@ -1243,6 +1317,7 @@ function StepRouter({
 }
 
 function StepPlan({
+  currency,
   onRefresh,
   onSelect,
   onServerSelect,
@@ -1251,6 +1326,7 @@ function StepPlan({
   selectedServerName,
   servers
 }: {
+  currency: string;
   onRefresh: () => void;
   onSelect: (planId: string) => void;
   onServerSelect: (serverName: string) => void;
@@ -1309,7 +1385,9 @@ function StepPlan({
               <span>{formatPlanDurationLabel(plan.durationMinutes)} · validité {formatPlanDurationLabel(plan.validityMinutes ?? plan.durationMinutes)}</span>
               <span>Débit {plan.downloadLimit ?? "∞"} / {plan.uploadLimit ?? "∞"} · {plan.dataLimitMb ? `${plan.dataLimitMb} MB` : "Volume illimité"}</span>
               <span>{plan.sharedUsers} appareil(s) autorisé(s)</span>
-              <span>{plan.priceHint ? `${plan.priceHint} CFA` : "Prix non défini"}</span>
+              <span>{plan.priceHint
+                ? `${plan.priceHint} ${currency}`
+                : "Prix non défini"}</span>
               <Badge status={plan.status === "active" ? "success" : "offline"}>
                 {plan.status === "active" ? "Actif" : "Inactif"}
               </Badge>
@@ -1448,6 +1526,7 @@ function ToggleOption({
 }
 
 function StepConfirmation({
+  currency,
   logsCount,
   options,
   plan,
@@ -1456,6 +1535,7 @@ function StepConfirmation({
   serverName,
   summary
 }: {
+  currency: string;
   logsCount: number;
   options: TicketGenerationState["options"];
   plan: HotspotPlan;
@@ -1470,7 +1550,7 @@ function StepConfirmation({
         <StatCard icon={Ticket} label="Quantité" value={String(quantity)} hint="Tickets numériques" />
       </div>
       <div className="span-4">
-        <StatCard icon={FileText} label="Valeur totale" value={summary.totalValue === null ? "Non définie" : `${summary.totalValue} CFA`} hint={plan.name} />
+        <StatCard icon={FileText} label="Valeur totale" value={summary.totalValue === null ? "Non définie" : `${summary.totalValue} ${currency}`} hint={plan.name} />
       </div>
       <div className="span-4">
         <StatCard icon={CheckCircle2} label="Synchronisation" value={summary.sync} hint={`${logsCount} log(s)`} />
@@ -1563,6 +1643,7 @@ function TicketCreationPreviewDialog({
             <aside className="ticket-creation-preview-settings">
               <TicketDisplaySettingsForm
                 companyName={companyName}
+                lockedCurrency={normalizeCurrency(plan.currency)}
                 onChange={onSettingsChange}
                 value={displaySettings}
               />
@@ -1660,7 +1741,7 @@ function StepResult({
         <StatCard icon={CheckCircle2} label="Statut" value={result.statusLabel} hint={router.name} />
       </div>
       <div className="span-4">
-        <StatCard icon={FileText} label="Valeur" value={result.totalValue === null ? "Non définie" : `${result.totalValue} CFA`} hint={plan.name} />
+        <StatCard icon={FileText} label="Valeur" value={result.totalValue === null ? "Non définie" : `${result.totalValue} ${result.batch.currency ?? "CFA"}`} hint={plan.name} />
       </div>
 
       <Card
@@ -1858,7 +1939,9 @@ function buildPrintTicketFromGeneratedTicket(
       username: ticket.username
     }),
     planName: plan.name,
-    priceLabel: displaySettings?.showPrice === false || plan.priceHint === null ? null : `${plan.priceHint} CFA`,
+    priceLabel: displaySettings?.showPrice === false || plan.priceHint === null
+      ? null
+      : `${plan.priceHint} ${normalizeCurrency(displaySettings?.currency)}`,
     zoneName
   };
 }
@@ -1881,6 +1964,7 @@ function buildCreationPreviewPdfInput(input: {
     batchId: "preview-only",
     createdByProfile: "preview",
     createdByProfileId: "preview",
+    currency,
     dataLimitLabel: input.plan.dataLimitMb ? `${input.plan.dataLimitMb} MB` : null,
     displaySettings: input.displaySettings,
     durationLabel: formatPlanDurationLabel(input.plan.durationMinutes),
@@ -1961,10 +2045,6 @@ function minutesToRouterOsDuration(minutes: number): string {
   return [days ? `${days}d` : "", hours ? `${hours}h` : "", remainingMinutes ? `${remainingMinutes}m` : ""]
     .filter(Boolean)
     .join("") || "1m";
-}
-
-function catalogSlug(value: string): string {
-  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "default";
 }
 
 function ticketStatusToBadge(status: string): AppStatus {

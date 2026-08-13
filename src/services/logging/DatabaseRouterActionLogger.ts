@@ -1,7 +1,9 @@
 import type { DatabaseClient } from "../database";
+import type { UserRole } from "../../domain/auth";
 import { AppLogRepository } from "../database/repositories/AppLogRepository";
 import type { RouterActionLog } from "../router";
 import { serializeTechnicalMessage } from "./technicalMessage";
+import { OrganizationOperationsSyncService } from "../sync/OrganizationOperationsSyncService";
 
 export class DatabaseRouterActionLogger {
   private readonly repository: AppLogRepository;
@@ -12,7 +14,7 @@ export class DatabaseRouterActionLogger {
 
   async write(log: RouterActionLog): Promise<void> {
     try {
-      await this.repository.create({
+      const record = await this.repository.create({
         account_id: log.accountId ?? null,
         category: categoryForAction(log.action),
         created_by_profile: log.internalProfileRole ?? null,
@@ -27,6 +29,14 @@ export class DatabaseRouterActionLogger {
         }),
         user_message: log.userMessage
       });
+      if (record.account_id && record.router_id) {
+        void new OrganizationOperationsSyncService(
+          this.database,
+          record.account_id,
+          log.internalProfileId ?? `${record.account_id}:admin`,
+          (log.internalProfileRole ?? "admin") as UserRole
+        ).publishLog(record).catch(() => undefined);
+      }
     } catch {
       // Une panne de journalisation ne doit jamais faire échouer l'action métier.
     }

@@ -58,6 +58,7 @@ import {
   useAppDatabase
 } from "../../services/database";
 import {
+  OrganizationTicketCatalogService,
   RouterTicketSyncService,
   syncStatusLabel,
   type RouterOnlyTicket,
@@ -153,6 +154,17 @@ export function TicketsPage() {
     () => new RouterTicketSyncService(effectiveRouterService ?? fakeRouterService),
     [effectiveRouterService, fakeRouterService]
   );
+  const organizationTicketCatalog = useMemo(
+    () => session
+      ? new OrganizationTicketCatalogService(
+          database,
+          session.account_id,
+          session.internal_profile_id,
+          session.internal_profile_role
+        )
+      : null,
+    [database, session]
+  );
 
   const loadPersistedRouterService = async (): Promise<RouterService> => {
     if (persistedRouterService && persistedRouterServiceIdRef.current === routerId) {
@@ -236,6 +248,17 @@ export function TicketsPage() {
     const accountId = session.account_id;
 
     async function loadTickets() {
+      try {
+        await organizationTicketCatalog?.publishRouter(routerId);
+      } catch {
+        // Les profils en lecture seule ne publient rien vers le catalogue.
+      }
+      try {
+        await organizationTicketCatalog?.pullRouter(routerId);
+      } catch {
+        // La base locale reste disponible hors ligne. Une prochaine ouverture,
+        // reprise de focus ou synchronisation récupérera le catalogue partagé.
+      }
       const [records, plans, router, files] = await Promise.all([
         ticketRepository.listByRouter(routerId),
         planRepository.listByRouter(routerId),
@@ -256,7 +279,42 @@ export function TicketsPage() {
     return () => {
       mounted = false;
     };
-  }, [generatedFileRepository, isInitialized, isPersistent, planRepository, routerId, routerRepository, session, ticketRepository]);
+  }, [generatedFileRepository, isInitialized, isPersistent, organizationTicketCatalog, planRepository, routerId, routerRepository, session, ticketRepository]);
+
+  useEffect(() => {
+    if (!isPersistent || !isInitialized || !session || !organizationTicketCatalog) return undefined;
+    let disposed = false;
+    const refreshSharedCatalog = async () => {
+      try {
+        const result = await organizationTicketCatalog.pullRouter(routerId);
+        if (disposed || (result.importedBatches === 0 && result.importedTickets === 0)) return;
+        const [records, plans, router, files] = await Promise.all([
+          ticketRepository.listByRouter(routerId),
+          planRepository.listByRouter(routerId),
+          routerRepository.findById(routerId),
+          generatedFileRepository.listByAccount(session.account_id)
+        ]);
+        const planById = new Map(plans.map((plan) => [plan.id, plan]));
+        const fileByBatch = new Map(files.filter((file) => file.batch_id).map((file) => [file.batch_id as string, file.file_name]));
+        if (!disposed) {
+          setTickets(records
+            .filter((record) => record.account_id === session.account_id)
+            .map((record) => ticketFromRecord(record, planById.get(record.plan_id) ?? null, router?.name ?? routerId, fileByBatch.get(record.batch_id) ?? null))
+          );
+        }
+      } catch {
+        // Synchronisation silencieuse : les actions manuelles restent explicites.
+      }
+    };
+    const onFocus = () => void refreshSharedCatalog();
+    const interval = window.setInterval(() => void refreshSharedCatalog(), 15_000);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [generatedFileRepository, isInitialized, isPersistent, organizationTicketCatalog, planRepository, routerId, routerRepository, session, ticketRepository]);
 
   useEffect(() => {
     if (!isInitialized || !session) return undefined;
@@ -328,10 +386,24 @@ export function TicketsPage() {
     await ticketRepository.update(ticketToCreateInput(ticket));
   };
 
+  const publishTicketToOrganization = async (ticketId: string) => {
+    if (!organizationTicketCatalog) return;
+    try {
+      await organizationTicketCatalog.publishTicket(routerId, ticketId);
+    } catch {
+      writeLog({
+        message: "Mise à jour enregistrée localement ; partage avec l’organisation en attente.",
+        ticketCode: ticketsRef.current.find((ticket) => ticket.id === ticketId)?.code ?? "-",
+        type: "sync"
+      });
+    }
+  };
+
   const commitTicket = async (ticket: TicketListItem) => {
     const previous = ticketsRef.current.find((item) => item.id === ticket.id);
     if (isPersistent) {
       await persistTicket(ticket);
+      await publishTicketToOrganization(ticket.id);
       if (session && previous && previous.status !== ticket.status) {
         const history = await ticketHistoryRepository.record({
           account_id: ticket.accountId,
@@ -366,6 +438,9 @@ export function TicketsPage() {
           ticketRepository,
           tickets: currentTickets
         });
+        await Promise.allSettled(
+          report.updates.map((update) => publishTicketToOrganization(update.id))
+        );
       }
     }
     setTickets(nextTickets);
@@ -568,6 +643,8 @@ export function TicketsPage() {
         if (!plan) {
           const planId = `plan-import-${slugify(remoteTicket.profileName || remoteTicket.planId)}`;
           plan = await planRepository.create({
+            created_by_profile_id: session.internal_profile_id,
+            currency: "CFA",
             data_limit_mb: null,
             download_limit: null,
             duration_minutes: 0,
@@ -581,6 +658,10 @@ export function TicketsPage() {
             sync_status: "conflict",
             upload_limit: null,
             validity_minutes: null
+          }, {
+            action: "restored",
+            actorProfileId: session.internal_profile_id,
+            source: "routeros-ticket-import"
           });
           planByKey.set(plan.mikrotik_profile_name ?? plan.id, plan);
         }

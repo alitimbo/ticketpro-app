@@ -16,6 +16,7 @@ import {
   RouterAccessPolicySyncService
 } from "../access";
 import { RouterCloudRecoveryService } from "./RouterCloudRecoveryService";
+import { reconcileRouterPlanCatalog } from "./RouterPlanCatalogReconciliation";
 
 export type RouterStateReconciliationResult = {
   blockedDeviceCount: number;
@@ -297,53 +298,10 @@ export class RouterStateReconciliationService {
     routerId: string,
     actualPlans: Awaited<ReturnType<RouterService["getHotspotPlans"]>>
   ): Promise<void> {
-    const localPlans = await this.plans.listByRouter(routerId);
-    const actualProfileNames = new Set(actualPlans.map((plan) => plan.profileName));
-
-    for (const actual of actualPlans) {
-      const local = localPlans.find((plan) =>
-        plan.mikrotik_profile_name === actual.profileName
-        || plan.name === actual.name
-      );
-      if (local) {
-        await this.plans.update({
-          ...local,
-          data_limit_mb: actual.dataLimitMb,
-          download_limit: actual.downloadLimit,
-          duration_minutes: actual.durationMinutes,
-          mikrotik_profile_name: actual.profileName,
-          name: actual.name,
-          price_hint: actual.priceHint ?? local.price_hint,
-          shared_users: actual.sharedUsers,
-          status: actual.status,
-          sync_status: "synced",
-          upload_limit: actual.uploadLimit,
-          validity_minutes: actual.validityMinutes ?? local.validity_minutes
-        });
-      } else {
-        await this.plans.create({
-          data_limit_mb: actual.dataLimitMb,
-          download_limit: actual.downloadLimit,
-          duration_minutes: actual.durationMinutes,
-          id: `plan-recovered-${crypto.randomUUID()}`,
-          mikrotik_profile_name: actual.profileName,
-          name: actual.name,
-          price_hint: actual.priceHint,
-          router_id: routerId,
-          shared_users: actual.sharedUsers,
-          status: actual.status,
-          sync_status: "synced",
-          upload_limit: actual.uploadLimit,
-          validity_minutes: actual.validityMinutes
-        });
-      }
-    }
-
-    for (const local of localPlans) {
-      const profileName = local.mikrotik_profile_name ?? local.name;
-      if (!actualProfileNames.has(profileName)) {
-        await this.plans.update({ ...local, sync_status: "conflict" });
-      }
-    }
+    await reconcileRouterPlanCatalog({
+      plans: actualPlans,
+      repository: this.plans,
+      routerId
+    });
   }
 }

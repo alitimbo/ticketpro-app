@@ -3637,6 +3637,31 @@ a {
   grid-template-columns: auto minmax(0, 1fr) auto;
 }
 
+.plan-detail-dialog {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 48px);
+  max-height: calc(100dvh - 48px);
+  overflow: hidden;
+}
+
+.plan-detail-dialog > .connection-dialog__header,
+.plan-detail-dialog > .confirm-dialog__actions {
+  flex: 0 0 auto;
+}
+
+.plan-detail-dialog__body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 8px;
+  scrollbar-gutter: stable;
+}
+
+.plan-detail-dialog__body > .client-detail-grid {
+  margin-top: 0;
+}
+
 .client-detail-grid {
   display: grid;
   gap: 8px;
