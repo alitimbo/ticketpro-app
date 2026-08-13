@@ -4469,39 +4469,6 @@ a {
   width: 34px;
 }
 
-.file-log-list {
-  display: grid;
-  gap: 8px;
-}
-
-.file-log-item {
-  background: var(--color-surface-muted);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  padding: 10px 12px;
-}
-
-.file-log-item strong {
-  color: var(--color-muted);
-  display: block;
-  font-size: 11px;
-  font-weight: 850;
-}
-
-.file-log-item span {
-  color: var(--color-text);
-  display: block;
-  font-size: 13px;
-  font-weight: 850;
-  margin-top: 2px;
-}
-
-.file-log-item p {
-  color: var(--color-muted);
-  font-size: 13px;
-  margin: 4px 0 0;
-}
-
 .report-toolbar {
   align-items: end;
   display: grid;

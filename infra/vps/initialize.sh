@@ -13,7 +13,7 @@ required() {
   fi
 }
 
-for name in LICENSE_DOMAIN VPN_PUBLIC_ENDPOINT; do
+for name in API_DOMAIN VPN_PUBLIC_ENDPOINT; do
   required "$name"
 done
 
@@ -29,8 +29,8 @@ if [ -e "$INFRA_DIR/license-api/.env" ] || [ -e "$INFRA_DIR/wireguard-hub/.env" 
   exit 1
 fi
 
-if ! printf '%s' "$LICENSE_DOMAIN" | grep -Eq '^[a-zA-Z0-9.-]+$'; then
-  echo "LICENSE_DOMAIN invalide." >&2
+if ! printf '%s' "$API_DOMAIN" | grep -Eq '^[a-zA-Z0-9.-]+$'; then
+  echo "API_DOMAIN invalide." >&2
   exit 1
 fi
 if ! printf '%s' "$VPN_PUBLIC_ENDPOINT" | grep -Eq '^[a-zA-Z0-9.-]+$'; then
@@ -85,13 +85,16 @@ printf '%s\n' "$WG_PUBLIC_KEY" > "$INFRA_DIR/wireguard-hub/wireguard/server_publ
   echo "IPAY_PUBLIC_KEY=${IPAY_PUBLIC_KEY:-}"
   echo "IPAY_PRIVATE_KEY=${IPAY_PRIVATE_KEY:-}"
   echo "IPAY_SECRET_HASH=${IPAY_SECRET_HASH:-}"
-  echo "LICENSE_CORS_ORIGIN=${LICENSE_CORS_ORIGIN:-http://tauri.localhost,http://localhost:4321,http://127.0.0.1:4321,http://localhost:4322,http://127.0.0.1:4322,https://ticketpro.autoticket-ne.com,https://ticketpro-landing.vercel.app}"
+  echo "SAAS_PASSWORD_RESET_URL=${SAAS_PASSWORD_RESET_URL:-https://www.ticketpro-ne.com/reset-password}"
+  echo "SAAS_INVITATION_URL=${SAAS_INVITATION_URL:-https://www.ticketpro-ne.com/accept-invitation}"
+  echo "SAAS_SUBSCRIPTION_URL=${SAAS_SUBSCRIPTION_URL:-https://www.ticketpro-ne.com/}"
+  echo "LICENSE_CORS_ORIGIN=${LICENSE_CORS_ORIGIN:-http://tauri.localhost,http://localhost:1420,http://localhost:4321,http://127.0.0.1:4321,http://localhost:4322,http://127.0.0.1:4322,https://ticketpro-ne.com,https://www.ticketpro-ne.com}"
   echo "VPN_HUB_URL=http://127.0.0.1:8788"
   echo "VPN_HUB_MASTER_TOKEN=$HUB_MASTER_TOKEN"
 } > "$INFRA_DIR/license-api/.env"
 
 {
-  printf 'LICENSE_DOMAIN=%s\n' "$LICENSE_DOMAIN"
+  printf 'API_DOMAIN=%s\n' "$API_DOMAIN"
   printf 'REVERSE_PROXY_MODE=%s\n' "${REVERSE_PROXY_MODE:-caddy}"
   printf 'TICKETPRO_RELEASES_DIR=%s\n' "${TICKETPRO_RELEASES_DIR:-/opt/ticketpro/releases}"
   printf 'TICKETPRO_LATEST_WINDOWS_SETUP=%s\n' "${TICKETPRO_LATEST_WINDOWS_SETUP:-TicketPro-Setup-unpublished-x64.exe}"
@@ -105,7 +108,7 @@ chmod 600 \
   "$SCRIPT_DIR/.env"
 
 echo "Initialisation terminée."
-echo "Domaine API : $LICENSE_DOMAIN"
+echo "Domaine API : $API_DOMAIN"
 echo "Endpoint WireGuard : $VPN_PUBLIC_ENDPOINT:51820"
 echo "Clé publique WireGuard : $WG_PUBLIC_KEY"
 echo "Les secrets ont été écrits avec des permissions 600 et ne sont pas affichés."

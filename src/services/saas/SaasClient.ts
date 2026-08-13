@@ -427,6 +427,17 @@ export async function getSaasAccount(): Promise<SaasAuthResult> {
   return request<SaasAuthResult>("/v1/saas/auth/me", undefined, token, "GET");
 }
 
+export async function updateSaasAccountProfile(input: {
+  name: string;
+  phone: string;
+}): Promise<{ user: SaasOrganizationUser }> {
+  const token = await requireSessionToken();
+  return request("/v1/saas/account/profile", {
+    name: input.name,
+    phone: input.phone
+  }, token);
+}
+
 export async function purchaseSaasSubscription(input: {
   planId: string;
   msisdn: string;

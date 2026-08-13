@@ -36,6 +36,7 @@ export {
   storeSaasSession,
   syncSaasRouterAccessPolicy,
   switchSaasOrganization,
+  updateSaasAccountProfile,
   updateSaasTeamMember,
   upsertSaasVpnPeer,
   type SaasAuthResult,

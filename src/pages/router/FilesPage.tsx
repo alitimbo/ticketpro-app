@@ -16,7 +16,6 @@ import {
   GeneratedFileRepository,
   HotspotPlanRepository,
   AccountRepository,
-  AppLogRepository,
   PrintHistoryRepository,
   RouterRepository,
   TicketRepository,
@@ -52,12 +51,6 @@ import {
   type GeneratedFileType
 } from "./filesPageModel";
 
-type FileLog = {
-  createdAt: string;
-  fileName: string;
-  message: string;
-};
-
 export function FilesPage() {
   const { saasAccount, session } = useAuth();
   const { database, isInitialized, isPersistent } = useAppDatabase();
@@ -65,13 +58,11 @@ export function FilesPage() {
   const [filters, setFilters] = useState<FileFilters>(emptyFileFilters);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const [logs, setLogs] = useState<FileLog[]>([]);
   const [busyFileId, setBusyFileId] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [fileToDelete, setFileToDelete] = useState<ArchivedGeneratedFile | null>(null);
   const generatedFileRepository = useMemo(() => new GeneratedFileRepository(database), [database]);
   const accountRepository = useMemo(() => new AccountRepository(database), [database]);
-  const appLogRepository = useMemo(() => new AppLogRepository(database), [database]);
   const auditLogService = useMemo(() => new AuditLogService(database), [database]);
   const printHistoryRepository = useMemo(() => new PrintHistoryRepository(database), [database]);
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
@@ -85,18 +76,16 @@ export function FilesPage() {
       return;
     }
 
-      const [records, routers, batches, persistedLogs] = await Promise.all([
+      const [records, routers, batches] = await Promise.all([
         generatedFileRepository.listByAccount(session.account_id),
         saasAccount?.organization.id
           ? routerRepository.listByOrganization(session.account_id, saasAccount.organization.id)
           : routerRepository.listByAccount(session.account_id),
-        batchRepository.listByAccount(session.account_id),
-        appLogRepository.listByAccount(session.account_id)
+        batchRepository.listByAccount(session.account_id)
       ]);
       const routerIds = new Set(routers.map((router) => router.id));
       const scopedRecords = records.filter((record) => routerIds.has(record.router_id));
       const scopedBatches = batches.filter((batch) => routerIds.has(batch.router_id));
-      const scopedLogs = persistedLogs.filter((log) => log.router_id !== null && routerIds.has(log.router_id));
       const plans = await Promise.all(routers.map((router) => planRepository.listByRouter(router.id)));
       const routerById = new Map(routers.map((router) => [router.id, router]));
       const batchById = new Map(scopedBatches.map((batch) => [batch.id, batch]));
@@ -118,26 +107,7 @@ export function FilesPage() {
       );
 
       setFiles(archived);
-      const visibleFileNames = new Set(
-        scopeFilesForSession(archived, session).map((file) => file.fileName)
-      );
-      setLogs(
-        scopedLogs
-          .filter(
-            (log) =>
-              log.category === "fichiers" &&
-              (session.permissions.includes("router.files.read") ||
-                visibleFileNames.has(log.technical_message?.replace(/^file=/, "") ?? ""))
-          )
-          .slice(0, 20)
-          .map((log) => ({
-            createdAt: log.created_at,
-            fileName: log.technical_message?.replace(/^file=/, "") || "Fichier",
-            message: log.user_message.replace(/^\[[^\]]+\]\s*/, "")
-          }))
-      );
   }, [
-    appLogRepository,
     batchRepository,
     fileService,
     generatedFileRepository,
@@ -180,11 +150,6 @@ export function FilesPage() {
     messageText: string,
     level: "error" | "info" | "warning" = "info"
   ) => {
-    setLogs((current) => [
-      { createdAt: new Date().toISOString(), fileName: file.fileName, message: messageText },
-      ...current
-    ]);
-
     if (isPersistent && session) {
       void auditLogService.write({
         accountId: session.account_id,
@@ -441,7 +406,6 @@ export function FilesPage() {
         <div className="files-toolbar">
           <div className="tickets-count">
             <strong>Articles ({filteredFiles.length})</strong>
-            <span>{logs.length} log(s) fichiers</span>
           </div>
           <label className="date-field">
             Depuis
@@ -508,20 +472,6 @@ export function FilesPage() {
           />
         )}
       </Card>
-
-      {logs.length > 0 ? (
-        <Card title="Logs fichiers">
-          <div className="file-log-list">
-            {logs.slice(0, 6).map((log) => (
-              <div className="file-log-item" key={`${log.createdAt}-${log.fileName}-${log.message}`}>
-                <strong>{formatFileDate(log.createdAt)}</strong>
-                <span>{log.fileName}</span>
-                <p>{log.message}</p>
-              </div>
-            ))}
-          </div>
-        </Card>
-      ) : null}
 
       <ConfirmDialog
         confirmLabel="Supprimer l'historique"

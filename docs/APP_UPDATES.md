@@ -4,7 +4,7 @@ TicketPro utilise l'Updater officiel Tauri. Une mise à jour Windows suit ce
 parcours :
 
 1. l'application interroge publiquement
-   `https://license.autoticket-ne.com/v1/app-updates/check` ;
+   `https://api.ticketpro-ne.com/v1/app-updates/check` ;
 2. l'API répond `204` lorsqu'aucune version plus récente n'existe ;
 3. sinon, elle renvoie l'URL HTTPS, les notes et la signature Ed25519 ;
 4. TicketPro crée une sauvegarde SQLite locale ;
@@ -62,7 +62,7 @@ Créer le manifeste :
 npm.cmd run release:manifest:windows -- `
   --installer "CHEMIN\TicketPro-Setup-<version>-x64.exe" `
   --signature "CHEMIN\TicketPro-Setup-<version>-x64.exe.sig" `
-  --url "https://license.autoticket-ne.com/releases/TicketPro-Setup-<version>-x64.exe" `
+  --url "https://api.ticketpro-ne.com/releases/TicketPro-Setup-<version>-x64.exe" `
   --notes "Résumé des changements"
 ```
 

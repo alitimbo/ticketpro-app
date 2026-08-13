@@ -25,7 +25,7 @@ pub fn run_self_test() -> TunnelConfigSelfTest {
             config_version: 1,
             address: "10.250.10.21/32".to_string(),
             gateway_public_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
-            endpoint_host: "vpn.autoticket-ne.com".to_string(),
+            endpoint_host: "vpn.ticketpro-ne.com".to_string(),
             endpoint_port: 51820,
             allowed_ips: vec!["10.250.0.0/16".to_string()],
             persistent_keepalive: 25,

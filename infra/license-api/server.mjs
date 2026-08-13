@@ -22,13 +22,13 @@ const IPAY_SECRET_HASH = process.env.IPAY_SECRET_HASH ?? "";
 const VPN_HUB_URL = String(process.env.VPN_HUB_URL ?? "http://127.0.0.1:8788").replace(/\/$/, "");
 const VPN_HUB_MASTER_TOKEN = process.env.VPN_HUB_MASTER_TOKEN ?? "";
 const SAAS_PASSWORD_RESET_URL = String(
-  process.env.SAAS_PASSWORD_RESET_URL ?? "https://ticketpro.autoticket-ne.com/reset-password"
+  process.env.SAAS_PASSWORD_RESET_URL ?? "https://www.ticketpro-ne.com/reset-password"
 );
 const SAAS_INVITATION_URL = String(
-  process.env.SAAS_INVITATION_URL ?? "https://ticketpro.autoticket-ne.com/accept-invitation"
+  process.env.SAAS_INVITATION_URL ?? "https://www.ticketpro-ne.com/accept-invitation"
 );
 const SAAS_SUBSCRIPTION_URL = String(
-  process.env.SAAS_SUBSCRIPTION_URL ?? "https://ticketpro.autoticket-ne.com/"
+  process.env.SAAS_SUBSCRIPTION_URL ?? "https://www.ticketpro-ne.com/"
 );
 const SMTP_HOST = String(process.env.SMTP_HOST ?? "");
 const SMTP_PORT = Number(process.env.SMTP_PORT ?? 465);
@@ -889,6 +889,9 @@ const statements = {
   `),
   findOrganizationUserById: db.prepare("SELECT * FROM organization_users WHERE id = ?"),
   findOrganizationUserByEmail: db.prepare("SELECT * FROM organization_users WHERE email = ?"),
+  updateOrganizationUserProfile: db.prepare(`
+    UPDATE organization_users SET name = ?, phone = ?, updated_at = ? WHERE id = ?
+  `),
   insertOrganizationMembership: db.prepare(`
     INSERT INTO organization_memberships (
       id, organization_id, user_id, authority_role, app_role, status,
@@ -1647,6 +1650,29 @@ function normalizeNigerMsisdn(value) {
     throw new HttpError(400, "Le numéro doit être un MSISDN Niger au format 227XXXXXXXX.");
   }
   return digits;
+}
+
+function normalizeInternationalContactPhone(value) {
+  const raw = String(value ?? "").trim();
+  const message = "Saisissez le numéro avec l'indicatif du pays, par exemple +227 88 99 99 00.";
+  if (!raw) throw new HttpError(400, "Saisissez un numéro de téléphone.");
+  if (raw.length > 64 || /[^\d+().\-\s]/.test(raw)) throw new HttpError(400, message);
+
+  const compact = raw.replace(/[().\-\s]/g, "");
+  const plusCount = (compact.match(/\+/g) ?? []).length;
+  if (plusCount > 1 || (plusCount === 1 && !compact.startsWith("+"))) {
+    throw new HttpError(400, message);
+  }
+
+  let normalized;
+  if (compact.startsWith("+")) normalized = compact;
+  else if (compact.startsWith("00")) normalized = `+${compact.slice(2)}`;
+  else if (/^\d{8}$/.test(compact)) normalized = `+227${compact}`;
+  else if (/^227\d{8}$/.test(compact)) normalized = `+${compact}`;
+  else throw new HttpError(400, message);
+
+  if (!/^\+[1-9]\d{7,14}$/.test(normalized)) throw new HttpError(400, message);
+  return normalized;
 }
 
 function requirePaymentType(body) {
@@ -4249,6 +4275,19 @@ const handlers = [
   route("GET", "/v1/saas/auth/me", async (request) => {
     const { session, user, membership } = requireOrganizationUser(request);
     return organizationAuthResponse(user, session, membership);
+  }),
+
+  route("POST", "/v1/saas/account/profile", async (request, body) => {
+    const { user, membership, organization } = requireOrganizationUser(request);
+    const name = requireText(body, "name", 200);
+    const phone = normalizeInternationalContactPhone(body.phone);
+    const updatedAt = nowIso();
+    statements.updateOrganizationUserProfile.run(name, phone, updatedAt, user.id);
+    const updatedUser = statements.findOrganizationUserById.get(user.id);
+    logEvent(request, null, "organization_profile_updated", organization.id, null, {
+      organization_user_id: user.id
+    });
+    return { user: organizationUserResponse(updatedUser, membership) };
   }),
 
   route("POST", "/v1/saas/auth/switch-organization", async (request, body) => {

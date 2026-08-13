@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { CheckCircle2, QrCode, Ticket } from "lucide-react";
 import type { TicketDisplaySettings } from "../../services/tickets";
+import { formatInternationalPhone, normalizeInternationalPhone } from "../../shared/phone";
 
 export function TicketDisplaySettingsForm({
   companyName,
@@ -11,6 +13,9 @@ export function TicketDisplaySettingsForm({
   value: TicketDisplaySettings;
 }) {
   const update = (partial: Partial<TicketDisplaySettings>) => onChange({ ...value, ...partial });
+  const [contactTouched, setContactTouched] = useState(false);
+  const contactValidation = normalizeInternationalPhone(value.contactNumber);
+  const contactError = contactTouched && !contactValidation.ok ? contactValidation.message : null;
 
   return (
     <div className="ticket-settings-form">
@@ -107,7 +112,28 @@ export function TicketDisplaySettingsForm({
         {value.showContact ? (
           <label className="form-field ticket-settings-short-field">
             Numéro de contact
-            <input maxLength={40} placeholder="Ex. +227 90 00 00 00" value={value.contactNumber} onChange={(event) => update({ contactNumber: event.target.value })} />
+            <input
+              aria-invalid={Boolean(contactError)}
+              inputMode="tel"
+              maxLength={32}
+              placeholder="Ex. +227 88 99 99 00"
+              value={value.contactNumber}
+              onBlur={() => {
+                setContactTouched(true);
+                if (contactValidation.ok && contactValidation.value) {
+                  update({ contactNumber: formatInternationalPhone(contactValidation.value) });
+                }
+              }}
+              onChange={(event) => {
+                setContactTouched(false);
+                update({ contactNumber: event.target.value });
+              }}
+            />
+            {contactError ? <small className="form-error">{contactError}</small> : (
+              <small>
+                Niger : 8 chiffres acceptés. Autres pays : commencez par + et l'indicatif. Laissez vide pour utiliser le numéro de Mon compte.
+              </small>
+            )}
           </label>
         ) : null}
       </section>

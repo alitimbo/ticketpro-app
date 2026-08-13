@@ -1,7 +1,7 @@
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 
-const expectedApiUrl = "https://license.autoticket-ne.com";
+const expectedApiUrl = "https://api.ticketpro-ne.com";
 const requiredIcons = [
   "src-tauri/icons/32x32.png",
   "src-tauri/icons/128x128.png",

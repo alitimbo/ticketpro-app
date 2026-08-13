@@ -1,4 +1,4 @@
-{$LICENSE_DOMAIN} {
+{$API_DOMAIN} {
 	encode zstd gzip
 
 	handle /download/windows {

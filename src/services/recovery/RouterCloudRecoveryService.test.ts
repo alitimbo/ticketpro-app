@@ -18,7 +18,7 @@ describe("RouterCloudRecoveryService", () => {
     const cloud = {
       bootstrapVpn: vi.fn(async () => ({
         address_pool: "10.250.0.0/24",
-        server_endpoint: "vpn.autoticket-ne.com",
+        server_endpoint: "vpn.ticketpro-ne.com",
         server_port: 51820,
         server_public_key: "server-public-key"
       })),
@@ -96,7 +96,7 @@ describe("RouterCloudRecoveryService", () => {
     const cloud = {
       bootstrapVpn: vi.fn(async () => ({
         address_pool: "10.250.0.0/24",
-        server_endpoint: "vpn.autoticket-ne.com",
+        server_endpoint: "vpn.ticketpro-ne.com",
         server_port: 51820,
         server_public_key: "server-public-key"
       })),

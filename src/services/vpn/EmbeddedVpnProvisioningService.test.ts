@@ -72,7 +72,7 @@ function dependencies(overrides: Partial<EmbeddedVpnProvisioningDependencies> = 
         address: "10.250.1.2/32",
         allowed_ips: ["10.250.0.0/16"],
         config_version: 1,
-        endpoint: "vpn.autoticket-ne.com",
+        endpoint: "vpn.ticketpro-ne.com",
         gateway_id: "gateway-main",
         gateway_public_key: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
         persistent_keepalive: 25,
@@ -99,7 +99,7 @@ describe("EmbeddedVpnProvisioningService", () => {
       configVersion: 1,
       address: "10.250.1.2/32",
       gatewayPublicKey: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
-      endpointHost: "vpn.autoticket-ne.com",
+      endpointHost: "vpn.ticketpro-ne.com",
       endpointPort: 51820,
       allowedIps: ["10.250.0.0/16"],
       persistentKeepalive: 25

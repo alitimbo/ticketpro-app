@@ -55,7 +55,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://license.autoticket-ne.com/v1/app-updates/check?target={{target}}&arch={{arch}}&current_version={{current_version}}"
+        "https://api.ticketpro-ne.com/v1/app-updates/check?target={{target}}&arch={{arch}}&current_version={{current_version}}"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE5Mjc2OTUyMUY3RUY3RQpSV1IrNy9jaGxYYVNDcS9MZURUbVhlMG9kTURjbktWUmFHdmJPcTJOanp1RmNCc1JGZXBOK3doRwo=",
       "windows": {

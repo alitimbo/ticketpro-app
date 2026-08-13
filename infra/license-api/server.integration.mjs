@@ -234,7 +234,7 @@ test("l'Updater public retourne 204 sans version puis un manifeste signé par pl
     pub_date: "2026-07-29T12:00:00.000Z",
     platforms: {
       "windows-x86_64": {
-        url: "https://ticketpro.autoticket-ne.com/releases/TicketPro-Setup-0.2.0-x64.exe",
+        url: "https://api.ticketpro-ne.com/releases/TicketPro-Setup-0.2.0-x64.exe",
         signature: "dGVzdC1zaWduYXR1cmUtbG9uZy1lbm91Z2gtZm9yLXVwZGF0ZXItdGVzdHM="
       }
     }
@@ -1165,6 +1165,33 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
   });
   assert.equal(me.status, 200);
   assert.equal(me.payload.user.email, "amina.saas@example.com");
+
+  const localNigerProfile = await api("/v1/saas/account/profile", {
+    token: sessionToken,
+    body: { name: "Amina Profil", phone: "88 99 99 00" }
+  });
+  assert.equal(localNigerProfile.status, 200, JSON.stringify(localNigerProfile.payload));
+  assert.equal(localNigerProfile.payload.user.phone, "+22788999900");
+
+  const internationalProfile = await api("/v1/saas/account/profile", {
+    token: sessionToken,
+    body: { name: "Amina Profil", phone: "+33 6 12 34 56 78" }
+  });
+  assert.equal(internationalProfile.status, 200, JSON.stringify(internationalProfile.payload));
+  assert.equal(internationalProfile.payload.user.phone, "+33612345678");
+
+  const invalidInternationalProfile = await api("/v1/saas/account/profile", {
+    token: sessionToken,
+    body: { name: "Amina Profil", phone: "33612345678" }
+  });
+  assert.equal(invalidInternationalProfile.status, 400);
+
+  const updatedMe = await api("/v1/saas/auth/me", {
+    method: "GET",
+    token: sessionToken
+  });
+  assert.equal(updatedMe.payload.user.name, "Amina Profil");
+  assert.equal(updatedMe.payload.user.phone, "+33612345678");
 
   const services = await api("/v1/saas/services/access", {
     method: "GET",

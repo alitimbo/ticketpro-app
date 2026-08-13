@@ -79,7 +79,7 @@ Les variables SMTP sont `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`,
 doit être placé dans l'application Windows ou la landing page.
 
 `SAAS_INVITATION_URL` doit pointer vers
-`https://ticketpro.autoticket-ne.com/accept-invitation`. Une identité existante
+`https://www.ticketpro-ne.com/accept-invitation`. Une identité existante
 accepte l'invitation sans changer son mot de passe. Une nouvelle identité crée
 son mot de passe pendant l'acceptation.
 

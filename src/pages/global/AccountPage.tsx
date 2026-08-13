@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../app/auth/AuthProvider";
 import { AccountRepository, AppLogRepository, RouterRepository, useAppDatabase } from "../../services/database";
 import { AuditLogService } from "../../services/logging";
+import { updateSaasAccountProfile } from "../../services/saas";
 import {
   appendAccountSecurityLog,
   changeMainAccountPassword,
@@ -16,6 +17,7 @@ import {
   type MainAccountSecurityLog
 } from "../../services/auth";
 import { Badge, Button, Card, DataListItem, PageHeader, PasswordField, StatCard } from "../../shared/ui";
+import { formatInternationalPhone, normalizeInternationalPhone } from "../../shared/phone";
 import { getSubscriptionOverview } from "./subscriptionPageModel";
 import { accountStatusLabel, formatAccountDate, validateAccountDetails, validatePasswordChange } from "./accountPageModel";
 
@@ -39,7 +41,7 @@ const emptyPasswordForm: PasswordFormState = {
 
 export function AccountPage() {
   const navigate = useNavigate();
-  const { accountSession, logoutAccount, refreshAccountSession, saasAccount, session } = useAuth();
+  const { accountSession, logoutAccount, refreshAccountSession, refreshSaasAccount, saasAccount, session } = useAuth();
   const { database, isInitialized, isPersistent } = useAppDatabase();
   const [account, setAccount] = useState(() => readMainAccountRecord(accountSession?.email ?? ""));
   const accountRepository = useMemo(() => new AccountRepository(database), [database]);
@@ -162,11 +164,22 @@ export function AccountPage() {
     setError(null);
     setMessage(null);
     try {
+      const normalizedPhone = normalizeInternationalPhone(detailsForm.phone, { required: true });
+      if (!normalizedPhone.ok) {
+        setError(normalizedPhone.message);
+        return;
+      }
+      if (saasAccount) {
+        await updateSaasAccountProfile({
+          name: detailsForm.displayName.trim(),
+          phone: normalizedPhone.value
+        });
+      }
       const updated = updateMainAccountDetails({
         companyName: detailsForm.companyName,
         displayName: detailsForm.displayName,
         email: account.email,
-        phone: detailsForm.phone
+        phone: normalizedPhone.value
       });
       if (isPersistent) {
         await accountRepository.updateDetails({
@@ -193,9 +206,15 @@ export function AccountPage() {
 
       storeMainAccountSession(refreshedSession);
       refreshAccountSession();
-      setMessage(isPersistent ? "Informations du compte mises à jour dans SQLite." : "Informations du compte mises à jour.");
-    } catch {
-      setError("Impossible de mettre à jour les informations du compte. Réessayez.");
+      setDetailsForm((current) => ({ ...current, phone: formatInternationalPhone(updated.phone) }));
+      if (saasAccount) await refreshSaasAccount();
+      setMessage(isPersistent && saasAccount
+        ? "Informations enregistrées sur ce PC et dans votre compte TicketPro."
+        : "Informations du compte mises à jour.");
+    } catch (updateError) {
+      setError(updateError instanceof Error
+        ? updateError.message
+        : "Impossible de mettre à jour les informations du compte. Réessayez.");
     } finally {
       setIsUpdatingDetails(false);
     }
@@ -324,11 +343,20 @@ export function AccountPage() {
             <input
               disabled={isAccountActionPending}
               inputMode="tel"
-              placeholder="Ex. +227 90 12 34 56"
+              maxLength={32}
+              placeholder="Ex. +227 88 99 99 00"
               value={detailsForm.phone}
               onChange={(event) => setDetailsForm((current) => ({ ...current, phone: event.target.value }))}
+              onBlur={() => {
+                const phone = normalizeInternationalPhone(detailsForm.phone);
+                if (phone.ok && phone.value) {
+                  setDetailsForm((current) => ({ ...current, phone: formatInternationalPhone(phone.value) }));
+                }
+              }}
             />
-            <small>Ce numéro sera centré et imprimé sur chaque ticket généré.</small>
+            <small>
+              Niger : « 88 99 99 00 » est accepté automatiquement. Autres pays : ajoutez l'indicatif, par exemple « +223 70 12 34 56 ».
+            </small>
           </label>
         </div>
         <div aria-busy={isUpdatingDetails} className="confirm-dialog__actions">

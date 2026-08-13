@@ -5,7 +5,7 @@
 Le build Windows utilise l'API publique :
 
 ```text
-https://license.autoticket-ne.com
+https://api.ticketpro-ne.com
 ```
 
 Les clés iPay, les secrets de licences et le jeton maître WireGuard restent

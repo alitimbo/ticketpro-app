@@ -48,6 +48,7 @@ import {
 } from "../../services/printing";
 import { AsyncStateCard, Badge, Button, Card, FilterButton, PageHeader, StatCard } from "../../shared/ui";
 import type { AppStatus, IconComponent } from "../../shared/ui";
+import { normalizeInternationalPhone } from "../../shared/phone";
 import {
   buildFileName,
   buildTicketBatch,
@@ -500,6 +501,17 @@ export function TicketGenerationPage() {
     if (displaySettings.titleMode === "custom" && !displaySettings.customTitle.trim()) {
       setError("Renseignez le titre personnalisé du voucher.");
       return;
+    }
+    if (displaySettings.showContact) {
+      const contact = normalizeInternationalPhone(
+        displaySettings.contactNumber.trim() || ownerPhone,
+        { required: true }
+      );
+      if (!contact.ok) {
+        setError(`Numéro de contact du ticket : ${contact.message}`);
+        setShowPreviewSettings(true);
+        return;
+      }
     }
     setShowPreviewSettings(false);
     setIsPreviewOpen(true);

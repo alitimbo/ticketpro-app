@@ -67,6 +67,7 @@ import {
 } from "../../services/sync";
 import { ActionMenu, Badge, Button, Card, EmptyState, PageHeader } from "../../shared/ui";
 import type { AppStatus, IconComponent } from "../../shared/ui";
+import { formatInternationalPhone, normalizeInternationalPhone } from "../../shared/phone";
 import { TicketDisplaySettingsForm } from "./TicketDisplaySettingsForm";
 import {
   buildTicketLifecycleLogs,
@@ -1113,8 +1114,23 @@ function TicketDisplaySettingsDialog({
   value: TicketDisplaySettings;
 }) {
   const [draft, setDraft] = useState(value);
-  useEffect(() => setDraft(value), [open, value]);
+  const [validationError, setValidationError] = useState<string | null>(null);
+  useEffect(() => {
+    setDraft(value);
+    setValidationError(null);
+  }, [open, value]);
   if (!open) return null;
+  const save = () => {
+    const phone = normalizeInternationalPhone(draft.contactNumber);
+    if (!phone.ok) {
+      setValidationError(phone.message);
+      return;
+    }
+    onSave({
+      ...draft,
+      contactNumber: phone.value ? formatInternationalPhone(phone.value) : ""
+    });
+  };
   return (
     <div className="dialog-backdrop" role="presentation">
       <section aria-modal="true" className="router-form-dialog ticket-display-settings" role="dialog">
@@ -1123,9 +1139,10 @@ function TicketDisplaySettingsDialog({
           <div><h2>Paramètres des tickets</h2><p>Ces choix s’appliquent à l’écran et aux prochains PDF.</p></div>
         </header>
         <TicketDisplaySettingsForm onChange={setDraft} value={draft} />
+        {validationError ? <p className="form-error">{validationError}</p> : null}
         <div className="confirm-dialog__actions">
           <Button onClick={onClose} variant="ghost">Annuler</Button>
-          <Button icon={Settings} onClick={() => onSave(draft)} variant="primary">Enregistrer</Button>
+          <Button icon={Settings} onClick={save} variant="primary">Enregistrer</Button>
         </div>
       </section>
     </div>

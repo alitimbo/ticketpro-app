@@ -54,14 +54,14 @@ Le bouton **Télécharger pour Windows** de la landing page doit toujours
 utiliser cette URL :
 
 ```text
-https://license.autoticket-ne.com/download/windows
+https://api.ticketpro-ne.com/download/windows
 ```
 
 Ce lien ne change jamais. Caddy le redirige vers le setup versionné
 actuellement publié :
 
 ```text
-https://license.autoticket-ne.com/download/windows
+https://api.ticketpro-ne.com/download/windows
         |
         `-- HTTP 302
               |
@@ -91,7 +91,7 @@ Pour `0.2.0`, le dossier contient :
 Les fichiers sont servis publiquement par Caddy sous :
 
 ```text
-https://license.autoticket-ne.com/releases/
+https://api.ticketpro-ne.com/releases/
 ```
 
 Le VPS ne doit jamais recevoir la clé privée `updater.key` ni son mot de
@@ -141,7 +141,7 @@ Cette opération est déjà réalisée pour `0.2.0`.
 Vérifier la redirection :
 
 ```powershell
-curl.exe -I "https://license.autoticket-ne.com/download/windows"
+curl.exe -I "https://api.ticketpro-ne.com/download/windows"
 ```
 
 Résultat attendu :
@@ -155,7 +155,7 @@ Vérifier le téléchargement :
 
 ```powershell
 curl.exe -L `
-  "https://license.autoticket-ne.com/download/windows" `
+  "https://api.ticketpro-ne.com/download/windows" `
   -o "$env:TEMP\TicketPro-Setup-0.2.0-x64.exe"
 ```
 
@@ -269,7 +269,7 @@ Le manifeste indique au serveur quelle version proposer.
 npm.cmd run release:manifest:windows -- `
   --installer "src-tauri\target\release\bundle\nsis\TicketPro-Setup-0.2.1-x64.exe" `
   --signature "src-tauri\target\release\bundle\nsis\TicketPro-Setup-0.2.1-x64.exe.sig" `
-  --url "https://license.autoticket-ne.com/releases/TicketPro-Setup-0.2.1-x64.exe" `
+  --url "https://api.ticketpro-ne.com/releases/TicketPro-Setup-0.2.1-x64.exe" `
   --notes "Amélioration de la stabilité, corrections VPN et optimisation des vouchers."
 ```
 
@@ -288,7 +288,7 @@ Exemple de contenu :
   "pub_date": "2026-07-29T15:00:00.000Z",
   "platforms": {
     "windows-x86_64": {
-      "url": "https://license.autoticket-ne.com/releases/TicketPro-Setup-0.2.1-x64.exe",
+      "url": "https://api.ticketpro-ne.com/releases/TicketPro-Setup-0.2.1-x64.exe",
       "signature": "SIGNATURE_ED25519"
     }
   }
@@ -336,7 +336,7 @@ l'annonce d'une version dont le setup n'est pas encore disponible.
 ### Simuler un poste en version 0.2.0
 
 ```powershell
-curl.exe -i "https://license.autoticket-ne.com/v1/app-updates/check?target=windows&arch=x86_64&current_version=0.2.0"
+curl.exe -i "https://api.ticketpro-ne.com/v1/app-updates/check?target=windows&arch=x86_64&current_version=0.2.0"
 ```
 
 Résultat attendu :
@@ -351,7 +351,7 @@ de version.
 ### Simuler un poste déjà en version 0.2.1
 
 ```powershell
-curl.exe -i "https://license.autoticket-ne.com/v1/app-updates/check?target=windows&arch=x86_64&current_version=0.2.1"
+curl.exe -i "https://api.ticketpro-ne.com/v1/app-updates/check?target=windows&arch=x86_64&current_version=0.2.1"
 ```
 
 Résultat attendu :

@@ -48,4 +48,4 @@ docker compose -f "$SCRIPT_DIR/docker-compose.yml" \
 echo "Mise à jour publiée."
 echo "Installateur : $RELEASES_DIR/$INSTALLER_NAME"
 echo "Manifeste : /data/app-updates/stable.json"
-echo "Téléchargement officiel : https://$(sed -n 's/^LICENSE_DOMAIN=//p' "$SCRIPT_DIR/.env" | tail -n 1)/download/windows"
+echo "Téléchargement officiel : https://$(sed -n 's/^API_DOMAIN=//p' "$SCRIPT_DIR/.env" | tail -n 1)/download/windows"

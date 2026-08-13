@@ -13,8 +13,8 @@ secrets et WireGuard sans les saisir dans l'application :
 
 ```bash
 chmod +x vps/*.sh
-export LICENSE_DOMAIN='license.votre-domaine.com'
-export VPN_PUBLIC_ENDPOINT='vpn.votre-domaine.com'
+export API_DOMAIN='api.ticketpro-ne.com'
+export VPN_PUBLIC_ENDPOINT='vpn.ticketpro-ne.com'
 # Facultatif au premier déploiement :
 export IPAY_ENV='disabled'
 ./vps/initialize.sh

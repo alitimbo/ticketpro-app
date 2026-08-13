@@ -115,7 +115,7 @@ mod tests {
             config_version: 1,
             address: "10.250.10.21/32".to_string(),
             gateway_public_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
-            endpoint_host: "vpn.autoticket-ne.com".to_string(),
+            endpoint_host: "vpn.ticketpro-ne.com".to_string(),
             endpoint_port: 51820,
             allowed_ips: vec!["10.250.0.0/16".to_string()],
             persistent_keepalive: DEFAULT_KEEPALIVE_SECONDS,
@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn rejects_an_endpoint_with_a_path_or_scheme() {
         let mut config = valid_config();
-        config.endpoint_host = "https://vpn.autoticket-ne.com/config".to_string();
+        config.endpoint_host = "https://vpn.ticketpro-ne.com/config".to_string();
         assert_eq!(config.validate(), Err("ENDPOINT_INVALID"));
     }
 }

@@ -1,4 +1,5 @@
 import type { MainAccountRecord, MainAccountStatus } from "../../domain/auth";
+import { normalizeInternationalPhone } from "../../shared/phone";
 
 export function accountStatusLabel(status: MainAccountStatus): string {
   const labels: Record<MainAccountStatus, string> = {
@@ -32,13 +33,9 @@ export function validateAccountDetails(input: Pick<MainAccountRecord, "companyNa
     return "Entrez le nom de l'entreprise.";
   }
 
-  if (!input.phone.trim()) {
-    return "Entrez le téléphone du propriétaire.";
-  }
-
-  if (input.phone.trim().length < 6) {
-    return "Entrez un téléphone valide.";
-  }
+  if (!input.phone.trim()) return "Entrez le téléphone du propriétaire.";
+  const phone = normalizeInternationalPhone(input.phone, { required: true });
+  if (!phone.ok) return phone.message;
 
   return null;
 }

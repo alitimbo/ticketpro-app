@@ -12,7 +12,11 @@ describe("accountPageModel", () => {
     expect(validateAccountDetails({ companyName: "", displayName: "Douma", phone: "" })).toBe("Entrez le nom de l'entreprise.");
     expect(validateAccountDetails({ companyName: "Douma", displayName: "", phone: "" })).toBe("Entrez le nom affiché.");
     expect(validateAccountDetails({ companyName: "Douma", displayName: "Douma", phone: "" })).toBe("Entrez le téléphone du propriétaire.");
-    expect(validateAccountDetails({ companyName: "Douma", displayName: "Douma", phone: "+22790000000" })).toBeNull();
+    expect(validateAccountDetails({ companyName: "Douma", displayName: "Douma", phone: "88 99 99 00" })).toBeNull();
+    expect(validateAccountDetails({ companyName: "Douma", displayName: "Douma", phone: "+33 6 12 34 56 78" })).toBeNull();
+    expect(validateAccountDetails({ companyName: "Douma", displayName: "Douma", phone: "33612345678" })).toBe(
+      "Saisissez le numéro avec l'indicatif du pays, par exemple +227 88 99 99 00."
+    );
   });
 
   it("valide le changement de mot de passe principal", () => {
