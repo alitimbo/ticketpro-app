@@ -344,7 +344,50 @@ pub fn initialize_database(app: &AppHandle) -> Result<(), String> {
         }
     }
 
+    ensure_ticket_batch_pricing_columns(&connection)?;
+
     Ok(())
+}
+
+/// Répare les bases locales créées par une version antérieure qui peut avoir
+/// enregistré la migration sans posséder toutes les colonnes de lot attendues.
+/// Cette vérification est idempotente et protège notamment les postes invités
+/// lors de leur première connexion à une organisation.
+fn ensure_ticket_batch_pricing_columns(connection: &Connection) -> Result<(), String> {
+    if !table_has_column(connection, "ticket_batches", "currency")? {
+        connection
+            .execute_batch("ALTER TABLE ticket_batches ADD COLUMN currency TEXT NOT NULL DEFAULT 'CFA';")
+            .map_err(|error| format!("Réparation de la devise des lots impossible: {error}"))?;
+    }
+
+    if !table_has_column(connection, "ticket_batches", "price_snapshot")? {
+        connection
+            .execute_batch("ALTER TABLE ticket_batches ADD COLUMN price_snapshot INTEGER;")
+            .map_err(|error| format!("Réparation du prix des lots impossible: {error}"))?;
+    }
+
+    connection
+        .execute(
+            "UPDATE ticket_batches SET currency = 'CFA' WHERE currency IS NULL OR TRIM(currency) = ''",
+            [],
+        )
+        .map_err(|error| format!("Normalisation de la devise des lots impossible: {error}"))?;
+
+    Ok(())
+}
+
+fn table_has_column(connection: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|error| error.to_string())?;
+    let mut rows = statement.query([]).map_err(|error| error.to_string())?;
+    while let Some(row) = rows.next().map_err(|error| error.to_string())? {
+        let name: String = row.get(1).map_err(|error| error.to_string())?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[tauri::command]
