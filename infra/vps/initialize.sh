@@ -90,6 +90,7 @@ printf '%s\n' "$WG_PUBLIC_KEY" > "$INFRA_DIR/wireguard-hub/wireguard/server_publ
   echo "SAAS_SUBSCRIPTION_URL=${SAAS_SUBSCRIPTION_URL:-https://www.ticketpro-ne.com/}"
   echo "LICENSE_CORS_ORIGIN=${LICENSE_CORS_ORIGIN:-http://tauri.localhost,http://localhost:1420,http://localhost:4321,http://127.0.0.1:4321,http://localhost:4322,http://127.0.0.1:4322,https://ticketpro-ne.com,https://www.ticketpro-ne.com}"
   echo "VPN_HUB_URL=http://127.0.0.1:8788"
+  echo "VPN_CLIENT_ALLOWED_IPS=10.250.0.0/16"
   echo "VPN_HUB_MASTER_TOKEN=$HUB_MASTER_TOKEN"
 } > "$INFRA_DIR/license-api/.env"
 

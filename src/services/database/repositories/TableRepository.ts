@@ -14,9 +14,11 @@ export type LocalTableName =
   | "license_state"
   | "printers"
   | "router_connections"
+  | "router_managed_resource_manifests"
   | "router_snapshots"
   | "routers"
   | "subscription_plans"
+  | "sync_outbox"
   | "ticket_batches"
   | "tickets"
   | "vpn_networks"
@@ -178,6 +180,18 @@ const tableColumns: Record<LocalTableName, string[]> = {
     "last_connected_at",
     "sync_status"
   ],
+  router_managed_resource_manifests: [
+    "router_id",
+    "account_id",
+    "schema_version",
+    "revision",
+    "status",
+    "desired_json",
+    "observed_json",
+    "warnings_json",
+    "last_error",
+    "observed_at"
+  ],
   router_snapshots: [
     "id",
     "router_id",
@@ -227,6 +241,27 @@ const tableColumns: Record<LocalTableName, string[]> = {
     "is_recommended",
     "is_active"
   ],
+  sync_outbox: [
+    "id",
+    "account_id",
+    "router_id",
+    "operation_type",
+    "aggregate_type",
+    "aggregate_id",
+    "idempotency_key",
+    "correlation_id",
+    "payload_json",
+    "status",
+    "priority",
+    "attempt_count",
+    "max_attempts",
+    "next_attempt_at",
+    "locked_at",
+    "last_attempt_at",
+    "completed_at",
+    "last_error_code",
+    "last_error_message"
+  ],
   ticket_batches: [
     "id",
     "account_id",
@@ -273,7 +308,13 @@ const tableColumns: Record<LocalTableName, string[]> = {
     "last_router_sync_at",
     "uptime_seconds",
     "remaining_seconds",
-    "data_remaining_bytes"
+    "data_remaining_bytes",
+    "duration_minutes_snapshot",
+    "validity_minutes_snapshot",
+    "data_limit_mb_snapshot",
+    "download_limit_snapshot",
+    "upload_limit_snapshot",
+    "shared_users_snapshot"
   ],
   vpn_networks: [
     "id",

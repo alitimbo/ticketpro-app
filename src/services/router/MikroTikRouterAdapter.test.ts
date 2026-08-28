@@ -57,6 +57,30 @@ class MockRouterOsTransport implements RouterOsApiTransport {
       if (index >= 0) rows.splice(index, 1);
       return [];
     }
+    if (request.command === "/user/group/add") {
+      const rows = this.responses["/user/group/print"] ??= [];
+      rows.push({ ".id": `*UG${rows.length + 1}`, ...stringParams(request.params) });
+      return [];
+    }
+    if (request.command === "/user/group/set") {
+      mutateResponseRow(this.responses["/user/group/print"] ?? [], request);
+      return [];
+    }
+    if (request.command === "/user/add") {
+      const rows = this.responses["/user/print"] ??= [];
+      const params = stringParams(request.params);
+      delete params.password;
+      rows.push({ ".id": `*U${rows.length + 1}`, ...params });
+      return [];
+    }
+    if (request.command === "/user/set") {
+      mutateResponseRow(this.responses["/user/print"] ?? [], request, new Set(["password"]));
+      return [];
+    }
+    if (request.command === "/ip/service/set") {
+      mutateResponseRow(this.responses["/ip/service/print"] ?? [], request);
+      return [];
+    }
     if (
       request.command === "/ip/firewall/filter/remove"
       || request.command === "/ip/firewall/mangle/remove"
@@ -70,6 +94,26 @@ class MockRouterOsTransport implements RouterOsApiTransport {
       return [];
     }
     return this.responses[request.command] ?? [];
+  }
+}
+
+function stringParams(params: RouterOsApiRequest["params"]): RouterOsApiRow {
+  return Object.fromEntries(
+    Object.entries(params ?? {}).map(([key, value]) => [key, value == null ? "" : String(value)])
+  );
+}
+
+function mutateResponseRow(
+  rows: RouterOsApiRow[],
+  request: RouterOsApiRequest,
+  ignored = new Set<string>()
+): void {
+  const id = String(request.params?.numbers ?? "");
+  const row = rows.find((candidate) => candidate[".id"] === id || candidate.id === id);
+  if (!row) return;
+  for (const [key, value] of Object.entries(request.params ?? {})) {
+    if (key === "numbers" || ignored.has(key)) continue;
+    row[key] = value == null ? "" : String(value);
   }
 }
 
@@ -112,9 +156,11 @@ describe("MikroTikRouterAdapter", () => {
     });
     const adapter = createAdapter(transport);
 
-    await expect(adapter.ensureVoucherLifecycleEngine()).resolves.toEqual({
+    await expect(adapter.ensureVoucherLifecycleEngine({
+      managedProfileNames: ["forfait-1h"]
+    })).resolves.toEqual({
       clockReady: true,
-      engineVersion: 4,
+      engineVersion: 6,
       managedProfileCount: 1,
       schedulerEnabled: true
     });
@@ -151,6 +197,166 @@ describe("MikroTikRouterAdapter", () => {
     });
   });
 
+  it("répare uniquement les profils explicitement revendiqués", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/user/profile/print": [
+        {
+          ".id": "*DEF",
+          name: "default",
+          "on-login": mergeVoucherLifecycleOnLogin(':log info "script-externe";'),
+          "session-timeout": ""
+        },
+        { ".id": "*P1", name: "6h", "on-login": "", "session-timeout": "6h" }
+      ],
+      "/ip/hotspot/print": [],
+      "/ip/hotspot/profile/print": [],
+      "/system/clock/print": [{ date: "2026-08-27", time: "12:00:00" }],
+      "/system/ntp/client/print": [{ enabled: "true", status: "synchronized" }],
+      "/system/ntp/client/servers/print": [{ address: "time.cloudflare.com" }],
+      "/system/resource/print": [{ version: "7.21.5" }],
+      "/system/scheduler/print": [],
+      "/system/script/print": []
+    });
+
+    await createAdapter(transport).ensureVoucherLifecycleEngine({
+      managedProfileNames: ["default", "6h"]
+    });
+
+    const profileUpdates = transport.calls.filter(
+      (call) => call.command === "/ip/hotspot/user/profile/set"
+    );
+    expect(profileUpdates).toHaveLength(1);
+    expect(profileUpdates.find((call) => call.params?.numbers === "*P1")?.params)
+      .toMatchObject({ "add-mac-cookie": "yes", numbers: "*P1" });
+    expect(profileUpdates.some((call) => call.params?.numbers === "*DEF")).toBe(false);
+  });
+
+  it("inspecte les ressources gérées sans exposer de clé ni modifier RouterOS", async () => {
+    const handler = mergeVoucherLifecycleOnLogin("");
+    const transport = new MockRouterOsTransport({
+      "/interface/wireguard/peers/print": [{ interface: "ticketpro-vpn", "public-key": "SECRET-PUBLIC" }],
+      "/interface/wireguard/print": [{ ".id": "*WG1", disabled: "no", name: "ticketpro-vpn", "private-key": "SECRET-PRIVATE" }],
+      "/ip/address/print": [{ address: "10.250.0.2/32", interface: "ticketpro-vpn" }],
+      "/ip/firewall/filter/print": [],
+      "/ip/firewall/mangle/print": [{ comment: "TicketPro anti-tethering:IPv4 client TTL ether1" }],
+      "/ip/hotspot/ip-binding/print": [],
+      "/ip/hotspot/profile/print": [{ ".id": "*HP1", "dns-name": "wifi.test", "login-by": "cookie,http-chap,mac-cookie", name: "hs-profile" }],
+      "/ip/hotspot/user/profile/print": [
+        { ".id": "*DEF", "add-mac-cookie": "yes", name: "default", "on-login": handler },
+        { ".id": "*P1", "add-mac-cookie": "true", name: "6h", "on-login": handler }
+      ],
+      "/ip/hotspot/print": [{ disabled: "no", name: "hotspot1", profile: "hs-profile" }],
+      "/ip/route/print": [{ comment: "TicketPro WireGuard", "dst-address": "10.250.0.0/16", gateway: "ticketpro-vpn" }],
+      "/ipv6/firewall/filter/print": [],
+      "/system/ntp/client/print": [{ enabled: "yes", status: "synchronized" }],
+      "/system/ntp/client/servers/print": [{ address: "time.cloudflare.com" }],
+      "/system/resource/print": [{ version: "7.21.5" }],
+      "/system/scheduler/print": [{
+        comment: "TicketPro managed voucher lifecycle v6",
+        disabled: "no",
+        interval: "1m",
+        name: "ticketpro-voucher-expiration-v1",
+        "on-event": "ticketpro-voucher-expiration-v1"
+      }],
+      "/system/script/print": [{
+        comment: "TicketPro managed voucher lifecycle v6",
+        name: "ticketpro-voucher-expiration-v1",
+        policy: "read,write,policy,test",
+        source: buildVoucherExpirationScript()
+      }]
+    });
+
+    const manifest = await createAdapter(transport).inspectManagedResources({
+      managedHotspotProfileNames: ["6h"],
+      wireguardInterfaceName: "ticketpro-vpn"
+    });
+
+    expect(manifest.resources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: "system-script:voucher-lifecycle", state: "present" }),
+      expect.objectContaining({ key: "hotspot-user-profile-extension:6h", state: "present" }),
+      expect.objectContaining({ key: "hotspot-user-profile-extension:unexpected:default", state: "drift" }),
+      expect.objectContaining({ key: "wireguard-route:ticketpro-vpn", state: "present" })
+    ]));
+    expect(manifest.warnings).toHaveLength(1);
+    expect(JSON.stringify(manifest)).not.toContain("SECRET-PRIVATE");
+    expect(JSON.stringify(manifest)).not.toContain("SECRET-PUBLIC");
+    expect(transport.calls.some((call) => /\/(add|set|remove)$/.test(call.command))).toBe(false);
+  });
+
+  it("prépare un compte RouterOS dédié sans désactiver le compte administrateur", async () => {
+    const transport = new MockRouterOsTransport({
+      "/user/group/print": [{ ".id": "*FULL", name: "full", policy: "local,read,write,policy,password,sensitive,api" }],
+      "/user/print": [{ ".id": "*ADMIN", disabled: "no", group: "full", name: "admin" }]
+    });
+
+    const result = await createAdapter(transport).upsertManagementAccount({
+      password: "Safe-RouterOS-Password-2026",
+      username: "ticketpro-api"
+    });
+
+    expect(result).toEqual({
+      action: "created",
+      groupName: "ticketpro-api",
+      username: "ticketpro-api"
+    });
+    expect(transport.calls.find((call) => call.command === "/user/group/add")?.params)
+      .toEqual({ name: "ticketpro-api", policy: "api,policy,read,sensitive,test,write" });
+    expect(transport.calls.find((call) => call.command === "/user/add")?.params)
+      .toMatchObject({ disabled: "no", group: "ticketpro-api", name: "ticketpro-api" });
+    expect(transport.calls.some((call) =>
+      call.command === "/user/disable" && call.params?.numbers === "*ADMIN"
+    )).toBe(false);
+    expect(JSON.stringify(result)).not.toContain("Safe-RouterOS-Password-2026");
+  });
+
+  it("refuse d'adopter silencieusement un compte RouterOS homonyme externe", async () => {
+    const adapter = createAdapter(new MockRouterOsTransport({
+      "/user/group/print": [{ ".id": "*GROUP", name: "ticketpro-api", policy: "read" }],
+      "/user/print": [{ ".id": "*USER", group: "full", name: "ticketpro-api" }]
+    }));
+
+    await expect(adapter.upsertManagementAccount({
+      password: "Safe-RouterOS-Password-2026",
+      username: "ticketpro-api"
+    })).rejects.toMatchObject({ code: "router_rejected" });
+  });
+
+  it("durcit les services seulement après confirmation du chemin autorisé", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/service/print": [
+        { ".id": "*API", address: "", disabled: "no", name: "api", port: "8728" },
+        { ".id": "*WINBOX", address: "", disabled: "no", name: "winbox", port: "8291" },
+        { ".id": "*SSH", address: "", disabled: "no", name: "ssh", port: "22" },
+        { ".id": "*FTP", address: "", disabled: "no", name: "ftp", port: "21" }
+      ]
+    });
+    const adapter = createAdapter(transport);
+
+    await expect(adapter.applyManagementServicePolicy({
+      authorizedCidrs: ["192.168.88.0/24", "10.250.0.0/16"],
+      currentPathConfirmed: false,
+      disableUnusedServices: true
+    })).rejects.toMatchObject({ code: "router_rejected" });
+    expect(transport.calls.some((call) => call.command === "/ip/service/set")).toBe(false);
+
+    const result = await adapter.applyManagementServicePolicy({
+      authorizedCidrs: ["192.168.88.0/24", "10.250.0.0/16"],
+      currentPathConfirmed: true,
+      disableUnusedServices: true
+    });
+
+    expect(result).toEqual({
+      disabledServices: ["ftp"],
+      restrictedServices: ["api", "ssh", "winbox"]
+    });
+    expect(transport.calls.find((call) =>
+      call.command === "/ip/service/set" && call.params?.numbers === "*API"
+    )?.params).toMatchObject({
+      address: "10.250.0.0/16,192.168.88.0/24",
+      disabled: "no"
+    });
+  });
+
   it("met à niveau le script déjà installé sans créer de doublon", async () => {
     const transport = new MockRouterOsTransport({
       "/ip/hotspot/user/profile/print": [],
@@ -181,12 +387,12 @@ describe("MikroTikRouterAdapter", () => {
 
     expect(transport.calls.filter((call) => call.command === "/system/script/add")).toHaveLength(0);
     expect(transport.calls.find((call) => call.command === "/system/script/set")?.params).toMatchObject({
-      comment: "TicketPro managed voucher lifecycle v4",
+      comment: "TicketPro managed voucher lifecycle v6",
       numbers: "*SC1",
       source: expect.stringContaining("/ip hotspot user remove $tpId")
     });
     expect(transport.calls.find((call) => call.command === "/system/scheduler/set")?.params).toMatchObject({
-      comment: "TicketPro managed voucher lifecycle v4",
+      comment: "TicketPro managed voucher lifecycle v6",
       numbers: "*S1"
     });
   });
@@ -195,11 +401,24 @@ describe("MikroTikRouterAdapter", () => {
     expect(buildVoucherLifecycleComment(300, "Lot local")).toBe(
       "TicketPro:v1;validity=300;expires=0;state=new;"
     );
+    expect(buildVoucherLifecycleComment(300, "TicketProBatch:batch-42")).toBe(
+      "TicketPro:v1;validity=300;expires=0;state=new;batch=batch-42;"
+    );
+    expect(mergeVoucherLifecycleOnLogin("script-externe")).toContain("$tpOwnership");
+    expect(buildVoucherExpirationScript()).toContain("$tpOwnership");
     expect(buildVoucherLifecycleComment(null, "Lot local")).toBe("Lot local");
     expect(reconcileVoucherLifecycleComment(
       "TicketPro:v1;validity=180;expires=123;state=cleanup-error;",
       180
     )).toBe("TicketPro:v1;validity=180;expires=123;state=cleanup-error;");
+    expect(reconcileVoucherLifecycleComment(
+      "TicketPro:v1;validity=180;expires=123;state=active;",
+      null
+    )).toBe("TicketPro:v1;validity=180;expires=123;state=active;");
+    expect(reconcileVoucherLifecycleComment(
+      "TicketPro:v1;validity=180;expires=123;state=active;",
+      600
+    )).toBe("TicketPro:v1;validity=180;expires=123;state=active;");
     const first = mergeVoucherLifecycleOnLogin(':log info "avant";');
     const upgraded = mergeVoucherLifecycleOnLogin(first);
     expect(upgraded).toContain(':log info "avant";');
@@ -218,6 +437,9 @@ describe("MikroTikRouterAdapter", () => {
     expect(expirationScript).toContain("time-consumed");
     expect(expirationScript).toContain("quota-consumed");
     expect(expirationScript).toContain("validity-expired");
+    expect(expirationScript).not.toContain("ip-binding remove [find where address=");
+    expect(expirationScript).not.toContain("ip-binding remove [find where mac-address=");
+    expect(expirationScript).toContain("tpForeignBindingId");
     expect(expirationScript).not.toContain("tpShouldRemove");
     expect(expirationScript).toContain(
       ':if (($tpExpired = false) && ($tpLimitUptime > 0) && ($tpUptime >= $tpLimitUptime)) do={ :set tpExhausted true; :set tpReason "time-consumed" };'
@@ -527,6 +749,26 @@ describe("MikroTikRouterAdapter", () => {
     ]);
   });
 
+  it("recherche un voucher précis sans charger tout le catalogue RouterOS", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/user/print": [{
+        ".id": "*U2",
+        name: "654321",
+        profile: "plan-1h"
+      }]
+    });
+    const adapter = createAdapter(transport);
+
+    await expect(adapter.findHotspotUser("654321")).resolves.toMatchObject({
+      id: "*U2",
+      username: "654321"
+    });
+    expect(transport.calls).toContainEqual(expect.objectContaining({
+      command: "/ip/hotspot/user/print",
+      queries: { name: "654321" }
+    }));
+  });
+
   it("liste puis déconnecte toutes les sessions du voucher sans toucher aux autres", async () => {
     const transport = new MockRouterOsTransport({
       "/ip/hotspot/active/print": [
@@ -787,6 +1029,59 @@ describe("MikroTikRouterAdapter", () => {
     ]);
   });
 
+  it("refuse la suppression définitive si un bypass externe autorise encore l'appareil", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/active/print": [{
+        ".id": "*A1",
+        address: "192.168.88.20",
+        "mac-address": "AA:BB:CC:DD:EE:01",
+        user: "voucher-1"
+      }],
+      "/ip/hotspot/cookie/print": [],
+      "/ip/hotspot/host/print": [],
+      "/ip/hotspot/ip-binding/print": [{
+        ".id": "*B-EXTERNAL",
+        comment: "Bypass manuel externe",
+        "mac-address": "AA:BB:CC:DD:EE:01",
+        type: "bypassed"
+      }],
+      "/ip/firewall/connection/print": [],
+      "/ip/hotspot/user/print": [{
+        ".id": "*U1",
+        "mac-address": "AA:BB:CC:DD:EE:01",
+        name: "voucher-1",
+        profile: "plan-1h"
+      }]
+    });
+    const adapter = createAdapter(transport);
+
+    await expect(adapter.removeHotspotUser("voucher-1")).rejects.toMatchObject({
+      code: "router_rejected"
+    });
+    expect(transport.calls).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ command: "/ip/hotspot/ip-binding/remove" }),
+      expect.objectContaining({ command: "/ip/hotspot/user/remove" })
+    ]));
+  });
+
+  it("interdit de réactiver un voucher épuisé", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/user/print": [{
+        ".id": "*U1",
+        comment: "TicketPro:v1;validity=180;expires=123;state=exhausted;",
+        disabled: "true",
+        name: "voucher-1",
+        profile: "plan-1h"
+      }]
+    });
+    const adapter = createAdapter(transport);
+
+    await expect(adapter.enableHotspotUser("voucher-1")).rejects.toMatchObject({
+      code: "router_rejected"
+    });
+    expect(transport.calls.some((call) => call.command === "/ip/hotspot/user/enable")).toBe(false);
+  });
+
   it("protège immédiatement le vrai mot de passe lu lors d'une récupération RouterOS", async () => {
     const adapter = createAdapter(new MockRouterOsTransport({
       "/ip/hotspot/user/print": [{
@@ -850,6 +1145,7 @@ describe("MikroTikRouterAdapter", () => {
       }],
       "/ip/route/print": [{
         ".id": "*ROUTE1",
+        comment: "TicketPro WireGuard",
         "dst-address": "10.250.0.0/24"
       }],
       "/ip/firewall/filter/print": [{
@@ -870,12 +1166,60 @@ describe("MikroTikRouterAdapter", () => {
 
     const interfaceSet = transport.calls.find((call) => call.command === "/interface/wireguard/set");
     expect(interfaceSet?.params).toEqual({
+      comment: "TicketPro managed:wireguard-interface:v1",
       "listen-port": 13231,
       numbers: "*WG1"
     });
     expect(transport.calls.some((call) => call.command === "/interface/wireguard/add")).toBe(false);
     expect(transport.calls.some((call) => call.command === "/ip/address/add")).toBe(false);
     expect(transport.calls.some((call) => call.command === "/interface/wireguard/peers/add")).toBe(false);
+  });
+
+  it("réconcilie les doublons WireGuard TicketPro vers une seule configuration active", async () => {
+    const transport = new MockRouterOsTransport({
+      "/interface/wireguard/print": [{ ".id": "*WG1", name: "ticketpro-vpn" }],
+      "/ip/address/print": [
+        { ".id": "*OLDADDR", address: "10.250.0.99/32", interface: "ticketpro-vpn" },
+        { ".id": "*ADDR", address: "10.250.0.2/32", interface: "ticketpro-vpn" }
+      ],
+      "/interface/wireguard/peers/print": [
+        { ".id": "*OLDPEER", interface: "ticketpro-vpn", "public-key": "old-server" },
+        { ".id": "*PEER", interface: "ticketpro-vpn", "public-key": "server-public" }
+      ],
+      "/ip/route/print": [
+        { ".id": "*OLDROUTE", comment: "TicketPro WireGuard", "dst-address": "10.250.0.0/24", gateway: "ticketpro-vpn" },
+        { ".id": "*ROUTE", comment: "TicketPro WireGuard multi-organisation", "dst-address": "10.250.0.0/16", gateway: "ticketpro-vpn" }
+      ],
+      "/ip/firewall/filter/print": [
+        { ".id": "*FW1", comment: "TicketPro WireGuard" },
+        { ".id": "*FW2", comment: "TicketPro WireGuard" }
+      ]
+    });
+
+    await createAdapter(transport).provisionWireGuard({
+      assignedAddress: "10.250.0.2/32",
+      interfaceName: "ticketpro-vpn",
+      serverAllowedIps: "10.250.0.0/16",
+      serverEndpoint: "vpn.ticketpro-ne.com",
+      serverPort: 51820,
+      serverPublicKey: "server-public"
+    });
+
+    expect(transport.calls.find((call) => call.command === "/ip/address/set")?.params)
+      .toMatchObject({ numbers: "*ADDR", address: "10.250.0.2/32" });
+    expect(transport.calls.find((call) => call.command === "/ip/address/remove")?.params)
+      .toEqual({ numbers: "*OLDADDR" });
+    expect(transport.calls.find((call) => call.command === "/interface/wireguard/peers/set")?.params)
+      .toMatchObject({ numbers: "*PEER", "allowed-address": "10.250.0.0/16" });
+    expect(transport.calls.find((call) => call.command === "/interface/wireguard/peers/remove")?.params)
+      .toEqual({ numbers: "*OLDPEER" });
+    expect(transport.calls.find((call) => call.command === "/ip/route/set")?.params)
+      .toMatchObject({ numbers: "*ROUTE", "dst-address": "10.250.0.0/16" });
+    expect(transport.calls.find((call) => call.command === "/ip/route/remove")?.params)
+      .toEqual({ numbers: "*OLDROUTE" });
+    expect(transport.calls.find((call) => call.command === "/ip/firewall/filter/remove")?.params)
+      .toEqual({ numbers: "*FW2" });
+    expect(JSON.stringify(transport.calls)).not.toContain("private-key");
   });
 
   it("verrouille puis libère un utilisateur Hotspot par adresse MAC", async () => {

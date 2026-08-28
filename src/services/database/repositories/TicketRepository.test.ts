@@ -11,10 +11,33 @@ class TicketDatabaseStub implements DatabaseClient {
   async initialize(): Promise<void> {}
 
   async execute(_sql: string, params: Array<string | number | boolean | null> = []): Promise<DatabaseExecuteResult> {
+    if (_sql.trim().toLowerCase().startsWith("insert into tickets")) {
+      this.record = {
+        ...this.record,
+        data_limit_mb_snapshot: params[34] as number | null,
+        data_remaining_bytes: params[31] as number | null,
+        downloaded_bytes: Number(params[15]),
+        duration_minutes_snapshot: params[32] as number | null,
+        remaining_seconds: params[30] as number | null,
+        status: String(params[7]),
+        sync_status: String(params[22]) as TicketRecord["sync_status"],
+        updated_at: String(params[21]),
+        uploaded_bytes: Number(params[16]),
+        uptime_seconds: Number(params[29]),
+        validity_minutes_snapshot: params[33] as number | null
+      };
+      return { rowsAffected: 1 };
+    }
     this.record = {
       ...this.record,
       status: String(params[0]),
-      updated_at: String(params[12])
+      data_limit_mb_snapshot: params[23] as number | null,
+      download_limit_snapshot: params[24] as string | null,
+      duration_minutes_snapshot: params[21] as number | null,
+      shared_users_snapshot: params[26] as number | null,
+      updated_at: String(params[27]),
+      upload_limit_snapshot: params[25] as string | null,
+      validity_minutes_snapshot: params[22] as number | null
     };
     return { rowsAffected: 1 };
   }
@@ -54,6 +77,74 @@ describe("TicketRepository", () => {
     await expect(repository.listForReportByAccount("account-1")).resolves.toHaveLength(1);
     expect(database.lastQuery).not.toContain("deleted_at IS NULL");
     expect(database.lastQuery).toContain("account_id = ?1");
+  });
+  it("fige les limites commerciales apres l'activation du voucher", async () => {
+    const current = {
+      ...createTicketRecord(),
+      activated_at: "2026-01-01T00:05:00.000Z",
+      duration_minutes_snapshot: 60,
+      validity_minutes_snapshot: 180
+    };
+    const repository = new TicketRepository(new TicketDatabaseStub(current));
+
+    const updated = await repository.update({
+      ...ticketInputFromRecord(current),
+      duration_minutes_snapshot: 120,
+      validity_minutes_snapshot: 360
+    });
+
+    expect(updated.duration_minutes_snapshot).toBe(60);
+    expect(updated.validity_minutes_snapshot).toBe(180);
+  });
+
+  it("autorise encore l'ajustement d'un voucher vierge non imprime", async () => {
+    const current = {
+      ...createTicketRecord(),
+      duration_minutes_snapshot: 60,
+      validity_minutes_snapshot: 180
+    };
+    const repository = new TicketRepository(new TicketDatabaseStub(current));
+
+    const updated = await repository.update({
+      ...ticketInputFromRecord(current),
+      duration_minutes_snapshot: 120,
+      validity_minutes_snapshot: 360
+    });
+
+    expect(updated.duration_minutes_snapshot).toBe(120);
+    expect(updated.validity_minutes_snapshot).toBe(360);
+  });
+
+  it("refuse une remise a zero publiee par un autre poste", async () => {
+    const current = {
+      ...createTicketRecord(),
+      completed_at: "2026-01-01T01:00:00.000Z",
+      downloaded_bytes: 1000,
+      duration_minutes_snapshot: 60,
+      remaining_seconds: 0,
+      status: "consommÃ©",
+      uptime_seconds: 3600,
+      validity_minutes_snapshot: 180
+    };
+    const repository = new TicketRepository(new TicketDatabaseStub(current));
+
+    const updated = await repository.upsertShared({
+      ...ticketInputFromRecord(current),
+      completed_at: null,
+      downloaded_bytes: 0,
+      duration_minutes_snapshot: 999,
+      remaining_seconds: 3600,
+      status: "disponible",
+      sync_status: "synced",
+      uptime_seconds: 0,
+      validity_minutes_snapshot: 999
+    });
+
+    expect(updated.status).toBe("consommÃ©");
+    expect(updated.sync_status).toBe("conflict");
+    expect(updated.uptime_seconds).toBe(3600);
+    expect(updated.downloaded_bytes).toBe(1000);
+    expect(updated.duration_minutes_snapshot).toBe(60);
   });
 });
 

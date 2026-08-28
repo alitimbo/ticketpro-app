@@ -9,6 +9,7 @@ import type {
   SyncedTicketUpdate,
   TicketSyncReport
 } from "../../services/sync";
+import { ticketLifecyclePhase } from "../../services/tickets";
 import type { TicketListItem, TicketListStatus } from "./ticketsPageModel";
 
 export type PersistTicketSyncReportInput = {
@@ -40,18 +41,18 @@ export async function persistTicketSyncReport({
     changedTickets.flatMap((nextTicket) => {
       const previous = tickets.find((ticket) => ticket.id === nextTicket.id);
       if (!previous || previous.status === nextTicket.status) return [];
-      return [
+      return ticketHistoryTransitions(previous, nextTicket).map((transition) =>
         ticketHistoryRepository.record({
           account_id: nextTicket.accountId,
           created_by_profile_id: actorProfileId,
-          message: `${previous.status} → ${nextTicket.status} après lecture RouterOS.`,
-          next_status: nextTicket.status,
-          previous_status: previous.status,
+          message: transition.message,
+          next_status: transition.nextStatus,
+          previous_status: transition.previousStatus,
           router_id: nextTicket.routerId,
-          source: "router_sync",
+          source: transition.source,
           ticket_id: nextTicket.id
         })
-      ];
+      );
     })
   );
 
@@ -73,6 +74,52 @@ export async function persistTicketSyncReport({
   );
 
   return nextTickets;
+}
+
+export function ticketHistoryTransitions(
+  previous: TicketListItem,
+  next: TicketListItem
+): Array<{
+  message: string;
+  nextStatus: string;
+  previousStatus: string;
+  source: string;
+}> {
+  if (previous.status === next.status) return [];
+  if (next.status !== "archivé" || !next.routerDeletedAt || !next.archivedAt) {
+    return [{
+      message: `${previous.status} → ${next.status} après lecture RouterOS.`,
+      nextStatus: next.status,
+      previousStatus: previous.status,
+      source: "router_sync"
+    }];
+  }
+
+  const transitions: ReturnType<typeof ticketHistoryTransitions> = [];
+  let current = previous.status;
+  const previousPhase = ticketLifecyclePhase(previous.status);
+  if (previousPhase !== "exhausted" && previousPhase !== "expired") {
+    transitions.push({
+      message: "La validité calendaire du voucher est arrivée à son terme.",
+      nextStatus: "expiré",
+      previousStatus: current,
+      source: "router_lifecycle"
+    });
+    current = "expiré";
+  }
+  transitions.push({
+    message: "La suppression physique du compte Hotspot a été confirmée sur RouterOS.",
+    nextStatus: "supprimé_routeur",
+    previousStatus: current,
+    source: "router_lifecycle"
+  });
+  transitions.push({
+    message: "Le dernier snapshot connu est conservé dans les archives TicketPro.",
+    nextStatus: "archivé",
+    previousStatus: "supprimé_routeur",
+    source: "router_lifecycle"
+  });
+  return transitions;
 }
 
 export function mergeTicketUpdate(
@@ -121,12 +168,15 @@ export function ticketToCreateInput(ticket: TicketListItem): CreateTicketInput {
     completed_at: ticket.completedAt,
     created_by_profile: ticket.operatorProfile as CreateTicketInput["created_by_profile"],
     created_by_profile_id: ticket.createdByProfileId,
+    data_limit_mb_snapshot: ticket.dataLimitMb,
     data_remaining_bytes: ticket.dataRemainingBytes,
     deleted_at:
       ticket.status === "supprimé"
         ? ticket.deletedAt ?? ticket.routerDeletedAt ?? new Date().toISOString()
         : null,
     downloaded_bytes: ticket.downloadedBytes,
+    download_limit_snapshot: ticket.planDownloadLimit ?? null,
+    duration_minutes_snapshot: ticket.planDurationMinutes,
     expires_at: ticket.expiresAt,
     exported_at: ticket.exportedAt,
     hotspot_server_name: ticket.serverName,
@@ -143,9 +193,12 @@ export function ticketToCreateInput(ticket: TicketListItem): CreateTicketInput {
     router_deleted_at: ticket.routerDeletedAt,
     router_id: ticket.routerId,
     status: ticket.status,
+    shared_users_snapshot: ticket.planSharedUsers ?? null,
     sync_status: ticketSyncStatusToDatabase(ticket.syncStatus),
     uploaded_bytes: ticket.uploadedBytes,
+    upload_limit_snapshot: ticket.planUploadLimit ?? null,
     uptime_seconds: ticket.uptimeSeconds,
+    validity_minutes_snapshot: ticket.planValidityMinutes,
     username: ticket.code
   };
 }

@@ -211,7 +211,13 @@ export class TicketBatchRepository {
         input.last_router_sync_at ?? null,
         input.uptime_seconds ?? 0,
         input.remaining_seconds ?? null,
-        input.data_remaining_bytes ?? null
+        input.data_remaining_bytes ?? null,
+        input.duration_minutes_snapshot ?? null,
+        input.validity_minutes_snapshot ?? null,
+        input.data_limit_mb_snapshot ?? null,
+        input.download_limit_snapshot ?? null,
+        input.upload_limit_snapshot ?? null,
+        input.shared_users_snapshot ?? null
       ],
       sql: `INSERT INTO tickets (
         id, account_id, batch_id, router_id, plan_id, username, password_encrypted, status,
@@ -219,8 +225,10 @@ export class TicketBatchRepository {
         printed_count, downloaded_bytes, uploaded_bytes, mikrotik_id, created_by_profile,
         created_by_profile_id, sync_status, hotspot_server_name, mikrotik_profile_name,
         exported_at, archived_at, router_deleted_at, last_router_sync_at,
-        uptime_seconds, remaining_seconds, data_remaining_bytes
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)`
+        uptime_seconds, remaining_seconds, data_remaining_bytes,
+        duration_minutes_snapshot, validity_minutes_snapshot, data_limit_mb_snapshot,
+        download_limit_snapshot, upload_limit_snapshot, shared_users_snapshot
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36)`
     };
   }
 }

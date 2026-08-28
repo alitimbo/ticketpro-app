@@ -64,7 +64,8 @@ export function AccountPage() {
   const [error, setError] = useState<string | null>(null);
   const [isUpdatingDetails, setIsUpdatingDetails] = useState(false);
   const [isUpdatingPassword, setIsUpdatingPassword] = useState(false);
-  const isAccountActionPending = isUpdatingDetails || isUpdatingPassword;
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const isAccountActionPending = isUpdatingDetails || isUpdatingPassword || isLoggingOut;
   const localSecurityLogs = useMemo(
     () => readAccountSecurityLogs().filter((log) => log.accountId === accountSession?.accountId).slice(0, 5),
     [accountSession?.accountId, message]
@@ -272,17 +273,28 @@ export function AccountPage() {
     }
   };
 
-  const completeLogout = () => {
-    logoutAccount();
-    navigate("/login", { replace: true });
+  const completeLogout = async () => {
+    if (isLoggingOut) return;
+    setIsLoggingOut(true);
+    try {
+      await logoutAccount();
+      navigate("/login", { replace: true });
+    } finally {
+      setIsLoggingOut(false);
+    }
   };
 
   return (
     <div className="page-stack">
       <PageHeader
         actions={
-          <Button icon={LogOut} onClick={completeLogout} variant="ghost">
-            Déconnexion complète
+          <Button
+            disabled={isLoggingOut}
+            icon={isLoggingOut ? LoaderCircle : LogOut}
+            onClick={() => void completeLogout()}
+            variant="ghost"
+          >
+            {isLoggingOut ? "Déconnexion…" : "Déconnexion complète"}
           </Button>
         }
         description="Informations du compte principal connecté."

@@ -39,8 +39,20 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
     return this.delegate.getHotspotPlans();
   }
 
-  ensureVoucherLifecycleEngine() {
-    return this.delegate.ensureVoucherLifecycleEngine();
+  ensureVoucherLifecycleEngine(options?: import("../../domain/router").VoucherLifecycleEngineOptions) {
+    return this.delegate.ensureVoucherLifecycleEngine(options);
+  }
+
+  inspectManagedResources(options?: import("../../domain/router").RouterManagedResourceInspectionOptions) {
+    return this.delegate.inspectManagedResources(options);
+  }
+
+  upsertManagementAccount(config: import("../../domain/router").RouterManagementAccountConfig) {
+    return this.delegate.upsertManagementAccount(config);
+  }
+
+  applyManagementServicePolicy(policy: import("../../domain/router").RouterManagementServicePolicy) {
+    return this.delegate.applyManagementServicePolicy(policy);
   }
 
   createHotspotPlan(plan: HotspotPlanDraft) {
@@ -57,6 +69,10 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
 
   listHotspotUsers() {
     return this.delegate.listHotspotUsers();
+  }
+
+  findHotspotUser(username: string) {
+    return this.delegate.findHotspotUser(username);
   }
 
   updateHotspotUser(

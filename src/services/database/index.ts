@@ -23,12 +23,18 @@ export {
   LicenseStateRepository,
   PrintHistoryRepository,
   RouterConnectionRepository,
+  RouterManagedResourceManifestRepository,
   RouterRepository,
   RouterSnapshotRepository,
   SubscriptionPlanRepository,
+  SyncOutboxRepository,
+  assertSecretFreePayload,
+  parseOutboxPayload,
+  stableHash,
   TicketBatchRepository,
   TicketRepository,
   TicketStateHistoryRepository,
   VpnNetworkRepository,
   VpnPeerRepository
 } from "./repositories";
+export type { EnqueueSyncOperationInput, SyncOutboxHealth } from "./repositories";

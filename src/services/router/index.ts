@@ -12,6 +12,15 @@ export {
 export { synchronizePlanVouchers } from "./HotspotPlanVoucherSync";
 export type { PlanVoucherSyncResult } from "./HotspotPlanVoucherSync";
 export { createPersistedRouterService } from "./PersistedRouterService";
+export {
+  buildAuthorizedManagementCidrs,
+  generateRouterManagementPassword,
+  RouterManagementSecurityService
+} from "./RouterManagementSecurityService";
+export type {
+  AppliedRouterManagementSecurity,
+  PreparedRouterManagementSecurity
+} from "./RouterManagementSecurityService";
 export { PreparedRemoteConnectionProvider, remoteSecurityWarnings } from "./RemoteConnectionProvider";
 export { RouterAdapterError, isRouterAdapterError } from "./RouterAdapterError";
 export type { RouterAdapter } from "./RouterAdapter";

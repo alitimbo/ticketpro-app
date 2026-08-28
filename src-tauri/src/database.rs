@@ -142,6 +142,21 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "hotspot_plan_identity_audit",
         include_str!("../migrations/027_hotspot_plan_identity_audit.sql"),
     ),
+    (
+        28,
+        "router_managed_resource_manifest",
+        include_str!("../migrations/028_router_managed_resource_manifest.sql"),
+    ),
+    (
+        29,
+        "ticket_commercial_snapshots",
+        include_str!("../migrations/029_ticket_commercial_snapshots.sql"),
+    ),
+    (
+        30,
+        "sync_outbox",
+        include_str!("../migrations/030_sync_outbox.sql"),
+    ),
 ];
 
 const DATABASE_FILE_NAME: &str = "hotspot-manager.sqlite";

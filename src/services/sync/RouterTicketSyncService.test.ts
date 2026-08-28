@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ActiveHotspotUser, HotspotUser } from "../../domain/router";
+import { vi } from "vitest";
 import { RouterServiceError } from "../router";
 import { compareLocalAndRouterTickets, RouterTicketSyncService, type SyncableLocalTicket } from "./RouterTicketSyncService";
 
@@ -84,7 +85,7 @@ describe("RouterTicketSyncService", () => {
         }),
         expect.objectContaining({
           id: "ticket-2",
-          status: "erreur_sync",
+          status: "disponible",
           syncStatus: "router_missing"
         })
       ])
@@ -152,7 +153,7 @@ describe("RouterTicketSyncService", () => {
       { ...localTickets[0], mikrotikId: "*OLD", status: "disponible", syncStatus: "router_synced" as const }
     ]) {
       const report = await service.resyncTicket(ticket);
-      expect(report.updates[0]).toMatchObject({ status: "erreur_sync", syncStatus: "error" });
+      expect(report.updates[0]).toMatchObject({ status: ticket.status, syncStatus: "error" });
     }
 
     expect(createCalls).toBe(0);
@@ -275,7 +276,7 @@ describe("RouterTicketSyncService", () => {
     );
     expect(archived.updates[0]).toMatchObject({
       archivedAt: "2026-08-01T10:00:00.000Z",
-      status: "supprimé",
+      status: "archivé",
       syncStatus: "router_synced"
     });
     expect(archived.summary.routerMissing).toBe(0);
@@ -298,7 +299,7 @@ describe("RouterTicketSyncService", () => {
       archivedAt: expect.any(String),
       completedAt: "2026-08-01T11:00:00.000Z",
       routerDeletedAt: expect.any(String),
-      status: "supprimé",
+      status: "archivé",
       syncStatus: "router_synced"
     });
     expect(report.logs[0]).toMatchObject({ level: "info" });
@@ -318,7 +319,7 @@ describe("RouterTicketSyncService", () => {
       [{ ...activeUsers[0], username: localTickets[0].code }]
     );
 
-    expect(report.updates[0]).toMatchObject({ status: "erreur_sync", syncStatus: "router_missing" });
+    expect(report.updates[0]).toMatchObject({ status: "expiré", syncStatus: "router_missing" });
     expect(report.logs[0]).toMatchObject({ level: "error" });
   });
 
@@ -336,6 +337,75 @@ describe("RouterTicketSyncService", () => {
     const report = await service.resyncTicket({ ...localTickets[0], status: "expiré" });
 
     expect(createCalls).toBe(0);
-    expect(report.updates[0]).toMatchObject({ status: "erreur_sync", syncStatus: "error" });
+    expect(report.updates[0]).toMatchObject({ status: "expiré", syncStatus: "error" });
+  });
+
+  it("refuse une remise à zéro observée sur RouterOS", () => {
+    const report = compareLocalAndRouterTickets(
+      [{
+        ...localTickets[0],
+        activatedAt: "2026-08-27T10:00:00.000Z",
+        completedAt: "2026-08-27T11:00:00.000Z",
+        status: "consommé",
+        uptimeSeconds: 3600
+      }],
+      [{ ...routerUsers[0], uptime: "0s", status: "available" }],
+      []
+    );
+
+    expect(report.updates[0]).toMatchObject({
+      status: "consommé",
+      syncStatus: "conflict",
+      uptimeSeconds: 3600
+    });
+    expect(report.logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ level: "error", ticketCode: "123456" })
+    ]));
+  });
+
+  it("refuse de changer le profil d'un voucher déjà imprimé ou activé", async () => {
+    const updateHotspotUser = vi.fn(async () => routerUsers[0]);
+    const service = new RouterTicketSyncService({
+      createHotspotUser: async () => routerUsers[0],
+      listActiveUsers: async () => [],
+      listHotspotUsers: async () => routerUsers,
+      updateHotspotUser
+    });
+
+    for (const ticket of [
+      { ...localTickets[0], planProfileName: "plan-local", printedCount: 1 },
+      {
+        ...localTickets[0],
+        activatedAt: "2026-08-27T10:00:00.000Z",
+        planProfileName: "plan-local",
+        status: "activé"
+      }
+    ]) {
+      const report = await service.resolveConflict(ticket);
+      expect(report.updates[0]).toMatchObject({ status: ticket.status, syncStatus: "error" });
+    }
+    expect(updateHotspotUser).not.toHaveBeenCalled();
+  });
+
+  it("conserve l'etat metier quand le nettoyage RouterOS est en erreur", () => {
+    const report = compareLocalAndRouterTickets(
+      [{ ...localTickets[0], status: "consommÃ©", uptimeSeconds: 3600 }],
+      [{
+        ...routerUsers[0],
+        comment: "TicketPro:v1;validity=180;expires=1;state=cleanup-error;",
+        status: "error",
+        uptime: "1h"
+      }],
+      []
+    );
+
+    expect(report.updates[0]).toMatchObject({
+      status: "consommÃ©",
+      syncStatus: "error",
+      uptimeSeconds: 3600
+    });
+    expect(report.logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ level: "error", ticketCode: "123456" })
+    ]));
   });
 });

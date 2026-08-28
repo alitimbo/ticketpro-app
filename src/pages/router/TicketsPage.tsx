@@ -59,6 +59,7 @@ import {
 } from "../../services/database";
 import {
   OrganizationTicketCatalogService,
+  RouterVoucherOutboxService,
   RouterTicketSyncService,
   syncStatusLabel,
   type RouterOnlyTicket,
@@ -241,6 +242,47 @@ export function TicketsPage() {
       mounted = false;
     };
   }, [connectionRepository, database, isInitialized, isPersistent, routerId, routerRepository, session]);
+
+  useEffect(() => {
+    if (!isPersistent || !isInitialized || !session || !persistedRouterService) return undefined;
+    let disposed = false;
+    let running = false;
+    const resumeVoucherCommands = async () => {
+      if (running || disposed) return;
+      running = true;
+      try {
+        const report = await new RouterVoucherOutboxService(
+          database,
+          session.account_id,
+          persistedRouterService
+        ).resume(routerId);
+        if (!disposed && report.processed > 0) {
+          setMessage(
+            `${report.succeeded} commande(s) voucher reprise(s)`
+            + (report.retried > 0 ? `, ${report.retried} encore en attente.` : ".")
+          );
+          await organizationTicketCatalog?.publishRouter(routerId).catch(() => undefined);
+        }
+      } catch (resumeError) {
+        if (!disposed) {
+          setError(resumeError instanceof Error
+            ? resumeError.message
+            : "La reprise des commandes vouchers a échoué.");
+        }
+      } finally {
+        running = false;
+      }
+    };
+    const onFocus = () => void resumeVoucherCommands();
+    void resumeVoucherCommands();
+    const interval = window.setInterval(() => void resumeVoucherCommands(), 15_000);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [database, isInitialized, isPersistent, organizationTicketCatalog, persistedRouterService, routerId, session]);
 
   useEffect(() => {
     if (!isPersistent || !isInitialized || !session) return undefined;
@@ -691,8 +733,11 @@ export function TicketsPage() {
           completed_at: null,
           created_by_profile: session.internal_profile_role,
           created_by_profile_id: session.internal_profile_id,
+          data_limit_mb_snapshot: plan.data_limit_mb,
           deleted_at: null,
           downloaded_bytes: 0,
+          download_limit_snapshot: plan.download_limit,
+          duration_minutes_snapshot: plan.duration_minutes,
           expires_at: null,
           id: ticketId,
           ip_address: null,
@@ -705,8 +750,11 @@ export function TicketsPage() {
           printed_count: 0,
           router_id: routerId,
           status: "disponible",
+          shared_users_snapshot: plan.shared_users,
           sync_status: "synced",
           uploaded_bytes: 0,
+          upload_limit_snapshot: plan.upload_limit,
+          validity_minutes_snapshot: plan.validity_minutes ?? plan.duration_minutes,
           username: remoteTicket.code
         }]);
         const created = await ticketRepository.findById(ticketId);

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { TicketListItem } from "./ticketsPageModel";
-import { mergeTicketUpdate, ticketToCreateInput } from "./ticketSyncPersistence";
+import {
+  mergeTicketUpdate,
+  ticketHistoryTransitions,
+  ticketToCreateInput
+} from "./ticketSyncPersistence";
 
 const ticket: TicketListItem = {
   accountId: "account-1",
@@ -109,5 +113,20 @@ describe("ticketSyncPersistence", () => {
       sync_status: "synced",
       uploaded_bytes: 456
     });
+  });
+
+  it("audite separement expiration, suppression RouterOS et archivage", () => {
+    const transitions = ticketHistoryTransitions(ticket, {
+      ...ticket,
+      archivedAt: "2026-08-13T12:01:00.000Z",
+      routerDeletedAt: "2026-08-13T12:00:59.000Z",
+      status: "archivé"
+    });
+
+    expect(transitions.map((transition) => transition.nextStatus)).toEqual([
+      "expiré",
+      "supprimé_routeur",
+      "archivé"
+    ]);
   });
 });

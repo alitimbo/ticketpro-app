@@ -252,8 +252,11 @@ export type SaasTicketSnapshot = {
   created_by_role: string;
   created_by_user_id: string;
   data_remaining_bytes: number | null;
+  data_limit_mb_snapshot?: number | null;
   deleted_at: string | null;
   downloaded_bytes: number;
+  download_limit_snapshot?: string | null;
+  duration_minutes_snapshot?: number | null;
   expires_at: string | null;
   exported_at: string | null;
   hotspot_server_name: string;
@@ -269,10 +272,13 @@ export type SaasTicketSnapshot = {
   remaining_seconds: number | null;
   router_deleted_at: string | null;
   status: string;
+  shared_users_snapshot?: number | null;
   sync_status: string;
   updated_at: string;
   uploaded_bytes: number;
+  upload_limit_snapshot?: string | null;
   uptime_seconds: number;
+  validity_minutes_snapshot?: number | null;
   username: string;
 };
 

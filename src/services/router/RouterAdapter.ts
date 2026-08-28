@@ -23,11 +23,23 @@ export interface RouterAdapter {
   getHotspotServers(): Promise<HotspotServer[]>;
   upsertHotspotDns(dnsName: string): Promise<HotspotDnsConfigurationResult>;
   getHotspotPlans(): Promise<HotspotPlan[]>;
-  ensureVoucherLifecycleEngine(): Promise<import("../../domain/router").VoucherLifecycleEngineState>;
+  ensureVoucherLifecycleEngine(
+    options?: import("../../domain/router").VoucherLifecycleEngineOptions
+  ): Promise<import("../../domain/router").VoucherLifecycleEngineState>;
+  inspectManagedResources(
+    options?: import("../../domain/router").RouterManagedResourceInspectionOptions
+  ): Promise<import("../../domain/router").RouterManagedResourceManifest>;
+  upsertManagementAccount(
+    config: import("../../domain/router").RouterManagementAccountConfig
+  ): Promise<import("../../domain/router").RouterManagementAccountResult>;
+  applyManagementServicePolicy(
+    policy: import("../../domain/router").RouterManagementServicePolicy
+  ): Promise<import("../../domain/router").RouterManagementServicePolicyResult>;
   createHotspotPlan(plan: HotspotPlanDraft): Promise<HotspotPlan>;
   updateHotspotPlan(planId: string, updates: Partial<HotspotPlanDraft>): Promise<HotspotPlan>;
   deleteHotspotPlan(planId: string): Promise<void>;
   listHotspotUsers(): Promise<HotspotUser[]>;
+  findHotspotUser(username: string): Promise<HotspotUser | null>;
   updateHotspotUser(username: string, planId: string, limits?: HotspotUserLimits): Promise<HotspotUser>;
   configureHotspotUserLifecycle(username: string, validityMinutes: number | null): Promise<HotspotUser>;
   createHotspotUser(user: HotspotUserDraft): Promise<HotspotUser>;

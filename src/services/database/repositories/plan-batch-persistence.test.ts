@@ -88,8 +88,12 @@ describe("persistance plans et lots", () => {
           completed_at: null,
           created_by_profile: "operator",
           created_by_profile_id: "account-test:internal-profile-operator",
+          data_limit_mb_snapshot: 2048,
+          data_remaining_bytes: 2048 * 1024 * 1024,
           deleted_at: null,
+          download_limit_snapshot: "8M",
           downloaded_bytes: 0,
+          duration_minutes_snapshot: 120,
           expires_at: null,
           id: "ticket-test",
           ip_address: null,
@@ -101,13 +105,26 @@ describe("persistance plans et lots", () => {
           router_id: "router-test",
           status: "disponible",
           sync_status: "synced",
+          shared_users_snapshot: 1,
           uploaded_bytes: 0,
+          upload_limit_snapshot: "3M",
+          validity_minutes_snapshot: 300,
           username: "ABC123"
         }
       ]
     );
 
-    await expect(database.query("SELECT * FROM tickets WHERE batch_id = ?1", ["batch-test"])).resolves.toHaveLength(1);
+    await expect(database.query("SELECT * FROM tickets WHERE batch_id = ?1", ["batch-test"])).resolves.toEqual([
+      expect.objectContaining({
+        data_limit_mb_snapshot: 2048,
+        data_remaining_bytes: 2048 * 1024 * 1024,
+        download_limit_snapshot: "8M",
+        duration_minutes_snapshot: 120,
+        shared_users_snapshot: 1,
+        upload_limit_snapshot: "3M",
+        validity_minutes_snapshot: 300
+      })
+    ]);
     await expect(batches.findById("batch-test")).resolves.toMatchObject({
       currency: "EUR",
       price_snapshot: 800

@@ -113,8 +113,15 @@ export function validateTicketGeneration(
     return "Choisissez un routeur.";
   }
 
-  if (!plans.some((plan) => plan.id === state.selectedPlanId && plan.status === "active")) {
+  const selectedPlan = plans.find(
+    (plan) => plan.id === state.selectedPlanId && plan.status === "active"
+  );
+  if (!selectedPlan) {
     return "Choisissez un plan actif.";
+  }
+
+  if (selectedPlan.profileName.trim().toLowerCase() === "default") {
+    return "Le profil RouterOS default est réservé. Créez ou sélectionnez un forfait dédié.";
   }
 
   const enabledServers = servers.filter((server) => server.isEnabled);
@@ -190,6 +197,7 @@ export function buildTicketRecord(input: {
   mikrotikId: string | null;
   passwordSecretRef: string;
   planId: string;
+  planSnapshot?: HotspotPlan;
   routerId: string;
   serverName?: string;
   profileName?: string;
@@ -215,6 +223,13 @@ export function buildTicketRecord(input: {
     mikrotik_id: input.mikrotikId,
     password_encrypted: input.passwordSecretRef,
     plan_id: input.planId,
+    duration_minutes_snapshot: input.planSnapshot?.durationMinutes ?? null,
+    validity_minutes_snapshot:
+      input.planSnapshot?.validityMinutes ?? input.planSnapshot?.durationMinutes ?? null,
+    data_limit_mb_snapshot: input.planSnapshot?.dataLimitMb ?? null,
+    download_limit_snapshot: input.planSnapshot?.downloadLimit ?? null,
+    upload_limit_snapshot: input.planSnapshot?.uploadLimit ?? null,
+    shared_users_snapshot: input.planSnapshot?.sharedUsers ?? null,
     printed_count: input.status === "imprimé" ? 1 : 0,
     router_id: input.routerId,
     hotspot_server_name: input.serverName ?? "all",
@@ -387,6 +402,7 @@ export function userToTicketRecord(input: {
   createdByProfile: UserRole;
   passwordSecretRef?: string;
   planId?: string;
+  planSnapshot?: HotspotPlan;
   routerId: string;
   serverName?: string;
   user: HotspotUser;
@@ -399,6 +415,7 @@ export function userToTicketRecord(input: {
     mikrotikId: input.user.id,
     passwordSecretRef: input.passwordSecretRef ?? input.user.passwordSecretRef,
     planId: input.planId ?? input.user.planId,
+    planSnapshot: input.planSnapshot,
     profileName: input.user.profileName,
     routerId: input.routerId,
     serverName: input.serverName ?? input.user.serverName ?? "all",

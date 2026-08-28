@@ -180,7 +180,7 @@ export class FakeRouterAdapter implements RouterAdapter {
       host: options.host ?? "192.168.88.1",
       id: "routeur-demo",
       isReachable: true,
-      name: "Routeur dÃ©mo"
+      name: "Routeur démo"
     };
   }
 
@@ -249,6 +249,12 @@ export class FakeRouterAdapter implements RouterAdapter {
   async listHotspotUsers(): Promise<HotspotUser[]> {
     await this.guard("listHotspotUsers");
     return this.users.map((user) => ({ ...user }));
+  }
+
+  async findHotspotUser(username: string): Promise<HotspotUser | null> {
+    await this.guard("findHotspotUser");
+    const user = this.users.find((item) => item.username === username);
+    return user ? { ...user } : null;
   }
 
   async createHotspotUser(user: HotspotUserDraft): Promise<HotspotUser> {
@@ -370,14 +376,90 @@ export class FakeRouterAdapter implements RouterAdapter {
     return { ...this.findUser(username) };
   }
 
-  async ensureVoucherLifecycleEngine() {
+  async ensureVoucherLifecycleEngine(options?: import("../../domain/router").VoucherLifecycleEngineOptions) {
     await this.guard("ensureVoucherLifecycleEngine");
     this.lifecycleEngineInstalled = true;
     return {
       clockReady: true,
-      engineVersion: 1,
-      managedProfileCount: this.plans.length,
+      engineVersion: 4,
+      managedProfileCount: options?.managedProfileNames?.length ?? 0,
       schedulerEnabled: true
+    };
+  }
+
+  async inspectManagedResources(
+    options: import("../../domain/router").RouterManagedResourceInspectionOptions = {}
+  ): Promise<import("../../domain/router").RouterManagedResourceManifest> {
+    await this.guard("inspectManagedResources");
+    const managedProfileNames = Array.from(new Set(
+      (options.managedHotspotProfileNames ?? []).map((name) => name.trim()).filter(Boolean)
+    )).sort();
+    const resources: import("../../domain/router").RouterManagedResourceObservation[] = [
+      {
+        attributes: { engineVersion: 4, name: "ticketpro-voucher-expiration-v1" },
+        key: "system-script:voucher-lifecycle",
+        kind: "voucher_script",
+        matchCount: this.lifecycleEngineInstalled ? 1 : 0,
+        ownership: "ticketpro",
+        state: this.lifecycleEngineInstalled ? "present" : "missing"
+      },
+      {
+        attributes: { enabled: this.lifecycleEngineInstalled, interval: "1m" },
+        key: "system-scheduler:voucher-lifecycle",
+        kind: "voucher_scheduler",
+        matchCount: this.lifecycleEngineInstalled ? 1 : 0,
+        ownership: "ticketpro",
+        state: this.lifecycleEngineInstalled ? "present" : "missing"
+      },
+      ...managedProfileNames.map((profileName) => ({
+        attributes: { profileName },
+        key: `hotspot-user-profile-extension:${profileName}`,
+        kind: "hotspot_user_profile_extension" as const,
+        matchCount: this.plans.some((plan) => plan.profileName === profileName) ? 1 : 0,
+        ownership: "shared" as const,
+        state: this.plans.some((plan) => plan.profileName === profileName) ? "present" as const : "missing" as const
+      }))
+    ];
+    return {
+      capturedAt: new Date().toISOString(),
+      desired: {
+        authorizedManagementCidrs: Array.from(new Set(
+          (options.authorizedManagementCidrs ?? []).map((cidr) => cidr.trim()).filter(Boolean)
+        )).sort(),
+        managementUsername: options.managementUsername?.trim() || null,
+        managedHotspotProfileNames: managedProfileNames,
+        wireguardInterfaceName: options.wireguardInterfaceName?.trim() || null
+      },
+      resources,
+      routerOsVersion: this.systemInfo.routerOsVersion,
+      schemaVersion: 1,
+      warnings: []
+    };
+  }
+
+  async upsertManagementAccount(
+    config: import("../../domain/router").RouterManagementAccountConfig
+  ): Promise<import("../../domain/router").RouterManagementAccountResult> {
+    await this.guard("upsertManagementAccount");
+    return {
+      action: "created",
+      groupName: config.groupName?.trim() || "ticketpro-api",
+      username: config.username.trim()
+    };
+  }
+
+  async applyManagementServicePolicy(
+    policy: import("../../domain/router").RouterManagementServicePolicy
+  ): Promise<import("../../domain/router").RouterManagementServicePolicyResult> {
+    await this.guard("applyManagementServicePolicy");
+    if (!policy.currentPathConfirmed) {
+      throw new Error("Le chemin d'accès actuel doit être confirmé avant le durcissement.");
+    }
+    return {
+      disabledServices: policy.disableUnusedServices
+        ? ["api-ssl", "ftp", "telnet", "www", "www-ssl"]
+        : [],
+      restrictedServices: ["api", "winbox"]
     };
   }
 

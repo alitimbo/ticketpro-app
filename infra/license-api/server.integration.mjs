@@ -149,7 +149,14 @@ before(async () => {
     let assignedAddress = null;
     if (!["disable", "revoke"].includes(body.action)) {
       if (resourceId.startsWith("device:")) {
+        const previousPhysicalDeviceKey = `operator:${body.previous_public_key}`;
         const physicalDeviceKey = `operator:${body.public_key}`;
+        if (
+          body.action === "rotate_shared"
+          && hubPeerAddresses.has(previousPhysicalDeviceKey)
+        ) {
+          hubPeerAddresses.set(physicalDeviceKey, hubPeerAddresses.get(previousPhysicalDeviceKey));
+        }
         if (!hubPeerAddresses.has(physicalDeviceKey)) {
           hubPeerAddresses.set(physicalDeviceKey, `10.250.7.${nextHubOperatorAddress}/32`);
           nextHubOperatorAddress += 1;
@@ -746,9 +753,12 @@ test("les vouchers générés par un opérateur deviennent visibles par l'admini
         batch_id: "batch-catalogue-1",
         completed_at: null,
         created_at: "2026-08-13T18:10:00.000Z",
+        data_limit_mb_snapshot: 500,
         data_remaining_bytes: null,
         deleted_at: null,
         downloaded_bytes: 0,
+        download_limit_snapshot: "5M",
+        duration_minutes_snapshot: 60,
         expires_at: null,
         exported_at: null,
         hotspot_server_name: "ticketpro-hotspot",
@@ -763,12 +773,15 @@ test("les vouchers générés par un opérateur deviennent visibles par l'admini
         printed_count: 0,
         remaining_seconds: 3600,
         router_deleted_at: null,
+        shared_users_snapshot: 1,
         status: "disponible",
         sync_status: "synced",
         updated_at: "2026-08-13T18:10:01.000Z",
         uploaded_bytes: 0,
+        upload_limit_snapshot: "2M",
         uptime_seconds: 0,
-        username: "482793"
+        username: "482793",
+        validity_minutes_snapshot: 180
       }]
     }
   });
@@ -783,7 +796,57 @@ test("les vouchers générés par un opérateur deviennent visibles par l'admini
   assert.equal(ownerCatalog.payload.tickets[0].username, "482793");
   assert.equal(ownerCatalog.payload.tickets[0].created_by_email, "catalogue.operator@example.com");
   assert.equal(ownerCatalog.payload.tickets[0].password_is_username, true);
+  assert.equal(ownerCatalog.payload.tickets[0].duration_minutes_snapshot, 60);
+  assert.equal(ownerCatalog.payload.tickets[0].validity_minutes_snapshot, 180);
   assert.equal(Object.hasOwn(ownerCatalog.payload.tickets[0], "password"), false);
+
+  const exhausted = {
+    ...ownerCatalog.payload.tickets[0],
+    completed_at: "2026-08-13T19:10:00.000Z",
+    data_remaining_bytes: 0,
+    downloaded_bytes: 524_288_000,
+    remaining_seconds: 0,
+    status: "consommÃ©",
+    updated_at: "2026-08-13T19:10:01.000Z",
+    uptime_seconds: 3600
+  };
+  const advancedCatalog = await api("/v1/saas/router-ticket-catalog", {
+    token: operator.payload.session.token,
+    body: { batches: [], router_id: routerId, tickets: [exhausted] }
+  });
+  assert.equal(advancedCatalog.status, 200, JSON.stringify(advancedCatalog.payload));
+  const advancedTicket = advancedCatalog.payload.tickets.find((ticket) => ticket.username === "482793");
+  assert.equal(advancedTicket.status, "consommÃ©", JSON.stringify(advancedTicket));
+  assert.equal(advancedTicket.uptime_seconds, 3600);
+
+  const staleCatalog = await api("/v1/saas/router-ticket-catalog", {
+    token: operator.payload.session.token,
+    body: {
+      batches: [],
+      router_id: routerId,
+      tickets: [{
+        ...exhausted,
+        completed_at: null,
+        data_limit_mb_snapshot: 999,
+        data_remaining_bytes: 999,
+        downloaded_bytes: 0,
+        duration_minutes_snapshot: 999,
+        remaining_seconds: 999,
+        status: "disponible",
+        updated_at: "2026-08-13T19:11:01.000Z",
+        uptime_seconds: 0,
+        validity_minutes_snapshot: 999
+      }]
+    }
+  });
+  assert.equal(staleCatalog.status, 200, JSON.stringify(staleCatalog.payload));
+  const protectedTicket = staleCatalog.payload.tickets.find((ticket) => ticket.username === "482793");
+  assert.equal(protectedTicket.status, "consommÃ©");
+  assert.equal(protectedTicket.sync_status, "conflict");
+  assert.equal(protectedTicket.uptime_seconds, 3600);
+  assert.equal(protectedTicket.downloaded_bytes, 524_288_000);
+  assert.equal(protectedTicket.duration_minutes_snapshot, 60);
+  assert.equal(protectedTicket.validity_minutes_snapshot, 180);
 
   const synchronizedFiles = await api("/v1/saas/router-files", {
     token: operator.payload.session.token,
@@ -844,9 +907,9 @@ test("les vouchers générés par un opérateur deviennent visibles par l'admini
 
   const cleanedLogs = await api("/v1/saas/router-activity-logs/clean", {
     token: ownerToken,
-    body: { before: new Date().toISOString(), router_id: routerId }
+    body: { before: new Date(Date.now() - 1_000).toISOString(), router_id: routerId }
   });
-  assert.equal(cleanedLogs.status, 200);
+  assert.equal(cleanedLogs.status, 200, JSON.stringify(cleanedLogs.payload));
   assert.equal(cleanedLogs.payload.removed, 1);
 });
 
@@ -958,40 +1021,56 @@ test("un collaborateur invité accède au VPN sans consommer le quota de postes 
   assert.equal(collaboratorDevice.payload.device_limit_mode, "unlimited");
   assert.equal(collaboratorDevice.payload.max_devices, null);
 
+  const sharedDeviceReclaimedByOwner = await api("/v1/saas/devices/register", {
+    token: ownerToken,
+    body: {
+      installation_id: ownerDevice.payload.device.installation_id,
+      public_key: "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO=",
+      name: "PC partagé boutique",
+      platform: "windows",
+      app_version: "0.2.9"
+    }
+  });
+  assert.equal(sharedDeviceReclaimedByOwner.status, 200, JSON.stringify(sharedDeviceReclaimedByOwner.payload));
+  assert.equal(sharedDeviceReclaimedByOwner.payload.device.id, ownerDevice.payload.device.id);
+  assert.equal(sharedDeviceReclaimedByOwner.payload.device_access_scope, "owner");
+
+  const collaboratorOwnDevice = await api("/v1/saas/devices/register", {
+    token: collaborator.payload.session.token,
+    body: {
+      installation_id: "923e4567-e89b-42d3-a456-426614174003",
+      public_key: "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ=",
+      name: "PC personnel technicien",
+      platform: "windows",
+      app_version: "0.2.9"
+    }
+  });
+  assert.equal(collaboratorOwnDevice.status, 200, JSON.stringify(collaboratorOwnDevice.payload));
+  assert.equal(collaboratorOwnDevice.payload.device_access_scope, "collaborator");
+  assert.notEqual(collaboratorOwnDevice.payload.device.id, ownerDevice.payload.device.id);
+  assert.notEqual(collaboratorOwnDevice.payload.vpn.address, ownerDevice.payload.vpn.address);
+
   const ownerInventory = await api("/v1/saas/devices", {
     method: "GET",
     token: ownerToken
   });
   assert.equal(ownerInventory.status, 200);
-  assert.equal(ownerInventory.payload.devices.length, 1);
-  assert.equal(ownerInventory.payload.active_count, 0);
+  assert.equal(ownerInventory.payload.devices.length, 2);
+  assert.equal(ownerInventory.payload.active_count, 1);
   assert.equal(ownerInventory.payload.collaborator_device_count, 1);
 
   const secondOwnerDevice = await api("/v1/saas/devices/register", {
     token: ownerToken,
     body: {
-      installation_id: "923e4567-e89b-42d3-a456-426614174003",
-      public_key: "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ=",
-      name: "Deuxième PC propriétaire",
-      platform: "windows",
-      app_version: "0.2.7"
-    }
-  });
-  assert.equal(secondOwnerDevice.status, 200, JSON.stringify(secondOwnerDevice.payload));
-  assert.equal(secondOwnerDevice.payload.device_access_scope, "owner");
-
-  const thirdOwnerDevice = await api("/v1/saas/devices/register", {
-    token: ownerToken,
-    body: {
       installation_id: "a23e4567-e89b-42d3-a456-426614174004",
       public_key: "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR=",
-      name: "Troisième PC propriétaire",
+      name: "Deuxième PC propriétaire",
       platform: "windows",
-      app_version: "0.2.7"
+      app_version: "0.2.9"
     }
   });
-  assert.equal(thirdOwnerDevice.status, 409);
-  assert.equal(thirdOwnerDevice.payload.details.code, "DEVICE_LIMIT_REACHED");
+  assert.equal(secondOwnerDevice.status, 409);
+  assert.equal(secondOwnerDevice.payload.details.code, "DEVICE_LIMIT_REACHED");
 
   const disabled = await api("/v1/saas/team/members/update", {
     token: ownerToken,
@@ -1009,8 +1088,13 @@ test("un collaborateur invité accède au VPN sans consommer le quota de postes 
   assert.ok(hubRequests.some((entry) =>
     entry.url === "/v1/peers"
     && entry.body.action === "disable"
-    && entry.body.resource_id === `device:${collaboratorDevice.payload.device.id}`
+    && entry.body.resource_id === `device:${collaboratorOwnDevice.payload.device.id}`
   ));
+  assert.equal(hubRequests.some((entry) =>
+    entry.url === "/v1/peers"
+    && entry.body.action === "disable"
+    && entry.body.resource_id === `device:${ownerDevice.payload.device.id}`
+  ), false);
 });
 
 test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une session", async () => {
@@ -1374,6 +1458,8 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
   });
   assert.equal(secondOrganizationDevice.status, 200, JSON.stringify(secondOrganizationDevice.payload));
   assert.equal(secondOrganizationDevice.payload.vpn.address, firstOrganizationDevice.payload.vpn.address);
+  assert.deepEqual(firstOrganizationDevice.payload.vpn.allowed_ips, ["10.250.0.0/16"]);
+  assert.deepEqual(secondOrganizationDevice.payload.vpn.allowed_ips, ["10.250.0.0/16"]);
   assert.notEqual(secondOrganizationDevice.payload.device.id, firstOrganizationDevice.payload.device.id);
 
   const firstMembership = multiOrganizationLogin.payload.organizations.find(
@@ -1401,6 +1487,42 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
   });
   assert.equal(firstOrganizationDeviceAgain.status, 200);
   assert.equal(firstOrganizationDeviceAgain.payload.device.id, firstOrganizationDevice.payload.device.id);
+
+  const sharedRotatedPublicKey = "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT=";
+  const rotatedSharedDevice = await api("/v1/saas/devices/rotate-key", {
+    token: switchedBack.payload.session.token,
+    body: {
+      installation_id: sharedInstallationId,
+      previous_public_key: sharedPublicKey,
+      public_key: sharedRotatedPublicKey
+    }
+  });
+  assert.equal(rotatedSharedDevice.status, 200, JSON.stringify(rotatedSharedDevice.payload));
+  assert.equal(rotatedSharedDevice.payload.vpn.address, firstOrganizationDevice.payload.vpn.address);
+  assert.equal(hubRequests.at(-1).body.action, "rotate_shared");
+
+  const switchedToSecondAfterRotation = await api("/v1/saas/auth/switch-organization", {
+    token: switchedBack.payload.session.token,
+    body: { membership_id: secondMembership.membership_id }
+  });
+  assert.equal(switchedToSecondAfterRotation.status, 200);
+  const secondOrganizationDeviceAfterRotation = await api("/v1/saas/devices/register", {
+    token: switchedToSecondAfterRotation.payload.session.token,
+    body: {
+      installation_id: sharedInstallationId,
+      public_key: sharedRotatedPublicKey,
+      name: "PC multi-organisation",
+      platform: "windows",
+      app_version: "0.2.7"
+    }
+  });
+  assert.equal(
+    secondOrganizationDeviceAfterRotation.status,
+    200,
+    JSON.stringify(secondOrganizationDeviceAfterRotation.payload)
+  );
+  assert.equal(secondOrganizationDeviceAfterRotation.payload.device.id, secondOrganizationDevice.payload.device.id);
+  assert.equal(secondOrganizationDeviceAfterRotation.payload.vpn.address, firstOrganizationDevice.payload.vpn.address);
 
   const me = await api("/v1/saas/auth/me", {
     method: "GET",
@@ -1468,7 +1590,7 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
   assert.equal(registeredDesktop.status, 200);
   assert.match(registeredDesktop.payload.vpn.address, /^10\.250\.7\.\d+\/32$/);
   assert.equal(registeredDesktop.payload.vpn.endpoint, "vpn.integration.test");
-  assert.deepEqual(registeredDesktop.payload.vpn.allowed_ips, ["10.250.7.0/24"]);
+  assert.deepEqual(registeredDesktop.payload.vpn.allowed_ips, ["10.250.0.0/16"]);
   assert.equal(hubRequests.at(-1).body.peer_type, "operator");
   assert.match(hubRequests.at(-1).body.resource_id, /^device:/);
   assert.ok(hubRequests.some((entry) =>
@@ -1567,7 +1689,7 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
   assert.equal(rotatedDesktopKey.status, 200);
   assert.equal(rotatedDesktopKey.payload.device.vpn.key_version, 2);
   assert.equal(rotatedDesktopKey.payload.device.vpn.config_version, 2);
-  assert.equal(hubRequests.at(-1).body.action, "rotate");
+  assert.equal(hubRequests.at(-1).body.action, "rotate_shared");
 
   const retriedDesktopRotation = await api("/v1/saas/devices/rotate-key", {
     token: sessionToken,
@@ -1680,7 +1802,8 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
   assert.equal(recoveredLastOwnerDevice.payload.device.status, "active");
   assert.equal(recoveredLastOwnerDevice.payload.device.vpn.key_version, 3);
   assert.equal(recoveredLastOwnerDevice.payload.active_device_count, 1);
-  assert.equal(hubRequests.at(-1).body.action, "rotate");
+  assert.equal(hubRequests.at(-1).body.action, "rotate_shared");
+  assert.equal(hubRequests.at(-1).body.allow_revoked_current, true);
 
   const retriedOwnerDeviceRecovery = await api("/v1/saas/devices/recover", {
     token: sessionToken,

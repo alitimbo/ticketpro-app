@@ -1,6 +1,7 @@
 import type { TicketRecord } from "../../domain/database";
 import type { HotspotPlanDraft, HotspotUserLimits } from "../../domain/router";
 import type { RouterService } from "./RouterService";
+import { canApplyPlanChangeToVoucher } from "../tickets/TicketLifecyclePolicy";
 
 type PlanVoucherRouterService = Pick<
   RouterService,
@@ -8,14 +9,15 @@ type PlanVoucherRouterService = Pick<
 >;
 
 export type PlanVoucherSyncResult = {
+  immutableTicketsSkipped: number;
   linkedLocalTickets: number;
   missingFromRouter: number;
   updatedRouterUsers: number;
 };
 
 /**
- * Applies the enforceable parts of a plan to vouchers that still exist on
- * RouterOS. Historical/expired tickets remain untouched in SQLite.
+ * Applies a plan change only to pristine, never issued vouchers. Printed,
+ * exported, activated or consumed vouchers keep their commercial snapshot.
  */
 export async function synchronizePlanVouchers(input: {
   draft: HotspotPlanDraft;
@@ -26,7 +28,8 @@ export async function synchronizePlanVouchers(input: {
   const linkedTickets = input.localTickets.filter(
     (ticket) => ticket.plan_id === input.localPlanId && ticket.deleted_at === null
   );
-  const linkedUsernames = new Set(linkedTickets.map((ticket) => ticket.username));
+  const mutableTickets = linkedTickets.filter(canApplyPlanChangeToVoucher);
+  const linkedUsernames = new Set(mutableTickets.map((ticket) => ticket.username));
   const routerUsers = await input.service.listHotspotUsers();
   const targets = routerUsers.filter((user) => linkedUsernames.has(user.username));
   const limits: HotspotUserLimits = {
@@ -43,8 +46,9 @@ export async function synchronizePlanVouchers(input: {
   }
 
   return {
+    immutableTicketsSkipped: linkedTickets.length - mutableTickets.length,
     linkedLocalTickets: linkedTickets.length,
-    missingFromRouter: linkedTickets.length - targets.length,
+    missingFromRouter: mutableTickets.length - targets.length,
     updatedRouterUsers: targets.length
   };
 }

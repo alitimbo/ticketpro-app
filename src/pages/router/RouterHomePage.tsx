@@ -26,16 +26,19 @@ import type {
   RouterHealth,
   RouterSystemInfo
 } from '../../domain/router'
+import type { RouterRecord } from '../../domain/database'
 import { useAuth } from '../../app/auth/AuthProvider'
 import {
   GeneratedFileRepository,
   HotspotPlanRepository,
   RouterConnectionRepository,
+  RouterManagedResourceManifestRepository,
   RouterRepository,
   TicketRepository,
   useAppDatabase
 } from '../../services/database'
 import {
+  buildAuthorizedManagementCidrs,
   createPersistedRouterService,
   FakeRouterAdapter,
   RouterService,
@@ -48,6 +51,8 @@ import {
 } from '../../services/access'
 import {
   compareLocalAndRouterTickets,
+  SyncObservabilityService,
+  type SyncObservabilityReport,
   type TicketSyncSummary
 } from '../../services/sync'
 import {
@@ -120,8 +125,16 @@ export function RouterHomePage () {
     () => new GeneratedFileRepository(database),
     [database]
   )
+  const managedResourceManifestRepository = useMemo(
+    () => new RouterManagedResourceManifestRepository(database),
+    [database]
+  )
   const accessPolicyService = useMemo(
     () => new RouterAccessPolicyService(database),
+    [database]
+  )
+  const syncObservabilityService = useMemo(
+    () => new SyncObservabilityService(database),
     [database]
   )
   const [dashboard, setDashboard] = useState<RouterDashboardData | null>(null)
@@ -131,7 +144,15 @@ export function RouterHomePage () {
   const [cpuLoad, setCpuLoad] = useState(0)
   const [connectionMessage, setConnectionMessage] =
     useState('Connexion en cours')
+  const [connectionStatus, setConnectionStatus] =
+    useState<'active' | 'offline' | 'warning'>('warning')
   const [syncSummary, setSyncSummary] = useState<TicketSyncSummary | null>(null)
+  const [syncReport, setSyncReport] =
+    useState<SyncObservabilityReport | null>(null)
+  const [managedProfileNames, setManagedProfileNames] = useState<string[]>([])
+  const [repairStatus, setRepairStatus] =
+    useState<'idle' | 'loading' | 'success' | 'error'>('idle')
+  const [repairMessage, setRepairMessage] = useState<string | null>(null)
   const [service, setService] = useState<RouterService | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [loadStatus, setLoadStatus] = useState<'loading' | 'ready' | 'error'>(
@@ -142,6 +163,8 @@ export function RouterHomePage () {
     ? getRouterQuickActions(session.internal_profile_role, routerId)
     : []
   const canCreateTickets = userCan('router.tickets.generate')
+  const canRepairVoucherLifecycle =
+    userCan('router.settings') || userCan('router.settings.manage')
 
   useEffect(() => {
     let isMounted = true
@@ -160,12 +183,15 @@ export function RouterHomePage () {
         let loadedAccessPolicy = structuredClone(defaultRouterAccessPolicy)
         let generatedPdfCount = 0
         let routerName = 'Routeur de démonstration'
+        let loadedManagedProfileNames: string[] = []
+        let persistedRouter: RouterRecord | null = null
 
         if (isPersistent) {
           const router = await routerRepository.findById(routerId)
           if (!router || router.account_id !== routerSession.account_id) {
             throw new Error('Routeur introuvable pour cette organisation.')
           }
+          persistedRouter = router
           const [connections, ticketRecords, planRecords, generatedFiles] =
             await Promise.all([
             connectionRepository.listByRouter(routerId),
@@ -184,6 +210,10 @@ export function RouterHomePage () {
             .catch(() => structuredClone(defaultRouterAccessPolicy))
           loadedAccessPolicy = policy
           const plansById = new Map(planRecords.map(plan => [plan.id, plan]))
+          loadedManagedProfileNames = planRecords
+            .filter(plan => !plan.deleted_at)
+            .map(plan => plan.mikrotik_profile_name?.trim() || plan.name.trim())
+            .filter(Boolean)
           localTickets = ticketRecords.map(ticket =>
             ticketFromRecord(
               ticket,
@@ -220,12 +250,23 @@ export function RouterHomePage () {
           activeService.getRouterHealth(),
           activeService.getRouterDateTime()
         ])
+        const observedAt = new Date().toISOString()
+        const observabilityReport = isPersistent
+          ? await syncObservabilityService.inspect({
+              accountId: routerSession.account_id,
+              liveRouterObservedAt: observedAt,
+              liveTicketsObservedAt: observedAt,
+              now: observedAt,
+              routerId
+            }).catch(() => null)
+          : null
 
         if (!isMounted) {
           return
         }
 
         setService(activeService)
+        setManagedProfileNames(loadedManagedProfileNames)
         setAccessPolicy(loadedAccessPolicy)
         setDashboard({
           activeUsers,
@@ -244,13 +285,63 @@ export function RouterHomePage () {
         )
         setCpuLoad(health.cpuLoad)
         setConnectionMessage('Routeur connecté')
+        setConnectionStatus('active')
+        setSyncReport(observabilityReport)
         setLoadError(null)
         setLoadStatus('ready')
+
+        if (isPersistent && persistedRouter) {
+          const manifestRouter = persistedRouter
+          void activeService.inspectManagedResources({
+            authorizedManagementCidrs:
+              manifestRouter.username === 'ticketpro-api'
+                ? buildAuthorizedManagementCidrs(manifestRouter.local_ip)
+                : [],
+            managementUsername:
+              manifestRouter.username === 'ticketpro-api'
+                ? manifestRouter.username
+                : null,
+            managedHotspotProfileNames: loadedManagedProfileNames,
+            wireguardInterfaceName:
+              manifestRouter.connection_mode === 'vpn'
+                ? 'ticketpro-vpn'
+                : null
+          }).then(async manifest => {
+            await managedResourceManifestRepository.save(
+              routerSession.account_id,
+              routerId,
+              manifest
+            )
+            return syncObservabilityService.inspect({
+              accountId: routerSession.account_id,
+              liveRouterObservedAt: observedAt,
+              liveTicketsObservedAt: observedAt,
+              now: new Date().toISOString(),
+              routerId
+            })
+          }).then(report => {
+            if (isMounted) setSyncReport(report)
+          }).catch(async error => {
+            await managedResourceManifestRepository
+              .markError(routerSession.account_id, routerId, error)
+              .catch(() => undefined)
+            if (!isMounted) return
+            const report = await syncObservabilityService.inspect({
+              accountId: routerSession.account_id,
+              liveRouterObservedAt: observedAt,
+              liveTicketsObservedAt: observedAt,
+              now: new Date().toISOString(),
+              routerId
+            }).catch(() => null)
+            if (isMounted && report) setSyncReport(report)
+          })
+        }
       } catch (error) {
         if (isMounted) {
           setDashboard(null)
           setService(null)
           setConnectionMessage('Connexion impossible')
+          setConnectionStatus('offline')
           setLoadError(
             error instanceof Error
               ? error.message
@@ -273,11 +364,13 @@ export function RouterHomePage () {
     generatedFileRepository,
     isInitialized,
     isPersistent,
+    managedResourceManifestRepository,
     planRepository,
     reloadToken,
     routerId,
     routerRepository,
     routerSession,
+    syncObservabilityService,
     ticketRepository
   ])
 
@@ -293,32 +386,82 @@ export function RouterHomePage () {
         service.listHotspotUsers()
       ])
         .then(([health, activeUsers, users]) => {
+          const observedAt = new Date().toISOString()
           setCpuLoad(health.cpuLoad)
           setDashboard(current =>
             current ? { ...current, activeUsers, health, users } : current
           )
           setConnectionMessage('Routeur connecté')
+          setConnectionStatus('active')
+          if (isPersistent && routerSession) {
+            void syncObservabilityService.inspect({
+              accountId: routerSession.account_id,
+              liveRouterObservedAt: observedAt,
+              liveTicketsObservedAt: observedAt,
+              now: observedAt,
+              routerId
+            }).then(setSyncReport).catch(() => undefined)
+          }
         })
-        .catch(() =>
+        .catch(() => {
           setConnectionMessage('Actualisation du routeur impossible')
-        )
+          setConnectionStatus('offline')
+          if (isPersistent && routerSession) {
+            void syncObservabilityService.inspect({
+              accountId: routerSession.account_id,
+              now: new Date().toISOString(),
+              routerId
+            }).then(setSyncReport).catch(() => undefined)
+          }
+        })
     }, 15_000)
 
     return () => window.clearInterval(interval)
-  }, [service])
+  }, [isPersistent, routerId, routerSession, service, syncObservabilityService])
 
   const testRouter = async () => {
     if (!service) {
       setConnectionMessage('Routeur indisponible')
+      setConnectionStatus('offline')
       return
     }
 
     try {
       await service.testConnection()
       setConnectionMessage('Routeur connecté')
+      setConnectionStatus('active')
     } catch (error) {
+      setConnectionStatus('offline')
       setConnectionMessage(
         error instanceof RouterServiceError ? error.message : 'Test impossible.'
+      )
+    }
+  }
+
+  const repairVoucherLifecycle = async () => {
+    if (!service || managedProfileNames.length === 0) {
+      setRepairStatus('error')
+      setRepairMessage('Aucun profil TicketPro ne peut être réparé sur ce routeur.')
+      return
+    }
+
+    setRepairStatus('loading')
+    setRepairMessage('Réparation des profils Hotspot en cours…')
+    try {
+      const result = await service.ensureVoucherLifecycleEngine({
+        managedProfileNames
+      })
+      setRepairStatus('success')
+      setRepairMessage(
+        `${result.managedProfileCount} profil(s) Hotspot vérifié(s) et réparé(s).`
+      )
+      setReloadToken(current => current + 1)
+    } catch (error) {
+      setRepairStatus('error')
+      setRepairMessage(
+        error instanceof RouterServiceError
+          ? error.message
+          : 'La réparation RouterOS a échoué.'
       )
     }
   }
@@ -373,6 +516,9 @@ export function RouterHomePage () {
         syncSummary.error > 0 ||
         syncSummary.localMissing > 0 ||
         syncSummary.routerMissing > 0)
+  )
+  const hasManifestDrift = Boolean(
+    syncReport?.alerts.some(alert => alert.code === 'MANIFEST_DRIFT')
   )
   const showDeviceProtectionNotice =
     userCan('router.settings') &&
@@ -441,7 +587,7 @@ export function RouterHomePage () {
           </div>
         </div>
         <div className='router-hero__states'>
-          <StatusDot label={connectionMessage} status='active' />
+          <StatusDot label={connectionMessage} status={connectionStatus} />
           <Badge status={hotspotEnabled ? 'success' : 'warning'}>
             {hotspotEnabled ? 'Hotspot actif' : 'Hotspot à vérifier'}
           </Badge>
@@ -600,6 +746,88 @@ export function RouterHomePage () {
               }
               title='Synchronisation tickets'
             />
+          </div>
+        </Card>
+
+        <Card className='span-4' title='Synchronisation et diagnostic'>
+          <div className='data-list'>
+            <DataListItem
+              description={
+                syncReport
+                  ? `${syncReport.queue.pending + syncReport.queue.processing + syncReport.queue.retry} en attente, ${syncReport.queue.failed + syncReport.queue.conflict} à vérifier.${syncReport.incidents[0] ? ` Dernière trace : ${syncReport.incidents[0].correlationId}.` : ''}`
+                  : 'Diagnostic local en cours de préparation.'
+              }
+              icon={RefreshCw}
+              meta={
+                <Badge status={syncReport?.status ?? 'warning'}>
+                  {syncReport?.statusLabel ?? 'Lecture…'}
+                </Badge>
+              }
+              title='File durable'
+            />
+            <DataListItem
+              description={
+                syncReport?.freshness.find(item => item.id === 'router')?.message ??
+                "Aucune mesure de fraîcheur n'est encore disponible."
+              }
+              icon={Gauge}
+              meta={
+                <Badge
+                  status={
+                    syncReport?.freshness.find(item => item.id === 'router')
+                      ?.status ?? 'warning'
+                  }
+                >
+                  {syncReport?.freshness.find(item => item.id === 'router')
+                    ?.status === 'success'
+                    ? 'Récent'
+                    : 'À vérifier'}
+                </Badge>
+              }
+              title='Fraîcheur RouterOS'
+            />
+            {syncReport?.alerts.length ? (
+              syncReport.alerts.slice(0, 5).map(alert => (
+                <DataListItem
+                  description={alert.message}
+                  icon={AlertTriangle}
+                  key={alert.code}
+                  meta={
+                    <Badge status={alert.status}>
+                      {alert.status === 'error' ? 'Action requise' : 'À vérifier'}
+                    </Badge>
+                  }
+                  title={alert.title}
+                />
+              ))
+            ) : (
+              <DataListItem
+                description='Aucun conflit ni échec de synchronisation détecté.'
+                icon={AlertTriangle}
+                meta={<Badge status='success'>Aucune alerte</Badge>}
+                title='Contrôle de cohérence'
+              />
+            )}
+            <div className='button-row'>
+              <span className='muted-inline'>
+                {!canRepairVoucherLifecycle
+                  ? "Réparation réservée au propriétaire ou à un Admin de l'organisation."
+                  : repairMessage ??
+                    (hasManifestDrift
+                      ? 'TicketPro peut réparer ses extensions sans modifier les scripts externes.'
+                      : 'Le cycle des vouchers est conforme au dernier contrôle. Vous pouvez le revérifier à tout moment.')}
+              </span>
+              <Button
+                disabled={!canRepairVoucherLifecycle || repairStatus === 'loading'}
+                icon={RefreshCw}
+                onClick={() => void repairVoucherLifecycle()}
+                variant={repairStatus === 'error' ? 'danger' : 'secondary'}
+              >
+                {repairStatus === 'loading'
+                  ? 'Réparation…'
+                  : 'Réparer le cycle des vouchers'}
+              </Button>
+            </div>
           </div>
         </Card>
       </div>

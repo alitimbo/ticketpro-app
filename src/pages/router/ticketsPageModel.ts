@@ -43,6 +43,9 @@ export type TicketListItem = {
   createdByProfileId: string;
   planDurationMinutes: number;
   planValidityMinutes: number;
+  planDownloadLimit?: string | null;
+  planUploadLimit?: string | null;
+  planSharedUsers?: number | null;
   planId: string;
   planProfileName?: string;
   planName: string;
@@ -80,7 +83,7 @@ export function ticketFromRecord(
     code: record.username,
     completedAt: record.completed_at,
     createdAt: record.created_at,
-    dataLimitMb: plan?.data_limit_mb ?? null,
+    dataLimitMb: record.data_limit_mb_snapshot ?? plan?.data_limit_mb ?? null,
     dataRemainingBytes: record.data_remaining_bytes ?? null,
     deletedAt: record.deleted_at,
     downloadedBytes: record.downloaded_bytes,
@@ -97,8 +100,16 @@ export function ticketFromRecord(
     operatorProfile: record.created_by_profile,
     passwordSecretRef: record.password_encrypted,
     createdByProfileId: record.created_by_profile_id,
-    planDurationMinutes: plan?.duration_minutes ?? 0,
-    planValidityMinutes: plan?.validity_minutes ?? plan?.duration_minutes ?? 0,
+    planDurationMinutes: record.duration_minutes_snapshot ?? plan?.duration_minutes ?? 0,
+    planValidityMinutes:
+      record.validity_minutes_snapshot
+      ?? plan?.validity_minutes
+      ?? record.duration_minutes_snapshot
+      ?? plan?.duration_minutes
+      ?? 0,
+    planDownloadLimit: record.download_limit_snapshot ?? plan?.download_limit ?? null,
+    planUploadLimit: record.upload_limit_snapshot ?? plan?.upload_limit ?? null,
+    planSharedUsers: record.shared_users_snapshot ?? plan?.shared_users ?? null,
     planId: record.plan_id,
     planProfileName: plan?.mikrotik_profile_name ?? undefined,
     planName: plan?.name ?? "Plan supprimé",

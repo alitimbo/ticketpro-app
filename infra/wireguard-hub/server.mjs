@@ -7,6 +7,7 @@ import {
   isIdempotentActivePeer,
   isPeerLimitReached,
   revokeDuplicateActivePeers,
+  rotateSharedPeers,
   selectActivePeersToReplace,
   selectRevokedPeerForRecovery
 } from "./peer-lifecycle.mjs";
@@ -106,13 +107,16 @@ const server = http.createServer(async (request, response) => {
       const accountId = requireAccountId(body);
       const tenant = tenants[accountId];
       if (!tenant) throw new HubError(404, "tenant_not_found");
-      requireTenantOrMaster(request, accountId);
+      if (body.action === "rotate_shared") requireMaster(request);
+      else requireTenantOrMaster(request, accountId);
       validatePublicKey(body.public_key);
-      if (!["upsert", "disable", "revoke", "rotate"].includes(body.action)) {
+      if (!["upsert", "disable", "revoke", "rotate", "rotate_shared"].includes(body.action)) {
         throw new HubError(400, "invalid_action");
       }
       const result = await withPeerMutationLock("wireguard-global", () =>
-        mutatePeer(accountId, tenant, body)
+        body.action === "rotate_shared"
+          ? mutateSharedPeer(accountId, body)
+          : mutatePeer(accountId, tenant, body)
       );
       json(response, 200, result);
     } catch (error) {
@@ -291,6 +295,58 @@ async function mutatePeer(accountId, tenant, body) {
     replaced_public_keys: replacedPeers.map((replaced) => replaced.public_key),
     status: "active"
   };
+}
+
+async function mutateSharedPeer(accountId, body) {
+  const publicKey = String(body.public_key);
+  const previousPublicKey = String(body.previous_public_key ?? "");
+  const peerType = body.peer_type === "operator" ? "operator" : "router";
+  const resourceId = normalizeResourceId(body.resource_id);
+  validatePublicKey(previousPublicKey);
+  if (previousPublicKey === publicKey) {
+    throw new HubError(400, "rotation_requires_distinct_previous_key");
+  }
+
+  const snapshot = JSON.stringify(tenants);
+  try {
+    const result = rotateSharedPeers(tenants, {
+      accountId,
+      allowRevokedCurrent: body.allow_revoked_current === true,
+      peerType,
+      previousPublicKey,
+      publicKey,
+      resourceId
+    });
+    await runWireGuard(["set", interfaceName, "peer", previousPublicKey, "remove"]);
+    await syncWireGuardPeers();
+    await syncTenantFirewall();
+    await persistTenants();
+    return {
+      account_id: accountId,
+      assigned_address: result.currentPeer.assigned_address,
+      public_key: publicKey,
+      resource_id: resourceId,
+      rotated_tenant_count: new Set(result.rotated.map((entry) => entry.account_id)).size,
+      status: "active"
+    };
+  } catch (error) {
+    restoreTenantsSnapshot(snapshot);
+    try {
+      await syncWireGuardPeers();
+      await syncTenantFirewall();
+      await persistTenants();
+    } catch {
+      // La boucle de réconciliation au redémarrage reprendra le desired state persistant.
+    }
+    if (error instanceof HubError) throw error;
+    throw new HubError(409, error instanceof Error ? error.message : "shared_rotation_failed");
+  }
+}
+
+function restoreTenantsSnapshot(snapshot) {
+  const restored = JSON.parse(snapshot);
+  for (const accountId of Object.keys(tenants)) delete tenants[accountId];
+  Object.assign(tenants, restored);
 }
 
 async function withPeerMutationLock(mutationKey, mutation) {

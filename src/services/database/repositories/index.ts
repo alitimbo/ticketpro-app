@@ -13,7 +13,19 @@ export type { HotspotPlanMutationContext } from "./HotspotPlanRepository";
 export { RouterRepository } from "./RouterRepository";
 export { RouterSnapshotRepository } from "./RouterSnapshotRepository";
 export { SubscriptionPlanRepository } from "./SubscriptionPlanRepository";
+export {
+  SyncOutboxRepository,
+  assertSecretFreePayload,
+  parseOutboxPayload,
+  stableHash
+} from "./SyncOutboxRepository";
+export type {
+  EnqueueSyncOperationInput,
+  SyncOutboxHealth
+} from "./SyncOutboxRepository";
 export { RouterConnectionRepository } from "./RouterConnectionRepository";
+export { RouterManagedResourceManifestRepository } from "./RouterManagedResourceManifestRepository";
+export type { StoredRouterManagedResourceManifest } from "./RouterManagedResourceManifestRepository";
 export { createTableRepository, TableRepository } from "./TableRepository";
 export { TicketBatchRepository } from "./TicketBatchRepository";
 export { TicketRepository } from "./TicketRepository";

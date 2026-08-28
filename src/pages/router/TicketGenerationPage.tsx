@@ -31,7 +31,11 @@ import {
   useAppDatabase
 } from "../../services/database";
 import { reconcileRouterPlanCatalog } from "../../services/recovery";
-import { OrganizationOperationsSyncService, OrganizationTicketCatalogService } from "../../services/sync";
+import {
+  OrganizationOperationsSyncService,
+  OrganizationTicketCatalogService,
+  RouterVoucherOutboxService
+} from "../../services/sync";
 import {
   buildGeneratedTicketPdfRecord,
   generateTicketPdf,
@@ -79,12 +83,14 @@ import { planFromRecord } from "./plansPageModel";
 import {
   protectTicketPassword,
   resolveTicketPasswordValue,
+  buildVoucherBatchOwnershipComment,
   defaultTicketDisplaySettings,
   normalizeTicketDisplaySettings,
   resolveTicketTitle,
   TicketDisplaySettingsService,
   type TicketDisplaySettings,
-  TicketCodeGenerator
+  TicketCodeGenerator,
+  voucherBelongsToBatch
 } from "../../services/tickets";
 import { TauriFileService } from "../../services/files";
 import { TicketDisplaySettingsForm } from "./TicketDisplaySettingsForm";
@@ -289,6 +295,47 @@ export function TicketGenerationPage() {
       mounted = false;
     };
   }, [connectionRepository, isInitialized, isPersistent, routerId, routerRepository, session]);
+
+  useEffect(() => {
+    if (!isPersistent || !isInitialized || !session || !persistedRouterService) return undefined;
+    let disposed = false;
+    let running = false;
+    const resumeVoucherCommands = async () => {
+      if (running || disposed) return;
+      running = true;
+      try {
+        const report = await new RouterVoucherOutboxService(
+          database,
+          session.account_id,
+          persistedRouterService
+        ).resume(routerId);
+        if (!disposed && report.processed > 0) {
+          setMessage(
+            `${report.succeeded} commande(s) voucher reprise(s)`
+            + (report.retried > 0 ? `, ${report.retried} encore en attente.` : ".")
+          );
+          await organizationTicketCatalog?.publishRouter(routerId).catch(() => undefined);
+        }
+      } catch (resumeError) {
+        if (!disposed) {
+          setError(resumeError instanceof Error
+            ? resumeError.message
+            : "La reprise des commandes vouchers a échoué.");
+        }
+      } finally {
+        running = false;
+      }
+    };
+    const onFocus = () => void resumeVoucherCommands();
+    void resumeVoucherCommands();
+    const interval = window.setInterval(() => void resumeVoucherCommands(), 15_000);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [database, isInitialized, isPersistent, organizationTicketCatalog, persistedRouterService, routerId, session]);
 
   const refreshRouterCatalog = async () => {
     const requestId = ++catalogRequestIdRef.current;
@@ -627,7 +674,9 @@ export function TicketGenerationPage() {
 
     try {
       const generationService = await getRouterServiceForAction();
-      await generationService.ensureVoucherLifecycleEngine();
+      await generationService.ensureVoucherLifecycleEngine({
+        managedProfileNames: [selectedPlan.profileName]
+      });
       const [existingUsers, existingLocalTickets, remotePlans, remoteServers] = await Promise.all([
         generationService.listHotspotUsers(),
         isPersistent
@@ -712,10 +761,11 @@ export function TicketGenerationPage() {
           mikrotikId: null,
           passwordSecretRef: credential.passwordSecretRef,
           planId: state.selectedPlanId,
+          planSnapshot: selectedPlan,
           profileName: selectedPlan.profileName,
           routerId: state.selectedRouterId,
           serverName: selectedRemoteServer,
-          status: "erreur_sync",
+          status: "disponible",
           syncStatus: "pending",
           username: credential.username
         })
@@ -741,10 +791,27 @@ export function TicketGenerationPage() {
         await batchRepository.createWithTickets(pendingBatch, pendingTickets);
       }
 
+      const voucherOutbox = isPersistent
+        ? new RouterVoucherOutboxService(database, session.account_id, generationService)
+        : null;
+      const voucherOperations = voucherOutbox
+        ? await voucherOutbox.enqueueTickets(pendingTickets)
+        : new Map();
+
       await forEachWithConcurrency(generatedCredentials, 3, async (credential, credentialIndex) => {
+        const pendingTicket = pendingTickets[credentialIndex];
+        const voucherOperation = voucherOperations.get(pendingTicket.id);
+        let operationClaimed = false;
         try {
+          if (voucherOutbox && voucherOperation) {
+            const claimed = await voucherOutbox.begin(voucherOperation.id);
+            if (!claimed) {
+              throw new Error(`La commande durable du voucher ${credential.username} est déjà en cours.`);
+            }
+            operationClaimed = true;
+          }
           const createdUser = await generationService.createHotspotUser({
-            comment: `Lot ${batchId}`,
+            comment: buildVoucherBatchOwnershipComment(batchId),
             limitBytesTotal: selectedPlan.dataLimitMb === null
               ? null
               : Math.round(selectedPlan.dataLimitMb * 1024 * 1024),
@@ -764,10 +831,17 @@ export function TicketGenerationPage() {
             routerId: state.selectedRouterId,
             passwordSecretRef: credential.passwordSecretRef,
             planId: state.selectedPlanId,
+            planSnapshot: selectedPlan,
             user: createdUser
           });
           succeededTickets.push(succeededTicket);
-          if (isPersistent) await ticketRepository.update(succeededTicket);
+          if (isPersistent) {
+            if (voucherOutbox && voucherOperation) {
+              await voucherOutbox.complete(voucherOperation.id, succeededTicket);
+            } else {
+              await ticketRepository.update(succeededTicket);
+            }
+          }
         } catch (creationError) {
           const creationErrorMessage = readGenerationError(
             creationError,
@@ -778,15 +852,17 @@ export function TicketGenerationPage() {
 
           if (isPersistent) {
             try {
-              recoveredUser = (await generationService.listHotspotUsers()).find(
-                (user) => user.username === credential.username
-              ) ?? null;
+              recoveredUser = await generationService.findHotspotUser(credential.username);
             } catch {
               recoveredUser = null;
             }
           }
 
-          if (recoveredUser && recoveredUser.profileName === selectedPlan.profileName) {
+          if (
+            recoveredUser
+            && recoveredUser.profileName === selectedPlan.profileName
+            && voucherBelongsToBatch(recoveredUser.comment, batchId)
+          ) {
             const succeededTicket = userToTicketRecord({
               accountId: session.account_id,
               batchId,
@@ -794,15 +870,23 @@ export function TicketGenerationPage() {
               createdByProfile: session.internal_profile_role,
               passwordSecretRef: credential.passwordSecretRef,
               planId: state.selectedPlanId,
+              planSnapshot: selectedPlan,
               routerId: state.selectedRouterId,
               user: recoveredUser
             });
             succeededTickets.push(succeededTicket);
-            if (isPersistent) await ticketRepository.update(succeededTicket);
+            if (voucherOutbox && voucherOperation) {
+              await voucherOutbox.complete(voucherOperation.id, succeededTicket);
+            } else if (isPersistent) {
+              await ticketRepository.update(succeededTicket);
+            }
             return;
           }
 
-          failedTickets.push(pendingTickets[credentialIndex]);
+          if (voucherOutbox && voucherOperation && operationClaimed) {
+            await voucherOutbox.defer(voucherOperation.id, creationError);
+          }
+          failedTickets.push(pendingTicket);
           setLogs((current) => [
             ...current,
             {

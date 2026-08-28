@@ -67,9 +67,54 @@ describe("synchronizePlanVouchers", () => {
     });
     expect(configureHotspotUserLifecycle).toHaveBeenCalledWith("100001", 300);
     expect(result).toEqual({
+      immutableTicketsSkipped: 0,
       linkedLocalTickets: 2,
       missingFromRouter: 1,
       updatedRouterUsers: 1
     });
+  });
+
+  it("ne modifie jamais les vouchers déjà imprimés, activés ou consommés", async () => {
+    const updateHotspotUser = vi.fn(async () => ({} as never));
+    const configureHotspotUserLifecycle = vi.fn(async () => ({} as never));
+    const issuedTickets = [
+      { ...ticket("printed"), printed_count: 1 },
+      { ...ticket("active"), activated_at: "2026-08-27T10:00:00.000Z", status: "activé" },
+      { ...ticket("used"), downloaded_bytes: 1, status: "consommé" }
+    ];
+
+    const result = await synchronizePlanVouchers({
+      draft: {
+        dataLimitMb: 500,
+        downloadLimit: "5M",
+        durationMinutes: 60,
+        name: "Plan modifié",
+        priceHint: 100,
+        profileName: "plan-modifie",
+        sharedUsers: 1,
+        status: "active",
+        uploadLimit: "2M",
+        validityMinutes: 180
+      },
+      localPlanId: "plan-local",
+      localTickets: issuedTickets,
+      service: {
+        configureHotspotUserLifecycle,
+        listHotspotUsers: vi.fn(async () => issuedTickets.map((item, index) => ({
+          id: `*${index}`,
+          username: item.username
+        })) as never),
+        updateHotspotUser
+      }
+    });
+
+    expect(result).toEqual({
+      immutableTicketsSkipped: 3,
+      linkedLocalTickets: 3,
+      missingFromRouter: 0,
+      updatedRouterUsers: 0
+    });
+    expect(updateHotspotUser).not.toHaveBeenCalled();
+    expect(configureHotspotUserLifecycle).not.toHaveBeenCalled();
   });
 });

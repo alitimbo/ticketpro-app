@@ -4,6 +4,7 @@ import {
   isIdempotentActivePeer,
   isPeerLimitReached,
   revokeDuplicateActivePeers,
+  rotateSharedPeers,
   selectActivePeersToReplace,
   selectRevokedPeerForRecovery
 } from "./peer-lifecycle.mjs";
@@ -80,6 +81,54 @@ test("une rotation de récupération cible uniquement la clé révoquée du mêm
     previousPublicKey: "revoked-device-key",
     resourceId: "device:pc-2"
   }), null);
+});
+
+test("une rotation partagée conserve les accès actifs et suspendus de toutes les organisations", () => {
+  const tenants = {
+    organizationA: {
+      peers: [peer("old-device-key", "operator", "device:a", "10.250.0.5/32")]
+    },
+    organizationB: {
+      peers: [{
+        ...peer("old-device-key", "operator", "device:b", "10.250.0.5/32"),
+        status: "disabled"
+      }]
+    }
+  };
+
+  const result = rotateSharedPeers(tenants, {
+    accountId: "organizationA",
+    peerType: "operator",
+    previousPublicKey: "old-device-key",
+    publicKey: "new-device-key",
+    resourceId: "device:a",
+    rotatedAt: "2026-08-27T01:00:00Z"
+  });
+
+  assert.equal(result.currentPeer.public_key, "new-device-key");
+  assert.equal(result.rotated.length, 2);
+  assert.equal(tenants.organizationA.peers.find((item) => item.public_key === "old-device-key").status, "revoked");
+  assert.equal(tenants.organizationA.peers.find((item) => item.public_key === "new-device-key").status, "active");
+  assert.equal(tenants.organizationB.peers.find((item) => item.public_key === "new-device-key").status, "disabled");
+});
+
+test("une rotation partagée refuse deux adresses pour la même identité physique", () => {
+  const tenants = {
+    organizationA: {
+      peers: [peer("old-device-key", "operator", "device:a", "10.250.0.5/32")]
+    },
+    organizationB: {
+      peers: [peer("old-device-key", "operator", "device:b", "10.250.1.5/32")]
+    }
+  };
+
+  assert.throws(() => rotateSharedPeers(tenants, {
+    accountId: "organizationA",
+    peerType: "operator",
+    previousPublicKey: "old-device-key",
+    publicKey: "new-device-key",
+    resourceId: "device:a"
+  }), /shared_peer_address_mismatch/);
 });
 
 function peer(publicKey, peerType, resourceId, assignedAddress) {

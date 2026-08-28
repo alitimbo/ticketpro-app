@@ -58,6 +58,18 @@ const hotspotPlanIdentityAuditMigrationPath = resolve(
   process.cwd(),
   "src-tauri/migrations/027_hotspot_plan_identity_audit.sql"
 );
+const routerManagedResourceManifestMigrationPath = resolve(
+  process.cwd(),
+  "src-tauri/migrations/028_router_managed_resource_manifest.sql"
+);
+const ticketCommercialSnapshotsMigrationPath = resolve(
+  process.cwd(),
+  "src-tauri/migrations/029_ticket_commercial_snapshots.sql"
+);
+const syncOutboxMigrationPath = resolve(
+  process.cwd(),
+  "src-tauri/migrations/030_sync_outbox.sql"
+);
 
 describe("migration comptes et abonnements", () => {
   const migration = readFileSync(migrationPath, "utf8");
@@ -77,6 +89,9 @@ describe("migration comptes et abonnements", () => {
   const routerOrganizationScopeMigration = readFileSync(routerOrganizationScopeMigrationPath, "utf8");
   const ticketBatchCurrencyMigration = readFileSync(ticketBatchCurrencyMigrationPath, "utf8");
   const hotspotPlanIdentityAuditMigration = readFileSync(hotspotPlanIdentityAuditMigrationPath, "utf8");
+  const routerManagedResourceManifestMigration = readFileSync(routerManagedResourceManifestMigrationPath, "utf8");
+  const ticketCommercialSnapshotsMigration = readFileSync(ticketCommercialSnapshotsMigrationPath, "utf8");
+  const syncOutboxMigration = readFileSync(syncOutboxMigrationPath, "utf8");
 
   it("ajoute la grille tarifaire evolutive des abonnements logiciel", () => {
     expect(migration).toContain("price_per_router_cfa");
@@ -219,5 +234,42 @@ describe("migration comptes et abonnements", () => {
     expect(hotspotPlanIdentityAuditMigration).toContain("trg_hotspot_plan_history_immutable_update");
     expect(hotspotPlanIdentityAuditMigration).toContain("trg_hotspot_plan_history_immutable_delete");
     expect(hotspotPlanIdentityAuditMigration).not.toContain("DROP TABLE");
+  });
+
+  it("ajoute un manifeste RouterOS versionne et sans secret par routeur", () => {
+    expect(routerManagedResourceManifestMigration).toContain(
+      "CREATE TABLE IF NOT EXISTS router_managed_resource_manifests"
+    );
+    expect(routerManagedResourceManifestMigration).toContain("schema_version INTEGER NOT NULL");
+    expect(routerManagedResourceManifestMigration).toContain("revision INTEGER NOT NULL DEFAULT 1");
+    expect(routerManagedResourceManifestMigration).toContain("desired_json TEXT NOT NULL");
+    expect(routerManagedResourceManifestMigration).toContain("observed_json TEXT NOT NULL");
+    expect(routerManagedResourceManifestMigration).not.toContain("private_key");
+    expect(routerManagedResourceManifestMigration).not.toContain("password");
+    expect(routerManagedResourceManifestMigration).not.toContain("DROP TABLE");
+  });
+
+  it("fige les regles commerciales de chaque voucher sans supprimer l'historique", () => {
+    expect(ticketCommercialSnapshotsMigration).toContain("duration_minutes_snapshot");
+    expect(ticketCommercialSnapshotsMigration).toContain("validity_minutes_snapshot");
+    expect(ticketCommercialSnapshotsMigration).toContain("data_limit_mb_snapshot");
+    expect(ticketCommercialSnapshotsMigration).toContain("download_limit_snapshot");
+    expect(ticketCommercialSnapshotsMigration).toContain("upload_limit_snapshot");
+    expect(ticketCommercialSnapshotsMigration).toContain("shared_users_snapshot");
+    expect(ticketCommercialSnapshotsMigration).toContain("UPDATE tickets");
+    expect(ticketCommercialSnapshotsMigration).not.toContain("DELETE FROM");
+    expect(ticketCommercialSnapshotsMigration).not.toContain("DROP TABLE");
+  });
+
+  it("ajoute une outbox durable et idempotente sans y stocker de secret", () => {
+    expect(syncOutboxMigration).toContain("CREATE TABLE IF NOT EXISTS sync_outbox");
+    expect(syncOutboxMigration).toContain("idempotency_key TEXT NOT NULL UNIQUE");
+    expect(syncOutboxMigration).toContain("correlation_id TEXT NOT NULL");
+    expect(syncOutboxMigration).toContain("attempt_count INTEGER NOT NULL DEFAULT 0");
+    expect(syncOutboxMigration).toContain("next_attempt_at TEXT NOT NULL");
+    expect(syncOutboxMigration).toContain("idx_sync_outbox_ready");
+    expect(syncOutboxMigration).not.toContain("private_key");
+    expect(syncOutboxMigration).not.toContain("password_encrypted");
+    expect(syncOutboxMigration).not.toContain("DROP TABLE");
   });
 });

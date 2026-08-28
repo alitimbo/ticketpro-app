@@ -14,10 +14,18 @@ import type {
   RouterDateTime,
   RouterErrorCode,
   RouterHealth,
+  RouterManagedResourceInspectionOptions,
+  RouterManagedResourceManifest,
+  RouterManagedResourceObservation,
+  RouterManagementAccountConfig,
+  RouterManagementAccountResult,
+  RouterManagementServicePolicy,
+  RouterManagementServicePolicyResult,
   RouterSystemInfo,
+  VoucherLifecycleEngineOptions,
   VoucherLifecycleEngineState
 } from "../../domain/router";
-import { TicketCodeGenerator } from "../tickets";
+import { extractVoucherBatchOwnershipSuffix, TicketCodeGenerator } from "../tickets";
 import {
   protectTicketPassword,
   resolveTicketPasswordValue
@@ -37,12 +45,18 @@ export type MikroTikRouterAdapterOptions = RouterOsApiConfig & {
   transport?: RouterOsApiTransport;
 };
 
-const VOUCHER_LIFECYCLE_ENGINE_VERSION = 4;
+const VOUCHER_LIFECYCLE_ENGINE_VERSION = 6;
 const VOUCHER_EXPIRATION_SCRIPT = "ticketpro-voucher-expiration-v1";
 const VOUCHER_EXPIRATION_SCHEDULER = "ticketpro-voucher-expiration-v1";
 const VOUCHER_LIFECYCLE_COMMENT_PREFIX = "TicketPro:v1;";
 const VOUCHER_PROFILE_HANDLER_BEGIN = "# TICKETPRO-LIFECYCLE-BEGIN v1";
 const VOUCHER_PROFILE_HANDLER_END = "# TICKETPRO-LIFECYCLE-END v1";
+const WIREGUARD_INTERFACE_COMMENT = "TicketPro managed:wireguard-interface:v1";
+const WIREGUARD_ADDRESS_COMMENT = "TicketPro managed:wireguard-address:v1";
+const WIREGUARD_PEER_COMMENT = "TicketPro managed:wireguard-gateway-peer:v1";
+const WIREGUARD_ROUTE_COMMENT = "TicketPro managed:wireguard-route:v1";
+const ROUTER_MANAGEMENT_GROUP = "ticketpro-api";
+const ROUTER_MANAGEMENT_POLICIES = ["api", "policy", "read", "sensitive", "test", "write"] as const;
 
 export class MikroTikRouterAdapter implements RouterAdapter {
   private readonly config: RouterOsApiConfig;
@@ -125,7 +139,9 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     return rows.map((row) => profileRowToPlan(row));
   }
 
-  async ensureVoucherLifecycleEngine(): Promise<VoucherLifecycleEngineState> {
+  async ensureVoucherLifecycleEngine(
+    options: VoucherLifecycleEngineOptions = {}
+  ): Promise<VoucherLifecycleEngineState> {
     const resource = firstRow(await this.call("/system/resource/print"));
     const routerOsVersion = pick(resource, "version") ?? "";
     const majorVersion = Number.parseInt(routerOsVersion, 10);
@@ -152,11 +168,20 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     const systemScriptNames = new Set(
       systemScripts.map((script) => pick(script, "name")).filter((name): name is string => Boolean(name))
     );
+    const managedProfileNames = normalizeManagedProfileNames(options.managedProfileNames);
     let managedProfileCount = 0;
     for (const profile of profiles) {
       const profileId = pick(profile, ".id", "id");
-      if (!profileId) continue;
+      const profileName = pick(profile, "name");
+      if (!profileId || !profileName) continue;
       const currentOnLogin = pick(profile, "on-login") ?? "";
+      if (!managedProfileNames.has(profileName)) {
+        // `managedProfileNames` is the set that this call may repair, not an
+        // exclusive catalog. Removing TicketPro from every other profile here
+        // made a router save or a generation for one plan disable the
+        // lifecycle handlers of all other plans.
+        continue;
+      }
       const nextOnLogin = mergeVoucherLifecycleOnLogin(currentOnLogin, systemScriptNames);
       const currentMacCookieTimeout = pick(profile, "mac-cookie-timeout") ?? "";
       const nextMacCookieTimeout = resolveMacCookieTimeout(
@@ -165,7 +190,7 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       );
       if (
         nextOnLogin !== currentOnLogin
-        || pick(profile, "add-mac-cookie") !== "yes"
+        || !isTruthy(pick(profile, "add-mac-cookie"))
         || nextMacCookieTimeout !== currentMacCookieTimeout
       ) {
         await this.call("/ip/hotspot/user/profile/set", {
@@ -203,6 +228,527 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       engineVersion: VOUCHER_LIFECYCLE_ENGINE_VERSION,
       managedProfileCount,
       schedulerEnabled: true
+    };
+  }
+
+  async inspectManagedResources(
+    options: RouterManagedResourceInspectionOptions = {}
+  ): Promise<RouterManagedResourceManifest> {
+    const managedProfileNames = Array.from(
+      normalizeManagedProfileNames(options.managedHotspotProfileNames)
+    ).sort();
+    const authorizedManagementCidrs = Array.from(new Set(
+      (options.authorizedManagementCidrs ?? []).map((cidr) => cidr.trim()).filter(Boolean)
+    )).sort();
+    const managementUsername = options.managementUsername?.trim() || null;
+    const wireguardInterfaceName = options.wireguardInterfaceName?.trim() || null;
+    const [
+      resourceRows,
+      scriptRows,
+      schedulerRows,
+      userProfileRows,
+      hotspotRows,
+      hotspotProfileRows,
+      ipv4FilterRows,
+      ipv4MangleRows,
+      ipv6FilterRows,
+      bindingRows,
+      wireguardRows,
+      wireguardPeerRows,
+      addressRows,
+      routeRows,
+      ntpClientRows,
+      ntpServerRows,
+      managementUserRows,
+      managementGroupRows,
+      managementServiceRows
+    ] = await Promise.all([
+      this.call("/system/resource/print"),
+      this.call("/system/script/print"),
+      this.call("/system/scheduler/print"),
+      this.call("/ip/hotspot/user/profile/print"),
+      this.call("/ip/hotspot/print"),
+      this.call("/ip/hotspot/profile/print"),
+      this.call("/ip/firewall/filter/print"),
+      this.call("/ip/firewall/mangle/print"),
+      this.call("/ipv6/firewall/filter/print").catch(() => []),
+      this.call("/ip/hotspot/ip-binding/print"),
+      wireguardInterfaceName ? this.call("/interface/wireguard/print") : Promise.resolve([]),
+      wireguardInterfaceName ? this.call("/interface/wireguard/peers/print") : Promise.resolve([]),
+      wireguardInterfaceName ? this.call("/ip/address/print") : Promise.resolve([]),
+      wireguardInterfaceName ? this.call("/ip/route/print") : Promise.resolve([]),
+      this.call("/system/ntp/client/print"),
+      this.call("/system/ntp/client/servers/print"),
+      managementUsername ? this.call("/user/print") : Promise.resolve([]),
+      managementUsername ? this.call("/user/group/print") : Promise.resolve([]),
+      authorizedManagementCidrs.length > 0 ? this.call("/ip/service/print") : Promise.resolve([])
+    ]);
+
+    const resources: RouterManagedResourceObservation[] = [];
+    const warnings: string[] = [];
+    const expectedScriptSource = buildVoucherExpirationScript();
+    const expectedLifecycleComment = `TicketPro managed voucher lifecycle v${VOUCHER_LIFECYCLE_ENGINE_VERSION}`;
+    const lifecycleScripts = scriptRows.filter(
+      (row) => pick(row, "name") === VOUCHER_EXPIRATION_SCRIPT
+    );
+    resources.push({
+      attributes: {
+        engineVersion: VOUCHER_LIFECYCLE_ENGINE_VERSION,
+        invalid: lifecycleScripts.length === 1
+          && isTruthy(pick(lifecycleScripts[0], "invalid")),
+        matchesExpectedComment: lifecycleScripts.length === 1
+          && pick(lifecycleScripts[0], "comment") === expectedLifecycleComment,
+        matchesExpectedPolicy: lifecycleScripts.length === 1
+          && pick(lifecycleScripts[0], "policy") === "read,write,policy,test",
+        matchesExpectedSource: lifecycleScripts.length === 1
+          && pick(lifecycleScripts[0], "source") === expectedScriptSource,
+        name: VOUCHER_EXPIRATION_SCRIPT
+      },
+      key: "system-script:voucher-lifecycle",
+      kind: "voucher_script",
+      matchCount: lifecycleScripts.length,
+      ownership: "ticketpro",
+      state: singletonState(lifecycleScripts, (row) =>
+        pick(row, "comment") === expectedLifecycleComment
+        && pick(row, "policy") === "read,write,policy,test"
+        && pick(row, "source") === expectedScriptSource
+        && !isTruthy(pick(row, "invalid"))
+      )
+    });
+
+    const lifecycleSchedulers = schedulerRows.filter(
+      (row) => pick(row, "name") === VOUCHER_EXPIRATION_SCHEDULER
+    );
+    resources.push({
+      attributes: {
+        enabled: lifecycleSchedulers.length === 1
+          && !isTruthy(pick(lifecycleSchedulers[0], "disabled")),
+        invalid: lifecycleSchedulers.length === 1
+          && isTruthy(pick(lifecycleSchedulers[0], "invalid")),
+        interval: lifecycleSchedulers.length === 1
+          ? pick(lifecycleSchedulers[0], "interval") ?? null
+          : null,
+        name: VOUCHER_EXPIRATION_SCHEDULER
+      },
+      key: "system-scheduler:voucher-lifecycle",
+      kind: "voucher_scheduler",
+      matchCount: lifecycleSchedulers.length,
+      ownership: "ticketpro",
+      state: singletonState(lifecycleSchedulers, (row) =>
+        !isTruthy(pick(row, "disabled"))
+        && pick(row, "interval") === "1m"
+        && pick(row, "on-event") === VOUCHER_EXPIRATION_SCRIPT
+        && pick(row, "comment") === expectedLifecycleComment
+        && !isTruthy(pick(row, "invalid"))
+      )
+    });
+
+    const desiredProfileSet = new Set(managedProfileNames);
+    for (const profileName of managedProfileNames) {
+      const matches = userProfileRows.filter((row) => pick(row, "name") === profileName);
+      resources.push({
+        attributes: {
+          addMacCookie: matches.length === 1 && isTruthy(pick(matches[0], "add-mac-cookie")),
+          lifecycleHandler: matches.length === 1 && hasVoucherLifecycleHandler(pick(matches[0], "on-login") ?? ""),
+          profileName
+        },
+        key: `hotspot-user-profile-extension:${profileName}`,
+        kind: "hotspot_user_profile_extension",
+        matchCount: matches.length,
+        ownership: "shared",
+        state: singletonState(matches, (row) =>
+          isTruthy(pick(row, "add-mac-cookie"))
+          && hasVoucherLifecycleHandler(pick(row, "on-login") ?? "")
+        )
+      });
+    }
+
+    for (const profile of userProfileRows) {
+      const profileName = pick(profile, "name") ?? "unknown";
+      if (
+        desiredProfileSet.has(profileName)
+        || !hasVoucherLifecycleHandler(pick(profile, "on-login") ?? "")
+      ) continue;
+      resources.push({
+        attributes: { lifecycleHandler: true, profileName, unexpected: true },
+        key: `hotspot-user-profile-extension:unexpected:${profileName}`,
+        kind: "hotspot_user_profile_extension",
+        matchCount: 1,
+        ownership: profileName === "default" ? "external" : "shared",
+        state: "drift"
+      });
+      warnings.push(
+        `Le profil Hotspot ${profileName} contient une ancienne extension TicketPro non revendiquée. Aucun nettoyage automatique n'a été effectué.`
+      );
+    }
+
+    const usedHotspotProfiles = new Set(
+      hotspotRows
+        .filter((row) => !isTruthy(pick(row, "disabled")))
+        .map((row) => pick(row, "profile"))
+        .filter((name): name is string => Boolean(name))
+    );
+    for (const profileName of Array.from(usedHotspotProfiles).sort()) {
+      const matches = hotspotProfileRows.filter((row) => pick(row, "name") === profileName);
+      resources.push({
+        attributes: {
+          dnsName: matches.length === 1 ? pick(matches[0], "dns-name") ?? "" : "",
+          loginBy: matches.length === 1 ? pick(matches[0], "login-by") ?? "" : "",
+          profileName
+        },
+        key: `hotspot-profile-extension:${profileName}`,
+        kind: "hotspot_profile_extension",
+        matchCount: matches.length,
+        ownership: "shared",
+        state: singletonState(matches, (row) =>
+          mergeHotspotLoginBy(pick(row, "login-by") ?? "") === pick(row, "login-by")
+        )
+      });
+      resources.push({
+        attributes: {
+          dnsName: matches.length === 1 ? pick(matches[0], "dns-name") ?? "" : "",
+          profileName
+        },
+        key: `hotspot-dns:${profileName}`,
+        kind: "hotspot_dns",
+        matchCount: matches.length,
+        ownership: "shared",
+        state: singletonState(matches, (row) => Boolean(pick(row, "dns-name")?.trim()))
+      });
+    }
+
+    appendManagedCommentResources(resources, [
+      ...ipv4FilterRows.map((row) => ({ menu: "ipv4-filter", row })),
+      ...ipv4MangleRows.map((row) => ({ menu: "ipv4-mangle", row })),
+      ...ipv6FilterRows.map((row) => ({ menu: "ipv6-filter", row }))
+    ], "TicketPro anti-tethering:", "firewall_rule");
+    appendManagedCommentResources(
+      resources,
+      bindingRows.map((row) => ({ menu: "hotspot-ip-binding", row })),
+      "TicketPro infrastructure:",
+      "ip_binding"
+    );
+    appendManagedCommentResources(
+      resources,
+      bindingRows.map((row) => ({ menu: "hotspot-ip-binding", row })),
+      "TicketPro blocked:",
+      "ip_binding"
+    );
+
+    const ntpClient = firstRow(ntpClientRows);
+    resources.push({
+      attributes: {
+        enabled: isTruthy(pick(ntpClient, "enabled")),
+        serverCount: ntpServerRows.length,
+        status: pick(ntpClient, "status") ?? null
+      },
+      key: "ntp:router-clock",
+      kind: "ntp_configuration",
+      matchCount: ntpClientRows.length,
+      ownership: "shared",
+      state: singletonState(ntpClientRows, (row) =>
+        isTruthy(pick(row, "enabled")) && ntpServerRows.length > 0
+      )
+    });
+
+    if (managementUsername) {
+      const requiredPolicies = ["api", "policy", "read", "sensitive", "test", "write"];
+      const groupName = "ticketpro-api";
+      const groups = managementGroupRows.filter((row) => pick(row, "name") === groupName);
+      resources.push({
+        attributes: {
+          groupName,
+          requiredPolicies: requiredPolicies.join(",")
+        },
+        key: `management-account-group:${groupName}`,
+        kind: "management_account",
+        matchCount: groups.length,
+        ownership: "ticketpro",
+        state: singletonState(groups, (row) =>
+          requiredPolicies.every((policy) => csvValues(pick(row, "policy") ?? "").has(policy))
+        )
+      });
+      const users = managementUserRows.filter((row) => pick(row, "name") === managementUsername);
+      resources.push({
+        attributes: {
+          disabled: users.length === 1 && isTruthy(pick(users[0], "disabled")),
+          group: users.length === 1 ? pick(users[0], "group") ?? null : null,
+          username: managementUsername
+        },
+        key: `management-account:${managementUsername}`,
+        kind: "management_account",
+        matchCount: users.length,
+        ownership: "ticketpro",
+        state: singletonState(users, (row) =>
+          !isTruthy(pick(row, "disabled")) && pick(row, "group") === groupName
+        )
+      });
+    }
+
+    if (authorizedManagementCidrs.length > 0) {
+      for (const service of managementServiceRows.filter(
+        (row) => !isTruthy(pick(row, "dynamic"))
+      )) {
+        const name = pick(service, "name") ?? "unknown";
+        const disabled = isTruthy(pick(service, "disabled"));
+        const addresses = csvValues(pick(service, "address") ?? "");
+        const requiredEnabled = name === "api" || name === "winbox";
+        const restricted = authorizedManagementCidrs.every((cidr) => addresses.has(cidr));
+        const expected = requiredEnabled ? !disabled && restricted : disabled || restricted;
+        resources.push({
+          attributes: {
+            address: pick(service, "address") ?? "",
+            disabled,
+            name,
+            port: pick(service, "port") ?? null,
+            requiredEnabled,
+            restricted
+          },
+          key: `management-service:${name}`,
+          kind: "management_service",
+          matchCount: 1,
+          ownership: "shared",
+          state: expected ? "present" : "drift"
+        });
+      }
+    }
+
+    if (wireguardInterfaceName) {
+      const interfaces = wireguardRows.filter(
+        (row) => pick(row, "name") === wireguardInterfaceName
+      );
+      resources.push({
+        attributes: {
+          interfaceName: wireguardInterfaceName,
+          running: interfaces.length === 1 && !isTruthy(pick(interfaces[0], "disabled"))
+        },
+        key: `wireguard-interface:${wireguardInterfaceName}`,
+        kind: "wireguard_interface",
+        matchCount: interfaces.length,
+        ownership: "ticketpro",
+        state: singletonState(interfaces, (row) => !isTruthy(pick(row, "disabled")))
+      });
+      const peers = wireguardPeerRows.filter(
+        (row) => pick(row, "interface") === wireguardInterfaceName
+      );
+      resources.push({
+        attributes: {
+          interfaceName: wireguardInterfaceName,
+          peerCount: peers.length
+        },
+        key: `wireguard-peer:${wireguardInterfaceName}:gateway`,
+        kind: "wireguard_peer",
+        matchCount: peers.length,
+        ownership: "ticketpro",
+        state: peers.length === 0 ? "missing" : peers.length === 1 ? "present" : "duplicate"
+      });
+      const addresses = addressRows.filter(
+        (row) => pick(row, "interface") === wireguardInterfaceName
+      );
+      resources.push({
+        attributes: {
+          address: addresses.length === 1 ? pick(addresses[0], "address") ?? null : null,
+          interfaceName: wireguardInterfaceName
+        },
+        key: `wireguard-address:${wireguardInterfaceName}`,
+        kind: "wireguard_address",
+        matchCount: addresses.length,
+        ownership: "ticketpro",
+        state: addresses.length === 0 ? "missing" : addresses.length === 1 ? "present" : "duplicate"
+      });
+      const routes = routeRows.filter((row) =>
+        pick(row, "gateway") === wireguardInterfaceName
+        && (pick(row, "comment") === WIREGUARD_ROUTE_COMMENT
+          || pick(row, "comment") === "TicketPro WireGuard"
+          || pick(row, "comment") === "TicketPro WireGuard multi-organisation")
+      );
+      resources.push({
+        attributes: {
+          destination: routes.length === 1 ? pick(routes[0], "dst-address") ?? null : null,
+          interfaceName: wireguardInterfaceName
+        },
+        key: `wireguard-route:${wireguardInterfaceName}`,
+        kind: "wireguard_route",
+        matchCount: routes.length,
+        ownership: "ticketpro",
+        state: routes.length === 0 ? "missing" : routes.length === 1 ? "present" : "duplicate"
+      });
+    }
+
+    return {
+      capturedAt: new Date().toISOString(),
+      desired: {
+        authorizedManagementCidrs,
+        managementUsername,
+        managedHotspotProfileNames: managedProfileNames,
+        wireguardInterfaceName
+      },
+      resources: resources.sort((left, right) => left.key.localeCompare(right.key)),
+      routerOsVersion: pick(firstRow(resourceRows), "version") ?? "unknown",
+      schemaVersion: 1,
+      warnings
+    };
+  }
+
+  async upsertManagementAccount(
+    config: RouterManagementAccountConfig
+  ): Promise<RouterManagementAccountResult> {
+    const username = normalizeRouterOsIdentifier(config.username, "nom du compte");
+    const groupName = normalizeRouterOsIdentifier(
+      config.groupName?.trim() || ROUTER_MANAGEMENT_GROUP,
+      "nom du groupe"
+    );
+    const password = config.password;
+    if (password.length < 16 || /[\r\n\0]/.test(password)) {
+      throw new RouterAdapterError(
+        "router_rejected",
+        "The dedicated RouterOS password must contain at least 16 safe characters"
+      );
+    }
+
+    const [groupRows, userRows] = await Promise.all([
+      this.call("/user/group/print"),
+      this.call("/user/print")
+    ]);
+    const groups = groupRows.filter((row) => pick(row, "name") === groupName);
+    const group = groups[0];
+    const groupId = pick(group ?? {}, ".id", "id");
+    const groupAlreadyCompatible = Boolean(group) && ROUTER_MANAGEMENT_POLICIES.every(
+      (policy) => csvValues(pick(group, "policy") ?? "").has(policy)
+    );
+    if (group && !groupAlreadyCompatible && !config.adoptExisting) {
+      throw new RouterAdapterError(
+        "router_rejected",
+        `RouterOS group ${groupName} already exists outside the TicketPro policy`
+      );
+    }
+    const groupParams = {
+      name: groupName,
+      policy: ROUTER_MANAGEMENT_POLICIES.join(",")
+    };
+    if (groupId) {
+      await this.call("/user/group/set", { ...groupParams, numbers: groupId });
+    } else {
+      await this.call("/user/group/add", groupParams);
+    }
+
+    const users = userRows.filter((row) => pick(row, "name") === username);
+    const user = users[0];
+    const userId = pick(user ?? {}, ".id", "id");
+    if (user && pick(user, "group") !== groupName && !config.adoptExisting) {
+      throw new RouterAdapterError(
+        "router_rejected",
+        `RouterOS user ${username} already exists in another group`
+      );
+    }
+    const userParams = {
+      disabled: "no",
+      group: groupName,
+      name: username,
+      password
+    };
+    if (userId) {
+      await this.call("/user/set", { ...userParams, numbers: userId });
+    } else {
+      await this.call("/user/add", userParams);
+    }
+
+    const [verifiedGroups, verifiedUsers] = await Promise.all([
+      this.call("/user/group/print"),
+      this.call("/user/print")
+    ]);
+    const verifiedGroup = verifiedGroups.find((row) => pick(row, "name") === groupName);
+    const verifiedUser = verifiedUsers.find((row) => pick(row, "name") === username);
+    if (
+      !verifiedGroup
+      || !ROUTER_MANAGEMENT_POLICIES.every(
+        (policy) => csvValues(pick(verifiedGroup, "policy") ?? "").has(policy)
+      )
+      || !verifiedUser
+      || pick(verifiedUser, "group") !== groupName
+      || isTruthy(pick(verifiedUser, "disabled"))
+    ) {
+      throw new RouterAdapterError(
+        "router_rejected",
+        "RouterOS did not confirm the dedicated TicketPro management account"
+      );
+    }
+
+    return {
+      action: userId ? "updated" : "created",
+      groupName,
+      username
+    };
+  }
+
+  async applyManagementServicePolicy(
+    policy: RouterManagementServicePolicy
+  ): Promise<RouterManagementServicePolicyResult> {
+    if (!policy.currentPathConfirmed) {
+      throw new RouterAdapterError(
+        "router_rejected",
+        "The current RouterOS access path must be confirmed before service hardening"
+      );
+    }
+    const authorizedCidrs = normalizeAuthorizedCidrs(policy.authorizedCidrs);
+    const address = authorizedCidrs.join(",");
+    const serviceRows = await this.call("/ip/service/print");
+    const restrictedServices: string[] = [];
+    const disabledServices: string[] = [];
+    const disabledWhenUnused = new Set(["api-ssl", "ftp", "telnet", "www", "www-ssl"]);
+
+    for (const service of serviceRows.filter((row) => !isTruthy(pick(row, "dynamic")))) {
+      const name = pick(service, "name");
+      const serviceId = pick(service, ".id", "id");
+      if (!name || !serviceId) continue;
+      if (name === "api" || name === "winbox") {
+        await this.call("/ip/service/set", {
+          address,
+          disabled: "no",
+          numbers: serviceId
+        });
+        restrictedServices.push(name);
+        continue;
+      }
+      if (policy.disableUnusedServices && disabledWhenUnused.has(name)) {
+        await this.call("/ip/service/set", { disabled: "yes", numbers: serviceId });
+        disabledServices.push(name);
+        continue;
+      }
+      if (!isTruthy(pick(service, "disabled"))) {
+        await this.call("/ip/service/set", { address, numbers: serviceId });
+        restrictedServices.push(name);
+      }
+    }
+
+    const verifiedServices = await this.call("/ip/service/print");
+    for (const name of restrictedServices) {
+      const service = verifiedServices.find((row) => pick(row, "name") === name);
+      const addresses = csvValues(pick(service ?? {}, "address") ?? "");
+      if (
+        !service
+        || isTruthy(pick(service, "disabled")) && (name === "api" || name === "winbox")
+        || !authorizedCidrs.every((cidr) => addresses.has(cidr))
+      ) {
+        throw new RouterAdapterError(
+          "router_rejected",
+          `RouterOS did not confirm the restricted ${name} service`
+        );
+      }
+    }
+    for (const name of disabledServices) {
+      const service = verifiedServices.find((row) => pick(row, "name") === name);
+      if (!service || !isTruthy(pick(service, "disabled"))) {
+        throw new RouterAdapterError(
+          "router_rejected",
+          `RouterOS did not confirm the disabled ${name} service`
+        );
+      }
+    }
+
+    return {
+      disabledServices: disabledServices.sort(),
+      restrictedServices: restrictedServices.sort()
     };
   }
 
@@ -294,6 +840,12 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     return Promise.all(rows.map((row) => userRowToHotspotUser(row)));
   }
 
+  async findHotspotUser(username: string): Promise<HotspotUser | null> {
+    const rows = await this.query("/ip/hotspot/user/print", { name: username });
+    const row = rows.find((item) => pick(item, "name") === username);
+    return row ? userRowToHotspotUser(row) : null;
+  }
+
   async createHotspotUser(user: HotspotUserDraft): Promise<HotspotUser> {
     const plan = await this.findPlanById(user.planId);
     const password = await resolveTicketPassword(user);
@@ -342,77 +894,146 @@ export class MikroTikRouterAdapter implements RouterAdapter {
         throw new Error("La clé privée WireGuard est requise pour créer une nouvelle interface.");
       }
       await this.call("/interface/wireguard/add", {
+        comment: WIREGUARD_INTERFACE_COMMENT,
         "listen-port": 13231,
         name: config.interfaceName,
         "private-key": config.privateKey
       });
     } else {
       await this.call("/interface/wireguard/set", {
+        comment: WIREGUARD_INTERFACE_COMMENT,
         "listen-port": 13231,
         numbers: existingInterfaceId,
         ...(config.privateKey ? { "private-key": config.privateKey } : {})
       });
     }
 
-    const addresses = await this.query("/ip/address/print", {
-      address: config.assignedAddress,
-      interface: config.interfaceName
-    });
-    if (addresses.length === 0) {
+    const addresses = await this.query("/ip/address/print", { interface: config.interfaceName });
+    const primaryAddress = addresses.find(
+      (row) => pick(row, "address") === config.assignedAddress
+    ) ?? addresses[0];
+    const primaryAddressId = pick(primaryAddress ?? {}, ".id", "id");
+    if (!primaryAddressId) {
       await this.call("/ip/address/add", {
         address: config.assignedAddress,
+        comment: WIREGUARD_ADDRESS_COMMENT,
         interface: config.interfaceName
       });
+    } else {
+      await this.call("/ip/address/set", {
+        address: config.assignedAddress,
+        comment: WIREGUARD_ADDRESS_COMMENT,
+        interface: config.interfaceName,
+        numbers: primaryAddressId
+      });
+    }
+    for (const duplicate of addresses) {
+      const duplicateId = pick(duplicate, ".id", "id");
+      if (duplicateId && duplicateId !== primaryAddressId) {
+        await this.call("/ip/address/remove", { numbers: duplicateId });
+      }
     }
 
     const peers = await this.query("/interface/wireguard/peers/print", {
-      interface: config.interfaceName,
-      "public-key": config.serverPublicKey
+      interface: config.interfaceName
     });
     const peerParams = {
       "allowed-address": config.serverAllowedIps,
+      comment: WIREGUARD_PEER_COMMENT,
       "endpoint-address": config.serverEndpoint,
       "endpoint-port": config.serverPort,
       interface: config.interfaceName,
       "persistent-keepalive": 25,
       "public-key": config.serverPublicKey
     };
-    if (peers.length === 0) {
+    const primaryPeer = peers.find(
+      (row) => pick(row, "public-key") === config.serverPublicKey
+    ) ?? peers[0];
+    const primaryPeerId = pick(primaryPeer ?? {}, ".id", "id");
+    if (!primaryPeerId) {
       await this.call("/interface/wireguard/peers/add", peerParams);
     } else {
       await this.call("/interface/wireguard/peers/set", {
         ...peerParams,
-        numbers: pick(firstRow(peers), ".id")
+        numbers: primaryPeerId
       });
     }
+    for (const duplicate of peers) {
+      const duplicateId = pick(duplicate, ".id", "id");
+      if (duplicateId && duplicateId !== primaryPeerId) {
+        await this.call("/interface/wireguard/peers/remove", { numbers: duplicateId });
+      }
+    }
 
-    const routes = await this.query("/ip/route/print", {
-      "dst-address": config.serverAllowedIps
-    });
-    if (routes.length === 0) {
+    const routeRows = await this.call("/ip/route/print");
+    const managedRoutes = routeRows.filter((row) => isTicketProWireGuardRoute(row, config.interfaceName));
+    const externalCollision = routeRows.find((row) =>
+      pick(row, "dst-address") === config.serverAllowedIps
+      && !isTicketProWireGuardRoute(row, config.interfaceName)
+    );
+    if (managedRoutes.length === 0 && externalCollision) {
+      throw new RouterAdapterError(
+        "router_rejected",
+        `A non-TicketPro route already owns ${config.serverAllowedIps}`
+      );
+    }
+    const primaryRoute = managedRoutes.find(
+      (row) => pick(row, "dst-address") === config.serverAllowedIps
+    ) ?? managedRoutes[0];
+    const primaryRouteId = pick(primaryRoute ?? {}, ".id", "id");
+    if (!primaryRouteId) {
       await this.call("/ip/route/add", {
-        comment: "TicketPro WireGuard",
+        comment: WIREGUARD_ROUTE_COMMENT,
         "dst-address": config.serverAllowedIps,
         gateway: config.interfaceName
       });
+    } else {
+      await this.call("/ip/route/set", {
+        comment: WIREGUARD_ROUTE_COMMENT,
+        "dst-address": config.serverAllowedIps,
+        gateway: config.interfaceName,
+        numbers: primaryRouteId
+      });
+    }
+    for (const duplicate of managedRoutes) {
+      const duplicateId = pick(duplicate, ".id", "id");
+      if (duplicateId && duplicateId !== primaryRouteId) {
+        await this.call("/ip/route/remove", { numbers: duplicateId });
+      }
     }
 
-    const firewallRules = await this.query("/ip/firewall/filter/print", {
-      comment: "TicketPro WireGuard"
-    });
-    if (firewallRules.length === 0) {
+    const firewallRules = await this.call("/ip/firewall/filter/print");
+    const ticketProFirewallRules = firewallRules.filter(
+      (row) => pick(row, "comment") === "TicketPro WireGuard"
+    );
+    const primaryFirewallId = pick(ticketProFirewallRules[0] ?? {}, ".id", "id");
+    const firewallParams = {
+      action: "accept",
+      chain: "input",
+      comment: "TicketPro WireGuard",
+      "in-interface": config.interfaceName
+    };
+    if (!primaryFirewallId) {
       const inputRules = await this.query("/ip/firewall/filter/print", { chain: "input" });
       const firstDropId = pick(
         inputRules.find((rule) => pick(rule, "action") === "drop") ?? {},
         ".id"
       );
       await this.call("/ip/firewall/filter/add", {
-        action: "accept",
-        chain: "input",
-        comment: "TicketPro WireGuard",
-        "in-interface": config.interfaceName,
+        ...firewallParams,
         "place-before": firstDropId ?? null
       });
+    } else {
+      await this.call("/ip/firewall/filter/set", {
+        ...firewallParams,
+        numbers: primaryFirewallId
+      });
+    }
+    for (const duplicate of ticketProFirewallRules.slice(1)) {
+      const duplicateId = pick(duplicate, ".id", "id");
+      if (duplicateId) {
+        await this.call("/ip/firewall/filter/remove", { numbers: duplicateId });
+      }
     }
   }
 
@@ -481,6 +1102,12 @@ export class MikroTikRouterAdapter implements RouterAdapter {
 
   async enableHotspotUser(username: string): Promise<HotspotUser> {
     const user = await this.findUserByName(username);
+    if (user.status === "exhausted" || user.status === "expired" || user.status === "error") {
+      throw new RouterAdapterError(
+        "router_rejected",
+        "A terminal or inconsistent voucher cannot be enabled"
+      );
+    }
     await this.call("/ip/hotspot/user/enable", { numbers: user.id });
     return { ...user, status: "available" };
   }
@@ -535,16 +1162,23 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       })
       .map((row) => pick(row, ".id", "id"))
       .filter((id): id is string => Boolean(id));
+    const bindingMatchesClient = (row: RouterOsApiRow) => {
+      const macAddress = normalizeOptionalMacAddress(pick(row, "mac-address"));
+      const address = pick(row, "address");
+      return Boolean(macAddress && clientMacAddresses.has(macAddress))
+        || Boolean(address && clientAddresses.has(address));
+    };
     const bindingIds = bindingRows
       .filter((row) => {
-        const macAddress = normalizeOptionalMacAddress(pick(row, "mac-address"));
-        const address = pick(row, "address");
-        return isManagedVoucherBinding(row, username)
-          || Boolean(macAddress && clientMacAddresses.has(macAddress))
-          || Boolean(address && clientAddresses.has(address));
+        return isManagedVoucherBinding(row, username);
       })
       .map((row) => pick(row, ".id", "id"))
       .filter((id): id is string => Boolean(id));
+    const externalAuthorizationBindings = bindingRows.filter((row) =>
+      !isManagedVoucherBinding(row, username)
+      && pick(row, "type") === "bypassed"
+      && bindingMatchesClient(row)
+    );
     const connectionIds = connectionRows
       .filter((row) => Array.from(clientAddresses).some((address) =>
         connectionAddressMatches(pick(row, "src-address"), address)
@@ -571,6 +1205,12 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     }
     for (const connectionId of connectionIds) {
       await this.call("/ip/firewall/connection/remove", { numbers: connectionId });
+    }
+    if (externalAuthorizationBindings.length > 0) {
+      throw new RouterAdapterError(
+        "router_rejected",
+        "An external Hotspot bypass still authorizes this voucher device"
+      );
     }
     if (userId) {
       await this.call("/ip/hotspot/user/remove", { numbers: userId });
@@ -1072,8 +1712,7 @@ export class MikroTikRouterAdapter implements RouterAdapter {
   }
 
   private async findUserByName(username: string): Promise<HotspotUser> {
-    const users = await this.listHotspotUsers();
-    const user = users.find((item) => item.username === username);
+    const user = await this.findHotspotUser(username);
 
     if (!user) {
       throw new RouterAdapterError("hotspot_not_found", "Hotspot user not found");
@@ -1368,6 +2007,111 @@ async function userRowToHotspotUser(row: RouterOsApiRow): Promise<HotspotUser> {
   };
 }
 
+function normalizeManagedProfileNames(
+  names: readonly string[] | undefined
+): Set<string> {
+  return new Set(
+    (names ?? [])
+      .map((name) => name.trim())
+      .filter((name) => Boolean(name) && name.toLowerCase() !== "default")
+  );
+}
+
+function isTicketProWireGuardRoute(
+  row: RouterOsApiRow,
+  interfaceName: string
+): boolean {
+  const comment = pick(row, "comment") ?? "";
+  return comment === WIREGUARD_ROUTE_COMMENT
+    || comment === "TicketPro WireGuard"
+    || comment === "TicketPro WireGuard multi-organisation"
+    || (pick(row, "gateway") === interfaceName && comment.startsWith("TicketPro"));
+}
+
+function csvValues(value: string): Set<string> {
+  return new Set(value.split(",").map((entry) => entry.trim()).filter(Boolean));
+}
+
+function normalizeRouterOsIdentifier(value: string, label: string): string {
+  const normalized = value.trim();
+  if (!/^[A-Za-z0-9._-]{3,32}$/.test(normalized)) {
+    throw new RouterAdapterError(
+      "router_rejected",
+      `Invalid dedicated RouterOS ${label}`
+    );
+  }
+  return normalized;
+}
+
+function normalizeAuthorizedCidrs(cidrs: readonly string[]): string[] {
+  const normalized = Array.from(new Set(cidrs.map((cidr) => cidr.trim()).filter(Boolean))).sort();
+  if (normalized.length === 0) {
+    throw new RouterAdapterError("router_rejected", "At least one management CIDR is required");
+  }
+  for (const cidr of normalized) {
+    const match = cidr.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/);
+    if (!match) {
+      throw new RouterAdapterError("router_rejected", `Invalid management CIDR ${cidr}`);
+    }
+    const octets = match.slice(1, 5).map(Number);
+    const prefix = Number(match[5]);
+    if (
+      octets.some((octet) => octet < 0 || octet > 255)
+      || prefix < 8
+      || prefix > 32
+      || cidr === "0.0.0.0/0"
+    ) {
+      throw new RouterAdapterError("router_rejected", `Unsafe management CIDR ${cidr}`);
+    }
+  }
+  return normalized;
+}
+
+function hasVoucherLifecycleHandler(source: string): boolean {
+  return source.includes(VOUCHER_PROFILE_HANDLER_BEGIN)
+    && source.includes(VOUCHER_PROFILE_HANDLER_END);
+}
+
+function singletonState(
+  rows: RouterOsApiRow[],
+  isExpected: (row: RouterOsApiRow) => boolean
+): RouterManagedResourceObservation["state"] {
+  if (rows.length === 0) return "missing";
+  if (rows.length > 1) return "duplicate";
+  return isExpected(rows[0]) ? "present" : "drift";
+}
+
+function appendManagedCommentResources(
+  observations: RouterManagedResourceObservation[],
+  entries: Array<{ menu: string; row: RouterOsApiRow }>,
+  prefix: string,
+  kind: "firewall_rule" | "ip_binding"
+): void {
+  const groups = new Map<string, Array<{ menu: string; row: RouterOsApiRow }>>();
+  for (const entry of entries) {
+    const comment = pick(entry.row, "comment") ?? "";
+    if (!comment.startsWith(prefix)) continue;
+    const group = groups.get(comment) ?? [];
+    group.push(entry);
+    groups.set(comment, group);
+  }
+
+  for (const [comment, matches] of groups) {
+    observations.push({
+      attributes: {
+        comment,
+        disabled: matches.every(({ row }) => isTruthy(pick(row, "disabled"))),
+        menu: Array.from(new Set(matches.map((entry) => entry.menu))).join(",")
+      },
+      key: `${kind}:${comment}`,
+      kind,
+      matchCount: matches.length,
+      ownership: "ticketpro",
+      state: matches.length === 1 ? "present" : "duplicate"
+    });
+  }
+}
+
 function normalizeMacAddress(value: string): string {
   const normalized = value.trim().replace(/-/g, ":").toUpperCase();
   if (!/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(normalized)) {
@@ -1536,7 +2280,8 @@ export function buildVoucherLifecycleComment(
   }
 
   const normalizedValidity = Math.max(1, Math.floor(validityMinutes));
-  return `${VOUCHER_LIFECYCLE_COMMENT_PREFIX}validity=${normalizedValidity};expires=0;state=new;`;
+  const ownershipSuffix = extractVoucherBatchOwnershipSuffix(originalComment);
+  return `${VOUCHER_LIFECYCLE_COMMENT_PREFIX}validity=${normalizedValidity};expires=0;state=new;${ownershipSuffix}`;
 }
 
 export function reconcileVoucherLifecycleComment(
@@ -1544,9 +2289,7 @@ export function reconcileVoucherLifecycleComment(
   validityMinutes: number | null
 ): string {
   if (!validityMinutes || validityMinutes <= 0) {
-    return currentComment?.startsWith(VOUCHER_LIFECYCLE_COMMENT_PREFIX)
-      ? ""
-      : currentComment?.trim().slice(0, 120) ?? "";
+    return currentComment?.trim().slice(0, 240) ?? "";
   }
   if (!currentComment?.startsWith(VOUCHER_LIFECYCLE_COMMENT_PREFIX)) {
     return buildVoucherLifecycleComment(validityMinutes, currentComment);
@@ -1554,10 +2297,27 @@ export function reconcileVoucherLifecycleComment(
 
   const expires = currentComment.match(/;expires=(\d+);/)?.[1] ?? "0";
   const state = currentComment.match(/;state=([a-z-]+);/)?.[1] ?? "new";
-  return `${VOUCHER_LIFECYCLE_COMMENT_PREFIX}validity=${Math.floor(validityMinutes)};expires=${expires};state=${state};`;
+  if (expires !== "0" || state !== "new") {
+    return currentComment;
+  }
+  const ownershipSuffix = extractVoucherBatchOwnershipSuffix(currentComment);
+  return `${VOUCHER_LIFECYCLE_COMMENT_PREFIX}validity=${Math.floor(validityMinutes)};expires=${expires};state=${state};${ownershipSuffix}`;
 }
 
 export function mergeVoucherLifecycleOnLogin(
+  currentSource: string,
+  knownScriptNames: ReadonlySet<string> = new Set()
+): string {
+  const withoutManagedBlock = removeVoucherLifecycleOnLogin(currentSource, knownScriptNames);
+  return [
+    withoutManagedBlock,
+    VOUCHER_PROFILE_HANDLER_BEGIN,
+    buildVoucherOnLoginScript(),
+    VOUCHER_PROFILE_HANDLER_END
+  ].filter(Boolean).join("\r\n");
+}
+
+export function removeVoucherLifecycleOnLogin(
   currentSource: string,
   knownScriptNames: ReadonlySet<string> = new Set()
 ): string {
@@ -1573,12 +2333,7 @@ export function mergeVoucherLifecycleOnLogin(
   const preservedSource = knownScriptNames.has(withoutManagedBlock)
     ? `/system script run ${quoteRouterOsValue(withoutManagedBlock)};`
     : withoutManagedBlock;
-  return [
-    preservedSource,
-    VOUCHER_PROFILE_HANDLER_BEGIN,
-    buildVoucherOnLoginScript(),
-    VOUCHER_PROFILE_HANDLER_END
-  ].filter(Boolean).join("\r\n");
+  return preservedSource;
 }
 
 export function mergeHotspotLoginBy(currentValue: string): string {
@@ -1611,6 +2366,13 @@ export function buildVoucherOnLoginScript(): string {
     ':local tpId [/ip hotspot user find where name=$user];',
     ':if ([:len $tpId] = 0) do={ :return };',
     ':local tpComment [/ip hotspot user get $tpId comment];',
+    ':local tpOwnership "";',
+    ':local tpBatchStart [:find $tpComment "batch="];',
+    ':if ([:typeof $tpBatchStart] != "nil") do={',
+    '  :set tpBatchStart ($tpBatchStart + 6);',
+    '  :local tpBatchEnd [:find $tpComment ";" $tpBatchStart];',
+    '  :if ([:typeof $tpBatchEnd] != "nil") do={ :set tpOwnership ("batch=" . [:pick $tpComment $tpBatchStart $tpBatchEnd] . ";") };',
+    '};',
     ':local tpMarker "TicketPro:v1;";',
     ':if ([:typeof [:find $tpComment $tpMarker]] = "nil") do={ :return };',
     ':local tpValidityKey "validity=";',
@@ -1630,7 +2392,7 @@ export function buildVoucherOnLoginScript(): string {
     ':if (($tpValidity > 0) && ($tpExpires = 0)) do={',
     '  :local tpNow [:tonsec [:timestamp]];',
     '  :local tpDeadline ($tpNow + ($tpValidity * 60000000000));',
-    '  /ip hotspot user set $tpId comment=("TicketPro:v1;validity=" . $tpValidity . ";expires=" . $tpDeadline . ";state=active;");',
+    '  /ip hotspot user set $tpId comment=("TicketPro:v1;validity=" . $tpValidity . ";expires=" . $tpDeadline . ";state=active;" . $tpOwnership);',
     '};'
   ].join("\r\n");
 }
@@ -1640,6 +2402,13 @@ export function buildVoucherExpirationScript(): string {
     ':local tpNow [:tonsec [:timestamp]];',
     ':foreach tpId in=[/ip hotspot user find where comment~"TicketPro:v1;"] do={',
     '  :local tpComment [/ip hotspot user get $tpId comment];',
+    '  :local tpOwnership "";',
+    '  :local tpBatchStart [:find $tpComment "batch="];',
+    '  :if ([:typeof $tpBatchStart] != "nil") do={',
+    '    :set tpBatchStart ($tpBatchStart + 6);',
+    '    :local tpBatchEnd [:find $tpComment ";" $tpBatchStart];',
+    '    :if ([:typeof $tpBatchEnd] != "nil") do={ :set tpOwnership ("batch=" . [:pick $tpComment $tpBatchStart $tpBatchEnd] . ";") };',
+    '  };',
     '  :local tpValidityKey "validity=";',
     '  :local tpValidityStart [:find $tpComment $tpValidityKey];',
     '  :local tpExpiresKey "expires=";',
@@ -1669,21 +2438,28 @@ export function buildVoucherExpirationScript(): string {
     '        :local tpState "exhausted";',
     '        :local tpCleanupFailed false;',
     '        :if ($tpExpired = true) do={ :set tpState "expired" };',
-    '        :do { /ip hotspot user set $tpId disabled=yes comment=("TicketPro:v1;validity=" . $tpValidity . ";expires=" . $tpExpires . ";state=cleanup-pending;") } on-error={ :set tpCleanupFailed true };',
+    '        :local tpBindingMarker ("TicketPro voucher:" . $tpUser);',
+    '        :do { /ip hotspot user set $tpId disabled=yes comment=("TicketPro:v1;validity=" . $tpValidity . ";expires=" . $tpExpires . ";state=cleanup-pending;" . $tpOwnership) } on-error={ :set tpCleanupFailed true };',
     '        :foreach tpActiveId in=[/ip hotspot active find where user=$tpUser] do={',
     '          :local tpAddress [/ip hotspot active get $tpActiveId address];',
     '          :do { /ip hotspot active remove $tpActiveId } on-error={ :set tpCleanupFailed true };',
     '          :if ([:len $tpAddress] > 0) do={',
     '            :do { /ip firewall connection remove [find where src-address~$tpAddress] } on-error={ :set tpCleanupFailed true };',
     '            :do { /ip firewall connection remove [find where dst-address~$tpAddress] } on-error={ :set tpCleanupFailed true };',
-    '            :do { /ip hotspot ip-binding remove [find where address=$tpAddress] } on-error={ :set tpCleanupFailed true };',
+    '            :foreach tpForeignBindingId in=[/ip hotspot ip-binding find where address=$tpAddress and type=bypassed] do={',
+    '              :local tpForeignComment [/ip hotspot ip-binding get $tpForeignBindingId comment];',
+    '              :if ([:typeof [:find $tpForeignComment $tpBindingMarker]] = "nil") do={ :set tpCleanupFailed true };',
+    '            };',
     '            :do { /ip hotspot host remove [find where address=$tpAddress] } on-error={ :set tpCleanupFailed true };',
     '          };',
     '        };',
     '        :foreach tpCookieId in=[/ip hotspot cookie find where user=$tpUser] do={',
     '          :local tpMac [/ip hotspot cookie get $tpCookieId mac-address];',
     '          :if ([:len $tpMac] > 0) do={',
-    '            :do { /ip hotspot ip-binding remove [find where mac-address=$tpMac] } on-error={ :set tpCleanupFailed true };',
+    '            :foreach tpForeignBindingId in=[/ip hotspot ip-binding find where mac-address=$tpMac and type=bypassed] do={',
+    '              :local tpForeignComment [/ip hotspot ip-binding get $tpForeignBindingId comment];',
+    '              :if ([:typeof [:find $tpForeignComment $tpBindingMarker]] = "nil") do={ :set tpCleanupFailed true };',
+    '            };',
     '            :foreach tpHostId in=[/ip hotspot host find where mac-address=$tpMac] do={',
     '              :local tpHostAddress [/ip hotspot host get $tpHostId address];',
     '              :if ([:len $tpHostAddress] > 0) do={',
@@ -1696,7 +2472,10 @@ export function buildVoucherExpirationScript(): string {
     '          :do { /ip hotspot cookie remove $tpCookieId } on-error={ :set tpCleanupFailed true };',
     '        };',
     '        :if (([:len $tpUserMac] > 0) && ($tpUserMac != "00:00:00:00:00:00")) do={',
-    '          :do { /ip hotspot ip-binding remove [find where mac-address=$tpUserMac] } on-error={ :set tpCleanupFailed true };',
+    '          :foreach tpForeignBindingId in=[/ip hotspot ip-binding find where mac-address=$tpUserMac and type=bypassed] do={',
+    '            :local tpForeignComment [/ip hotspot ip-binding get $tpForeignBindingId comment];',
+    '            :if ([:typeof [:find $tpForeignComment $tpBindingMarker]] = "nil") do={ :set tpCleanupFailed true };',
+    '          };',
     '          :foreach tpHostId in=[/ip hotspot host find where mac-address=$tpUserMac] do={',
     '            :local tpHostAddress [/ip hotspot host get $tpHostId address];',
     '            :if ([:len $tpHostAddress] > 0) do={',
@@ -1706,16 +2485,15 @@ export function buildVoucherExpirationScript(): string {
     '            :do { /ip hotspot host remove $tpHostId } on-error={ :set tpCleanupFailed true };',
     '          };',
     '        };',
-    '        :local tpBindingMarker ("TicketPro voucher:" . $tpUser);',
     '        :foreach tpBindingId in=[/ip hotspot ip-binding find where comment~$tpBindingMarker] do={ :do { /ip hotspot ip-binding remove $tpBindingId } on-error={ :set tpCleanupFailed true } };',
     '        :if ([:len [/ip hotspot active find where user=$tpUser]] > 0) do={ :set tpCleanupFailed true };',
     '        :if ([:len [/ip hotspot cookie find where user=$tpUser]] > 0) do={ :set tpCleanupFailed true };',
     '        :if ([:len [/ip hotspot ip-binding find where comment~$tpBindingMarker]] > 0) do={ :set tpCleanupFailed true };',
     '        :if ($tpCleanupFailed = true) do={',
-    '          :do { /ip hotspot user set $tpId disabled=yes comment=("TicketPro:v1;validity=" . $tpValidity . ";expires=" . $tpExpires . ";state=cleanup-error;") } on-error={};',
+    '          :do { /ip hotspot user set $tpId disabled=yes comment=("TicketPro:v1;validity=" . $tpValidity . ";expires=" . $tpExpires . ";state=cleanup-error;" . $tpOwnership) } on-error={};',
     '          :log error ("TicketPro voucher cleanup failed: " . $tpUser . " (" . $tpReason . ")");',
     '        } else={',
-    '          :do { /ip hotspot user set $tpId disabled=yes comment=("TicketPro:v1;validity=" . $tpValidity . ";expires=" . $tpExpires . ";state=" . $tpState . ";") } on-error={ :set tpCleanupFailed true };',
+    '          :do { /ip hotspot user set $tpId disabled=yes comment=("TicketPro:v1;validity=" . $tpValidity . ";expires=" . $tpExpires . ";state=" . $tpState . ";" . $tpOwnership) } on-error={ :set tpCleanupFailed true };',
     '          :if ($tpCleanupFailed = true) do={',
     '            :log error ("TicketPro voucher state update failed: " . $tpUser);',
     '          } else={',

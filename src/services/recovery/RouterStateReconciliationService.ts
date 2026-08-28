@@ -1,10 +1,11 @@
 import type { AuthSession } from "../../domain/auth";
 import type { HotspotUser } from "../../domain/router";
-import type { RouterRecord } from "../../domain/database";
+import type { HotspotPlanRecord, RouterRecord } from "../../domain/database";
 import type { RouterService } from "../router";
 import {
   HotspotPlanRepository,
   RouterConnectionRepository,
+  RouterManagedResourceManifestRepository,
   RouterRepository,
   TicketBatchRepository,
   TicketRepository,
@@ -21,6 +22,8 @@ import { reconcileRouterPlanCatalog } from "./RouterPlanCatalogReconciliation";
 export type RouterStateReconciliationResult = {
   blockedDeviceCount: number;
   bypassCount: number;
+  managedResourceStatus: "drift" | "error" | "synced";
+  managedResourceWarningCount: number;
   planCount: number;
   recoveredTicketCount: number;
   ttlIpv4Enabled: boolean;
@@ -37,6 +40,7 @@ export class RouterStateReconciliationService {
   private readonly connections: RouterConnectionRepository;
   private readonly plans: HotspotPlanRepository;
   private readonly policies: Pick<RouterAccessPolicySyncService, "load">;
+  private readonly managedResources: RouterManagedResourceManifestRepository;
   private readonly routers: RouterRepository;
   private readonly ticketBatches: TicketBatchRepository;
   private readonly tickets: TicketRepository;
@@ -51,6 +55,7 @@ export class RouterStateReconciliationService {
     this.connections = new RouterConnectionRepository(database);
     this.plans = new HotspotPlanRepository(database);
     this.policies = dependencies.policies ?? new RouterAccessPolicySyncService(database);
+    this.managedResources = new RouterManagedResourceManifestRepository(database);
     this.routers = new RouterRepository(database);
     this.ticketBatches = new TicketBatchRepository(database);
     this.tickets = new TicketRepository(database);
@@ -78,13 +83,18 @@ export class RouterStateReconciliationService {
     }
     const connections = await this.connections.listByRouter(router.id);
     const cloudRouterId = routerAccessPolicyCloudId(router, connections);
-    const [systemInfo, actualPlans, routerUsers, policyResult] = await Promise.all([
+    const [systemInfo, actualPlans, routerUsers, policyResult, localPlansBefore] = await Promise.all([
       service.getSystemInfo(),
       service.getHotspotPlans(),
       service.listHotspotUsers(),
-      this.policies.load(router.account_id, router.id, cloudRouterId)
+      this.policies.load(router.account_id, router.id, cloudRouterId),
+      this.plans.listByRouter(router.id)
     ]);
-    await service.ensureVoucherLifecycleEngine();
+    const managedProfileNames = managedLifecycleProfileNames(
+      localPlansBefore,
+      routerUsers
+    );
+    await service.ensureVoucherLifecycleEngine({ managedProfileNames });
     const policy = policyResult.policy;
     const strict = policy.antiSharingMode === "strict";
 
@@ -167,6 +177,26 @@ export class RouterStateReconciliationService {
       }
     }
 
+    let managedResourceStatus: RouterStateReconciliationResult["managedResourceStatus"] = "error";
+    let managedResourceWarningCount = 0;
+    try {
+      const manifest = await service.inspectManagedResources({
+        authorizedManagementCidrs: managementCidrs(router),
+        managementUsername: "ticketpro-api",
+        managedHotspotProfileNames: managedProfileNames,
+        wireguardInterfaceName: router.connection_mode === "vpn" ? "ticketpro-vpn" : null
+      });
+      const storedManifest = await this.managedResources.save(
+        router.account_id,
+        router.id,
+        manifest
+      );
+      managedResourceStatus = storedManifest.record.status;
+      managedResourceWarningCount = manifest.warnings.length;
+    } catch (error) {
+      await this.managedResources.markError(router.account_id, router.id, error);
+    }
+
     const updatedRouter = await this.routers.update({
       ...router,
       board_name: systemInfo.boardName,
@@ -188,6 +218,8 @@ export class RouterStateReconciliationService {
     return {
       blockedDeviceCount: desiredBlockedDevices.length,
       bypassCount: desiredBypasses.length,
+      managedResourceStatus,
+      managedResourceWarningCount,
       planCount: actualPlans.length,
       recoveredTicketCount,
       ttlIpv4Enabled: verifiedTtl.blockIpv4Ttl,
@@ -221,6 +253,8 @@ export class RouterStateReconciliationService {
 
     let recovered = 0;
     for (const [planId, users] of usersByPlan) {
+      const plan = localPlans.find((candidate) => candidate.id === planId);
+      if (!plan) continue;
       const batchId = `batch-recovered-${crypto.randomUUID()}`;
       await this.ticketBatches.createWithTickets({
         account_id: router.account_id,
@@ -246,7 +280,10 @@ export class RouterStateReconciliationService {
         created_by_profile: this.session.internal_profile_role,
         created_by_profile_id: this.session.internal_profile_id,
         deleted_at: null,
+        data_limit_mb_snapshot: plan.data_limit_mb,
         downloaded_bytes: user.downloadedBytes ?? 0,
+        download_limit_snapshot: plan.download_limit,
+        duration_minutes_snapshot: plan.duration_minutes,
         expires_at: null,
         id: `ticket-recovered-${crypto.randomUUID()}`,
         ip_address: null,
@@ -265,7 +302,10 @@ export class RouterStateReconciliationService {
               ? "désactivé"
               : "disponible",
         sync_status: "synced",
+        shared_users_snapshot: plan.shared_users,
         uploaded_bytes: user.uploadedBytes ?? 0,
+        upload_limit_snapshot: plan.upload_limit,
+        validity_minutes_snapshot: plan.validity_minutes ?? plan.duration_minutes,
         username: user.username
       })));
       recovered += users.length;
@@ -304,4 +344,34 @@ export class RouterStateReconciliationService {
       routerId
     });
   }
+}
+
+function managedLifecycleProfileNames(
+  localPlans: HotspotPlanRecord[],
+  routerUsers: HotspotUser[]
+): string[] {
+  const names = new Set<string>();
+  for (const plan of localPlans) {
+    if (!plan.created_by_profile_id) continue;
+    const name = plan.mikrotik_profile_name?.trim() || plan.name.trim();
+    if (name && name.toLowerCase() !== "default") names.add(name);
+  }
+  for (const user of routerUsers) {
+    if (!user.comment?.startsWith("TicketPro:v1;")) continue;
+    const name = user.profileName.trim();
+    if (name && name.toLowerCase() !== "default") names.add(name);
+  }
+  return Array.from(names).sort();
+}
+
+function managementCidrs(router: RouterRecord): string[] {
+  const cidrs = new Set<string>(["10.250.0.0/16"]);
+  const octets = router.local_ip.trim().split(".").map(Number);
+  if (
+    octets.length === 4
+    && octets.every((octet) => Number.isInteger(octet) && octet >= 0 && octet <= 255)
+  ) {
+    cidrs.add(`${octets[0]}.${octets[1]}.${octets[2]}.0/24`);
+  }
+  return Array.from(cidrs).sort();
 }

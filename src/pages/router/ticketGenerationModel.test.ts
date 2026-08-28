@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildFileName,
   buildTicketBatch,
+  buildTicketRecord,
   createInitialTicketGenerationState,
   defaultTicketGenerationOptions,
   getTicketSummary,
@@ -82,6 +83,23 @@ describe("ticketGenerationModel", () => {
     ).toBe("Choisissez une quantité entre 1 et 500.");
   });
 
+  it("interdit le profil RouterOS default pour protéger son ownership externe", () => {
+    const state = {
+      ...createInitialTicketGenerationState("routeur-demo"),
+      selectedPlanId: "plan-default"
+    };
+    const defaultPlan = {
+      ...plans[0],
+      id: "plan-default",
+      name: "default",
+      profileName: "default"
+    };
+
+    expect(validateTicketGeneration(state, routers, [defaultPlan])).toBe(
+      "Le profil RouterOS default est réservé. Créez ou sélectionnez un forfait dédié."
+    );
+  });
+
   it("prépare le lot local et le résumé sans secret en clair", () => {
     const batch = buildTicketBatch({
       accountId: "account-douma-demo",
@@ -129,6 +147,29 @@ describe("ticketGenerationModel", () => {
       totalValue: 10000
     });
     expect(JSON.stringify(batch)).not.toContain("password");
+
+    const ticket = buildTicketRecord({
+      accountId: "account-douma-demo",
+      batchId: batch.id,
+      createdByProfile: "operator",
+      createdByProfileId: "account-douma-demo:internal-profile-operator",
+      mikrotikId: null,
+      passwordSecretRef: "secret://routeur-demo/123456/password",
+      planId: plans[0].id,
+      planSnapshot: plans[0],
+      routerId: "routeur-demo",
+      status: "disponible",
+      syncStatus: "pending",
+      username: "123456"
+    });
+    expect(ticket).toMatchObject({
+      data_limit_mb_snapshot: 2048,
+      download_limit_snapshot: "5M",
+      duration_minutes_snapshot: 180,
+      shared_users_snapshot: 1,
+      upload_limit_snapshot: "2M",
+      validity_minutes_snapshot: 180
+    });
   });
 
   it("oblige à choisir un serveur ou All lorsque plusieurs Hotspots existent", () => {

@@ -131,10 +131,33 @@ export class RouterService {
     return this.run("getHotspotPlans", () => this.adapter.getHotspotPlans());
   }
 
-  ensureVoucherLifecycleEngine() {
+  ensureVoucherLifecycleEngine(options?: import("../../domain/router").VoucherLifecycleEngineOptions) {
     return this.run(
       "ensureVoucherLifecycleEngine",
-      () => this.adapter.ensureVoucherLifecycleEngine()
+      () => this.adapter.ensureVoucherLifecycleEngine(options)
+    );
+  }
+
+  inspectManagedResources(options?: import("../../domain/router").RouterManagedResourceInspectionOptions) {
+    return this.run(
+      "inspectManagedResources",
+      () => this.adapter.inspectManagedResources(options)
+    );
+  }
+
+  upsertManagementAccount(config: import("../../domain/router").RouterManagementAccountConfig) {
+    return this.run(
+      "upsertManagementAccount",
+      () => this.adapter.upsertManagementAccount(config),
+      "router.settings.manage"
+    );
+  }
+
+  applyManagementServicePolicy(policy: import("../../domain/router").RouterManagementServicePolicy) {
+    return this.run(
+      "applyManagementServicePolicy",
+      () => this.adapter.applyManagementServicePolicy(policy),
+      "router.settings.manage"
     );
   }
 
@@ -152,6 +175,10 @@ export class RouterService {
 
   listHotspotUsers() {
     return this.run("listHotspotUsers", () => this.adapter.listHotspotUsers());
+  }
+
+  findHotspotUser(username: string) {
+    return this.run("findHotspotUser", () => this.adapter.findHotspotUser(username));
   }
 
   updateHotspotUser(

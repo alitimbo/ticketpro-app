@@ -1,4 +1,4 @@
-import type { RouterConnectionMode } from "../../domain/router";
+import type { RouterConnectionMode, RouterManagedResourceManifest } from "../../domain/router";
 import type { RouterRecord } from "../../domain/database";
 
 export type RouterSettings = {
@@ -11,6 +11,8 @@ export type RouterSettings = {
   password: string;
   username: string;
 };
+
+export type RouterManagementSecurityAuditState = "drift" | "secured" | "unknown";
 
 export const defaultRouterSettings: RouterSettings = {
   apiPort: "8728",
@@ -70,6 +72,40 @@ export function canEditRouterSensitiveSettings(role: string | null | undefined):
 
 export function canViewRouterSettings(role: string | null | undefined): boolean {
   return role === "admin" || role === "operator";
+}
+
+export function routerManagementSecurityAuditState(
+  manifest: RouterManagedResourceManifest | null
+): RouterManagementSecurityAuditState {
+  if (!manifest) return "unknown";
+  const resources = manifest.resources.filter((resource) =>
+    resource.kind === "management_account" || resource.kind === "management_service"
+  );
+  if (resources.length === 0) return "unknown";
+  return resources.every((resource) => resource.state === "present") ? "secured" : "drift";
+}
+
+export function mergeRouterManagementSecurityManifest(
+  existing: RouterManagedResourceManifest | null,
+  securityObservation: RouterManagedResourceManifest
+): RouterManagedResourceManifest {
+  const isManagementResource = (
+    resource: RouterManagedResourceManifest["resources"][number]
+  ) => resource.kind === "management_account" || resource.kind === "management_service";
+
+  return {
+    ...securityObservation,
+    desired: {
+      ...(existing?.desired ?? securityObservation.desired),
+      authorizedManagementCidrs: securityObservation.desired.authorizedManagementCidrs,
+      managementUsername: securityObservation.desired.managementUsername
+    },
+    resources: [
+      ...(existing?.resources.filter((resource) => !isManagementResource(resource)) ?? []),
+      ...securityObservation.resources.filter(isManagementResource)
+    ],
+    warnings: existing?.warnings ?? []
+  };
 }
 
 function isValidPort(value: string): boolean {

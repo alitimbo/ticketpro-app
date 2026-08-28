@@ -21,9 +21,11 @@ const tableNames: LocalTableName[] = [
   "license_state",
   "printers",
   "router_connections",
+  "router_managed_resource_manifests",
   "router_snapshots",
   "routers",
   "subscription_plans",
+  "sync_outbox",
   "ticket_batches",
   "tickets",
   "vpn_networks",
@@ -182,6 +184,12 @@ export class InMemoryDatabaseClient implements DatabaseClient {
 
     if (normalized.includes("where plan_id = ?1")) {
       return rows.filter((row) => row.plan_id === params[0]) as T[];
+    }
+
+    if (normalized.includes("where account_id = ?1 and idempotency_key = ?2")) {
+      return visibleRows.filter(
+        (row) => row.account_id === params[0] && row.idempotency_key === params[1]
+      ).slice(0, 1) as T[];
     }
 
     if (

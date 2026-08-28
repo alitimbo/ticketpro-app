@@ -162,6 +162,93 @@ export type VoucherLifecycleEngineState = {
   schedulerEnabled: boolean;
 };
 
+export type VoucherLifecycleEngineOptions = {
+  /**
+   * RouterOS user profiles that TicketPro is explicitly allowed to extend.
+   * Profiles omitted from this list are always left unchanged. An omitted or
+   * empty list deliberately means "do not touch user profiles".
+   */
+  managedProfileNames?: readonly string[];
+};
+
+export type RouterManagedResourceKind =
+  | "firewall_rule"
+  | "hotspot_dns"
+  | "hotspot_profile_extension"
+  | "hotspot_user_profile_extension"
+  | "ip_binding"
+  | "management_account"
+  | "management_service"
+  | "ntp_configuration"
+  | "voucher_scheduler"
+  | "voucher_script"
+  | "wireguard_address"
+  | "wireguard_interface"
+  | "wireguard_peer"
+  | "wireguard_route";
+
+export type RouterManagedResourceOwnership = "external" | "shared" | "ticketpro";
+export type RouterManagedResourceState = "drift" | "duplicate" | "missing" | "present";
+
+export type RouterManagedResourceObservation = {
+  /** Stable, secret-free identifier used by reconciliation and diagnostics. */
+  key: string;
+  kind: RouterManagedResourceKind;
+  matchCount: number;
+  ownership: RouterManagedResourceOwnership;
+  state: RouterManagedResourceState;
+  /** Only non-sensitive RouterOS values may be exposed here. */
+  attributes: Record<string, boolean | number | string | null>;
+};
+
+export type RouterManagedResourceInspectionOptions = {
+  authorizedManagementCidrs?: readonly string[];
+  managementUsername?: string | null;
+  managedHotspotProfileNames?: readonly string[];
+  wireguardInterfaceName?: string | null;
+};
+
+export type RouterManagedResourceManifest = {
+  capturedAt: string;
+  desired: {
+    authorizedManagementCidrs: string[];
+    managementUsername: string | null;
+    managedHotspotProfileNames: string[];
+    wireguardInterfaceName: string | null;
+  };
+  resources: RouterManagedResourceObservation[];
+  routerOsVersion: string;
+  schemaVersion: 1;
+  warnings: string[];
+};
+
+export type RouterManagementAccountConfig = {
+  /** Allows adoption only after an explicit user confirmation. */
+  adoptExisting?: boolean;
+  groupName?: string;
+  password: string;
+  username: string;
+};
+
+export type RouterManagementAccountResult = {
+  action: "created" | "updated";
+  groupName: string;
+  username: string;
+};
+
+export type RouterManagementServicePolicy = {
+  authorizedCidrs: readonly string[];
+  /** Must be set only after API access was tested through one authorized CIDR. */
+  currentPathConfirmed: boolean;
+  /** Disabled by default so preparing an account cannot cut unrelated access. */
+  disableUnusedServices?: boolean;
+};
+
+export type RouterManagementServicePolicyResult = {
+  disabledServices: string[];
+  restrictedServices: string[];
+};
+
 export type ActiveHotspotUser = {
   id: string;
   username: string;

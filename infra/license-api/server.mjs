@@ -21,6 +21,9 @@ const IPAY_PRIVATE_KEY = process.env.IPAY_PRIVATE_KEY ?? "";
 const IPAY_SECRET_HASH = process.env.IPAY_SECRET_HASH ?? "";
 const VPN_HUB_URL = String(process.env.VPN_HUB_URL ?? "http://127.0.0.1:8788").replace(/\/$/, "");
 const VPN_HUB_MASTER_TOKEN = process.env.VPN_HUB_MASTER_TOKEN ?? "";
+const VPN_CLIENT_ALLOWED_IPS = parseVpnClientAllowedIps(
+  process.env.VPN_CLIENT_ALLOWED_IPS ?? "10.250.0.0/16"
+);
 const SAAS_PASSWORD_RESET_URL = String(
   process.env.SAAS_PASSWORD_RESET_URL ?? "https://www.ticketpro-ne.com/reset-password"
 );
@@ -51,6 +54,7 @@ const SAAS_TRIAL_PLAN_ID = "ticketpro-trial-7-days";
 const SAAS_TRIAL_PLAN_CODE = "TRIAL-7D";
 const SAAS_PAID_GRACE_DAYS = 7;
 const DAY_MS = 86_400_000;
+const CLIENT_CLOCK_SKEW_TOLERANCE_MS = 5 * 60_000;
 const SUBSCRIPTION_NOTIFICATION_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const VPN_RECONCILIATION_INTERVAL_MS = Number(
   process.env.VPN_RECONCILIATION_INTERVAL_MS ?? 60_000
@@ -473,6 +477,12 @@ db.exec(`
     uptime_seconds INTEGER NOT NULL DEFAULT 0,
     remaining_seconds INTEGER,
     data_remaining_bytes INTEGER,
+    duration_minutes_snapshot INTEGER,
+    validity_minutes_snapshot INTEGER,
+    data_limit_mb_snapshot INTEGER,
+    download_limit_snapshot TEXT,
+    upload_limit_snapshot TEXT,
+    shared_users_snapshot INTEGER,
     sync_status TEXT NOT NULL,
     created_by_user_id TEXT NOT NULL REFERENCES organization_users(id),
     created_by_name TEXT NOT NULL,
@@ -662,6 +672,12 @@ ensureColumn("organization_users", "created_by_user_id", "TEXT");
 ensureColumn("organization_sessions", "active_membership_id", "TEXT");
 ensureColumn("organization_subscriptions", "max_devices", "INTEGER NOT NULL DEFAULT 1");
 ensureColumn("organization_subscriptions", "device_limit_mode", "TEXT NOT NULL DEFAULT 'limited'");
+ensureColumn("organization_tickets", "duration_minutes_snapshot", "INTEGER");
+ensureColumn("organization_tickets", "validity_minutes_snapshot", "INTEGER");
+ensureColumn("organization_tickets", "data_limit_mb_snapshot", "INTEGER");
+ensureColumn("organization_tickets", "download_limit_snapshot", "TEXT");
+ensureColumn("organization_tickets", "upload_limit_snapshot", "TEXT");
+ensureColumn("organization_tickets", "shared_users_snapshot", "INTEGER");
 migrateOrganizationVpnPeersForSharedDevices();
 
 db.exec(`
@@ -1311,6 +1327,14 @@ const statements = {
     JOIN organization_devices AS device ON device.id = peer.device_id
     WHERE peer.public_key = ? AND device.organization_id = ? LIMIT 1
   `),
+  listSharedOrganizationVpnPeersByPublicKey: db.prepare(`
+    SELECT peer.*, device.organization_id, device.installation_id,
+      device.registered_by_user_id, device.status AS device_status
+    FROM organization_vpn_peers AS peer
+    JOIN organization_devices AS device ON device.id = peer.device_id
+    WHERE peer.public_key = ? AND device.status != 'revoked'
+    ORDER BY device.organization_id ASC
+  `),
   insertOrganizationVpnPeer: db.prepare(`
     INSERT OR IGNORE INTO organization_vpn_peers (
       id, device_id, gateway_id, public_key, vpn_ip, key_version,
@@ -1353,6 +1377,14 @@ const statements = {
       config_version = config_version + 1, desired_state = 'enabled',
       applied_state = 'enabled', last_error_code = NULL, revoked_at = NULL,
       updated_at = ?
+    WHERE device_id = ? AND public_key = ?
+  `),
+  rotateOrganizationVpnPeerPreservingDesiredState: db.prepare(`
+    UPDATE organization_vpn_peers
+    SET public_key = ?, key_version = key_version + 1,
+      config_version = config_version + 1,
+      applied_state = CASE desired_state WHEN 'enabled' THEN 'enabled' ELSE 'disabled' END,
+      last_error_code = NULL, revoked_at = NULL, updated_at = ?
     WHERE device_id = ? AND public_key = ?
   `),
   updateOrganizationVpnPeerHandshake: db.prepare(`
@@ -1518,10 +1550,12 @@ const statements = {
       completed_at, expires_at, deleted_at, printed_count, downloaded_bytes,
       uploaded_bytes, mikrotik_id, hotspot_server_name, mikrotik_profile_name,
       exported_at, archived_at, router_deleted_at, last_router_sync_at,
-      uptime_seconds, remaining_seconds, data_remaining_bytes, sync_status,
+      uptime_seconds, remaining_seconds, data_remaining_bytes,
+      duration_minutes_snapshot, validity_minutes_snapshot, data_limit_mb_snapshot,
+      download_limit_snapshot, upload_limit_snapshot, shared_users_snapshot, sync_status,
       created_by_user_id, created_by_name, created_by_email, created_by_role,
       created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       batch_id = excluded.batch_id,
       plan_id = excluded.plan_id,
@@ -1547,6 +1581,12 @@ const statements = {
       uptime_seconds = excluded.uptime_seconds,
       remaining_seconds = excluded.remaining_seconds,
       data_remaining_bytes = excluded.data_remaining_bytes,
+      duration_minutes_snapshot = excluded.duration_minutes_snapshot,
+      validity_minutes_snapshot = excluded.validity_minutes_snapshot,
+      data_limit_mb_snapshot = excluded.data_limit_mb_snapshot,
+      download_limit_snapshot = excluded.download_limit_snapshot,
+      upload_limit_snapshot = excluded.upload_limit_snapshot,
+      shared_users_snapshot = excluded.shared_users_snapshot,
       sync_status = excluded.sync_status,
       updated_at = excluded.updated_at
     WHERE organization_tickets.organization_id = excluded.organization_id
@@ -1782,6 +1822,45 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function parseVpnClientAllowedIps(value) {
+  const routes = String(value ?? "")
+    .split(",")
+    .map((route) => route.trim())
+    .filter(Boolean);
+  if (routes.length === 0 || routes.length > 16) {
+    throw new Error("VPN_CLIENT_ALLOWED_IPS doit contenir entre 1 et 16 routes privées.");
+  }
+  for (const route of routes) validatePrivateIpv4Cidr(route);
+  return Object.freeze([...new Set(routes)]);
+}
+
+function validatePrivateIpv4Cidr(value) {
+  const [address, rawPrefix, unexpected] = String(value).split("/");
+  const octets = address.split(".").map(Number);
+  const prefix = Number(rawPrefix);
+  if (
+    unexpected !== undefined
+    || octets.length !== 4
+    || octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)
+    || !Number.isInteger(prefix)
+    || prefix < 8
+    || prefix > 32
+  ) {
+    throw new Error(`Route VPN cliente invalide: ${value}`);
+  }
+  const addressInt = octets.reduce((result, octet) => ((result << 8) | octet) >>> 0, 0);
+  const mask = prefix === 32 ? 0xffffffff : (0xffffffff << (32 - prefix)) >>> 0;
+  if (((addressInt & mask) >>> 0) !== addressInt) {
+    throw new Error(`La route VPN cliente doit être une adresse réseau: ${value}`);
+  }
+  const isPrivate = octets[0] === 10
+    || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31 && prefix >= 12)
+    || (octets[0] === 192 && octets[1] === 168 && prefix >= 16);
+  if (!isPrivate) {
+    throw new Error(`La route VPN cliente doit rester privée: ${value}`);
+  }
+}
+
 function hash(value) {
   return crypto.createHmac("sha256", HASH_SECRET).update(String(value)).digest("hex");
 }
@@ -1987,7 +2066,7 @@ function requireInstallationId(body) {
 function requireVpnPublicKey(body, field = "public_key") {
   const publicKey = String(body?.[field] ?? body?.publicKey ?? "").trim();
   if (!/^[A-Za-z0-9+/]{43}=$/.test(publicKey)) {
-    throw new HttpError(400, "ClÃ© publique WireGuard invalide.", {
+    throw new HttpError(400, "Clé publique WireGuard invalide.", {
       code: "VPN_PUBLIC_KEY_INVALID"
     });
   }
@@ -2182,7 +2261,7 @@ async function reconcileOrganizationVpnPeers() {
           : "VPN_RECONCILIATION_DISABLE_FAILED";
         statements.markOrganizationVpnPeerError.run(errorCode, nowIso(), peer.device_id);
         if (process.env.NODE_ENV !== "test") {
-          console.error(`RÃ©conciliation VPN impossible pour ${peer.device_id}:`, error);
+          console.error(`Réconciliation VPN impossible pour ${peer.device_id}:`, error);
         }
       }
     }
@@ -3187,9 +3266,12 @@ function normalizeOrganizationTicket(ticket) {
     batch_id: requireSnapshotText(ticket, "batch_id", 200),
     completed_at: normalizeOptionalIsoDate(ticket.completed_at),
     created_at: normalizeOptionalIsoDate(ticket.created_at) ?? nowIso(),
+    data_limit_mb_snapshot: normalizeOptionalNonNegativeInteger(ticket.data_limit_mb_snapshot),
     data_remaining_bytes: normalizeOptionalNonNegativeInteger(ticket.data_remaining_bytes),
     deleted_at: normalizeOptionalIsoDate(ticket.deleted_at),
     downloaded_bytes: normalizeNonNegativeInteger(ticket.downloaded_bytes),
+    download_limit_snapshot: optionalSnapshotText(ticket.download_limit_snapshot, 100),
+    duration_minutes_snapshot: normalizeOptionalNonNegativeInteger(ticket.duration_minutes_snapshot),
     expires_at: normalizeOptionalIsoDate(ticket.expires_at),
     exported_at: normalizeOptionalIsoDate(ticket.exported_at),
     hotspot_server_name: optionalSnapshotText(ticket.hotspot_server_name, 200) ?? "all",
@@ -3204,13 +3286,121 @@ function normalizeOrganizationTicket(ticket) {
     printed_count: normalizeNonNegativeInteger(ticket.printed_count),
     remaining_seconds: normalizeOptionalNonNegativeInteger(ticket.remaining_seconds),
     router_deleted_at: normalizeOptionalIsoDate(ticket.router_deleted_at),
+    shared_users_snapshot: normalizeOptionalNonNegativeInteger(ticket.shared_users_snapshot),
     status: requireSnapshotText(ticket, "status", 50),
     sync_status: optionalSnapshotText(ticket.sync_status, 50) ?? "synced",
     updated_at: normalizeOptionalIsoDate(ticket.updated_at) ?? nowIso(),
     uploaded_bytes: normalizeNonNegativeInteger(ticket.uploaded_bytes),
+    upload_limit_snapshot: optionalSnapshotText(ticket.upload_limit_snapshot, 100),
     uptime_seconds: normalizeNonNegativeInteger(ticket.uptime_seconds),
-    username: requireSnapshotText(ticket, "username", 200)
+    username: requireSnapshotText(ticket, "username", 200),
+    validity_minutes_snapshot: normalizeOptionalNonNegativeInteger(ticket.validity_minutes_snapshot)
   };
+}
+
+function mergeOrganizationTicket(existing, incoming) {
+  if (!existing) return incoming;
+
+  const currentRank = organizationTicketLifecycleRank(existing.status);
+  const incomingRank = organizationTicketLifecycleRank(incoming.status);
+  const currentStatus = normalizeOrganizationTicketStatus(existing.status);
+  const statusRegression = (
+    (currentRank >= 2 && incomingRank < currentRank)
+    || (
+      currentRank === 1
+      && incomingRank === 0
+      && !isOrganizationTicketDisabledStatus(currentStatus)
+    )
+  );
+  const commercialSnapshotMutable = currentRank < 2
+    && !existing.activated_at
+    && !existing.completed_at
+    && !existing.expires_at
+    && !existing.exported_at
+    && Number(existing.printed_count) === 0
+    && Number(existing.downloaded_bytes) === 0
+    && Number(existing.uploaded_bytes) === 0
+    && Number(existing.uptime_seconds) === 0;
+  const snapshotValue = (field) => {
+    if (commercialSnapshotMutable) return incoming[field];
+    return existing[field] ?? incoming[field] ?? null;
+  };
+
+  return {
+    ...incoming,
+    activated_at: existing.activated_at ?? incoming.activated_at,
+    archived_at: existing.archived_at ?? incoming.archived_at,
+    batch_id: existing.batch_id,
+    completed_at: existing.completed_at ?? incoming.completed_at,
+    created_at: existing.created_at,
+    data_limit_mb_snapshot: snapshotValue("data_limit_mb_snapshot"),
+    data_remaining_bytes: minimumKnownCounter(existing.data_remaining_bytes, incoming.data_remaining_bytes),
+    deleted_at: existing.deleted_at ?? incoming.deleted_at,
+    downloaded_bytes: Math.max(Number(existing.downloaded_bytes), incoming.downloaded_bytes),
+    download_limit_snapshot: snapshotValue("download_limit_snapshot"),
+    duration_minutes_snapshot: snapshotValue("duration_minutes_snapshot"),
+    expires_at: existing.expires_at ?? incoming.expires_at,
+    exported_at: existing.exported_at ?? incoming.exported_at,
+    last_router_sync_at: latestKnownIso(existing.last_router_sync_at, incoming.last_router_sync_at),
+    mikrotik_id: existing.mikrotik_id ?? incoming.mikrotik_id,
+    mikrotik_profile_name: commercialSnapshotMutable
+      ? incoming.mikrotik_profile_name
+      : existing.mikrotik_profile_name ?? incoming.mikrotik_profile_name,
+    password_is_username: Number(existing.password_is_username) === 1,
+    plan_id: commercialSnapshotMutable ? incoming.plan_id : existing.plan_id,
+    printed_count: Math.max(Number(existing.printed_count), incoming.printed_count),
+    remaining_seconds: minimumKnownCounter(existing.remaining_seconds, incoming.remaining_seconds),
+    router_deleted_at: existing.router_deleted_at ?? incoming.router_deleted_at,
+    shared_users_snapshot: snapshotValue("shared_users_snapshot"),
+    status: statusRegression ? existing.status : incoming.status,
+    sync_status: statusRegression ? "conflict" : incoming.sync_status,
+    uploaded_bytes: Math.max(Number(existing.uploaded_bytes), incoming.uploaded_bytes),
+    upload_limit_snapshot: snapshotValue("upload_limit_snapshot"),
+    uptime_seconds: Math.max(Number(existing.uptime_seconds), incoming.uptime_seconds),
+    username: existing.username,
+    validity_minutes_snapshot: snapshotValue("validity_minutes_snapshot")
+  };
+}
+
+function normalizeOrganizationTicketStatus(status) {
+  return String(status ?? "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+function organizationTicketLifecycleRank(status) {
+  const normalized = normalizeOrganizationTicketStatus(status);
+  if (normalized.includes("router_deleted") || (normalized.includes("supprim") && normalized.includes("routeur"))) return 4;
+  if (normalized.includes("archiv") || normalized === "deleted" || normalized.includes("supprim")) return 5;
+  if (normalized.includes("expir")) return 3;
+  if (normalized.includes("consomm") || normalized.includes("puis") || normalized.includes("exhaust")) return 2;
+  if (
+    normalized.includes("en_cours")
+    || normalized.includes("complet")
+    || normalized.includes("activ")
+    || normalized.includes("disabled")
+  ) return 1;
+  return 0;
+}
+
+function isOrganizationTicketDisabledStatus(normalized) {
+  return normalized.includes("disabled")
+    || normalized.includes("desactiv")
+    || normalized.includes("sactiv");
+}
+
+function minimumKnownCounter(left, right) {
+  if (left === null || left === undefined) return right ?? null;
+  if (right === null || right === undefined) return Number(left);
+  return Math.min(Number(left), Number(right));
+}
+
+function latestKnownIso(left, right) {
+  if (!left) return right ?? null;
+  if (!right) return left;
+  return new Date(left).getTime() >= new Date(right).getTime() ? left : right;
 }
 
 function organizationTicketBatchResponse(record) {
@@ -3245,9 +3435,12 @@ function organizationTicketResponse(record) {
     created_by_name: record.created_by_name,
     created_by_role: record.created_by_role,
     created_by_user_id: record.created_by_user_id,
+    data_limit_mb_snapshot: record.data_limit_mb_snapshot === null ? null : Number(record.data_limit_mb_snapshot),
     data_remaining_bytes: record.data_remaining_bytes === null ? null : Number(record.data_remaining_bytes),
     deleted_at: record.deleted_at,
     downloaded_bytes: Number(record.downloaded_bytes),
+    download_limit_snapshot: record.download_limit_snapshot,
+    duration_minutes_snapshot: record.duration_minutes_snapshot === null ? null : Number(record.duration_minutes_snapshot),
     expires_at: record.expires_at,
     exported_at: record.exported_at,
     hotspot_server_name: record.hotspot_server_name,
@@ -3262,12 +3455,15 @@ function organizationTicketResponse(record) {
     printed_count: Number(record.printed_count),
     remaining_seconds: record.remaining_seconds === null ? null : Number(record.remaining_seconds),
     router_deleted_at: record.router_deleted_at,
+    shared_users_snapshot: record.shared_users_snapshot === null ? null : Number(record.shared_users_snapshot),
     status: record.status,
     sync_status: record.sync_status,
     updated_at: record.updated_at,
     uploaded_bytes: Number(record.uploaded_bytes),
+    upload_limit_snapshot: record.upload_limit_snapshot,
     uptime_seconds: Number(record.uptime_seconds),
-    username: record.username
+    username: record.username,
+    validity_minutes_snapshot: record.validity_minutes_snapshot === null ? null : Number(record.validity_minutes_snapshot)
   };
 }
 
@@ -5508,41 +5704,48 @@ const handlers = [
       if (!batch) {
         throw new HttpError(409, `Le lot du voucher ${ticket.username} est introuvable.`);
       }
+      const merged = mergeOrganizationTicket(existing, ticket);
       statements.upsertOrganizationTicket.run(
         ticketId,
         context.organization.id,
         routerId,
-        ticket.batch_id,
-        ticket.plan_id,
-        ticket.username,
-        ticket.password_is_username ? 1 : 0,
-        ticket.status,
-        ticket.mac_address,
-        ticket.ip_address,
-        ticket.activated_at,
-        ticket.completed_at,
-        ticket.expires_at,
-        ticket.deleted_at,
-        ticket.printed_count,
-        ticket.downloaded_bytes,
-        ticket.uploaded_bytes,
-        ticket.mikrotik_id,
-        ticket.hotspot_server_name,
-        ticket.mikrotik_profile_name,
-        ticket.exported_at,
-        ticket.archived_at,
-        ticket.router_deleted_at,
-        ticket.last_router_sync_at,
-        ticket.uptime_seconds,
-        ticket.remaining_seconds,
-        ticket.data_remaining_bytes,
-        ticket.sync_status,
+        merged.batch_id,
+        merged.plan_id,
+        merged.username,
+        merged.password_is_username ? 1 : 0,
+        merged.status,
+        merged.mac_address,
+        merged.ip_address,
+        merged.activated_at,
+        merged.completed_at,
+        merged.expires_at,
+        merged.deleted_at,
+        merged.printed_count,
+        merged.downloaded_bytes,
+        merged.uploaded_bytes,
+        merged.mikrotik_id,
+        merged.hotspot_server_name,
+        merged.mikrotik_profile_name,
+        merged.exported_at,
+        merged.archived_at,
+        merged.router_deleted_at,
+        merged.last_router_sync_at,
+        merged.uptime_seconds,
+        merged.remaining_seconds,
+        merged.data_remaining_bytes,
+        merged.duration_minutes_snapshot,
+        merged.validity_minutes_snapshot,
+        merged.data_limit_mb_snapshot,
+        merged.download_limit_snapshot,
+        merged.upload_limit_snapshot,
+        merged.shared_users_snapshot,
+        merged.sync_status,
         existing?.created_by_user_id ?? context.user.id,
         existing?.created_by_name ?? context.user.name,
         existing?.created_by_email ?? context.user.email,
         existing?.created_by_role ?? creatorRole,
-        existing?.created_at ?? ticket.created_at,
-        ticket.updated_at
+        existing?.created_at ?? merged.created_at,
+        merged.updated_at
       );
     }
 
@@ -5695,7 +5898,10 @@ const handlers = [
     const routerId = requireText(body, "router_id", 200);
     const context = requireOrganizationRouterPermission(request, "router.logs.clean", routerId);
     const cutoff = normalizeOptionalIsoDate(body.before);
-    if (!cutoff || new Date(cutoff).getTime() > Date.now()) {
+    if (
+      !cutoff
+      || new Date(cutoff).getTime() > Date.now() + CLIENT_CLOCK_SKEW_TOLERANCE_MS
+    ) {
       throw new HttpError(400, "Date de nettoyage invalide.");
     }
     const result = statements.deleteOrganizationActivityLogsBefore.run(
@@ -6429,7 +6635,7 @@ const handlers = [
   }),
 
   route("POST", "/v1/saas/devices/register", async (request, body) => {
-    if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. RÃ©essayez plus tard.");
+    if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. Réessayez plus tard.");
     const context = requireOrganizationPermission(request, "global.routers.select", {
       requireActiveSubscription: true
     });
@@ -6550,7 +6756,7 @@ const handlers = [
     }
     if (!device) throw new HttpError(500, "Impossible d'enregistrer cet appareil.");
     if (device.status === "revoked") {
-      throw new HttpError(409, "Cet appareil a Ã©tÃ© rÃ©voquÃ©.", {
+      throw new HttpError(409, "Cet appareil a été révoqué.", {
         code: "DEVICE_REVOKED",
         device_id: device.id
       });
@@ -6562,7 +6768,7 @@ const handlers = [
 
     let vpnPeer = statements.findOrganizationVpnPeerByDevice.get(organization.id, device.id);
     if (vpnPeer && vpnPeer.public_key !== publicKey) {
-      throw new HttpError(409, "La clÃ© VPN de cet appareil a changÃ©. Une rotation explicite est requise.", {
+      throw new HttpError(409, "La clé VPN de cet appareil a changé. Une rotation explicite est requise.", {
         code: "DEVICE_KEY_ROTATION_REQUIRED",
         device_id: device.id,
         key_version: Number(vpnPeer.key_version)
@@ -6574,7 +6780,7 @@ const handlers = [
       );
       vpnPeer = statements.findOrganizationVpnPeerByDevice.get(organization.id, device.id);
       if (!vpnPeer) {
-        throw new HttpError(409, "Cette clÃ© VPN appartient dÃ©jÃ  Ã  un autre appareil.", {
+        throw new HttpError(409, "Cette clé VPN appartient déjà à un autre appareil.", {
           code: "VPN_PUBLIC_KEY_ALREADY_REGISTERED"
         });
       }
@@ -6626,7 +6832,7 @@ const handlers = [
       device_access_scope: deviceAccessScope,
       vpn: {
         address: provisioned.assigned_address,
-        allowed_ips: [tenant.address_pool],
+        allowed_ips: VPN_CLIENT_ALLOWED_IPS,
         config_version: Number(vpnPeer.config_version),
         endpoint: tenant.server_endpoint,
         gateway_id: vpnPeer.gateway_id,
@@ -6757,12 +6963,25 @@ const handlers = [
       operator_limit: organizationOperatorLimitForHub(organization.id, subscription),
       router_limit: Number(subscription.router_limit)
     });
-    statements.markOrganizationVpnPeerPending.run("enabled", nowIso(), device.id);
+    const sharedPeers = alreadyRecovered
+      ? []
+      : statements.listSharedOrganizationVpnPeersByPublicKey.all(previousPublicKey);
+    if (!sharedPeers.some((sharedPeer) => sharedPeer.device_id === device.id)) {
+      sharedPeers.push({ ...vpnPeer, device_id: device.id, desired_state: "enabled" });
+    }
+    for (const sharedPeer of sharedPeers) {
+      statements.markOrganizationVpnPeerPending.run(
+        sharedPeer.device_id === device.id ? "enabled" : sharedPeer.desired_state,
+        nowIso(),
+        sharedPeer.device_id
+      );
+    }
     let provisioned;
     try {
       provisioned = await vpnHubRequest("/v1/peers", {
         account_id: organization.id,
-        action: alreadyRecovered ? "upsert" : "rotate",
+        action: alreadyRecovered ? "upsert" : "rotate_shared",
+        allow_revoked_current: !alreadyRecovered,
         name: device.name,
         peer_type: "operator",
         persistent_keepalive: 25,
@@ -6771,7 +6990,13 @@ const handlers = [
         resource_id: `device:${device.id}`
       });
     } catch (error) {
-      statements.markOrganizationVpnPeerError.run("VPN_DEVICE_RECOVERY_FAILED", nowIso(), device.id);
+      for (const sharedPeer of sharedPeers) {
+        statements.markOrganizationVpnPeerError.run(
+          "VPN_DEVICE_RECOVERY_FAILED",
+          nowIso(),
+          sharedPeer.device_id
+        );
+      }
       throw error;
     }
 
@@ -6785,13 +7010,24 @@ const handlers = [
           organization.id,
           device.id
         );
-        const rotated = statements.rotateOrganizationVpnPeer.run(
-          newPublicKey,
-          now,
-          device.id,
-          previousPublicKey
-        );
-        if (Number(restored.changes) !== 1 || Number(rotated.changes) !== 1) {
+        let rotatedCount = 0;
+        for (const sharedPeer of sharedPeers) {
+          const rotated = sharedPeer.device_id === device.id
+            ? statements.rotateOrganizationVpnPeer.run(
+                newPublicKey,
+                now,
+                sharedPeer.device_id,
+                previousPublicKey
+              )
+            : statements.rotateOrganizationVpnPeerPreservingDesiredState.run(
+                newPublicKey,
+                now,
+                sharedPeer.device_id,
+                previousPublicKey
+              );
+          rotatedCount += Number(rotated.changes);
+        }
+        if (Number(restored.changes) !== 1 || rotatedCount !== sharedPeers.length) {
           throw new Error("Conflit pendant la récupération de l'appareil.");
         }
         db.exec("COMMIT");
@@ -6824,7 +7060,7 @@ const handlers = [
       max_devices: maxDevices,
       vpn: {
         address: provisioned.assigned_address ?? vpnPeer.vpn_ip,
-        allowed_ips: [tenant.address_pool],
+        allowed_ips: VPN_CLIENT_ALLOWED_IPS,
         config_version: Number(vpnPeer.config_version),
         endpoint: tenant.server_endpoint,
         gateway_id: vpnPeer.gateway_id,
@@ -6837,7 +7073,7 @@ const handlers = [
 
   route("POST", "/v1/saas/devices/rotate-key", async (request, body) => {
     if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. Réessayez plus tard.");
-    const context = requireOrganizationPermission(request, "global.vpn", {
+    const context = requireOrganizationPermission(request, "global.routers.select", {
       requireActiveSubscription: true
     });
     const { organization, subscription, user, membership } = context;
@@ -6886,12 +7122,24 @@ const handlers = [
       operator_limit: organizationOperatorLimitForHub(organization.id, subscription),
       router_limit: Number(subscription.router_limit)
     });
-    statements.markOrganizationVpnPeerPending.run("enabled", nowIso(), device.id);
+    const sharedPeers = alreadyRotated
+      ? []
+      : statements.listSharedOrganizationVpnPeersByPublicKey.all(previousPublicKey);
+    for (const sharedPeer of sharedPeers) {
+      statements.markOrganizationVpnPeerPending.run(
+        sharedPeer.desired_state,
+        nowIso(),
+        sharedPeer.device_id
+      );
+    }
+    if (sharedPeers.length === 0) {
+      statements.markOrganizationVpnPeerPending.run("enabled", nowIso(), device.id);
+    }
     let provisioned;
     try {
       provisioned = await vpnHubRequest("/v1/peers", {
         account_id: organization.id,
-        action: alreadyRotated ? "upsert" : "rotate",
+        action: alreadyRotated ? "upsert" : "rotate_shared",
         name: device.name,
         peer_type: "operator",
         persistent_keepalive: 25,
@@ -6900,16 +7148,37 @@ const handlers = [
         resource_id: `device:${device.id}`
       });
     } catch (error) {
-      statements.markOrganizationVpnPeerError.run("VPN_KEY_ROTATION_FAILED", nowIso(), device.id);
+      for (const sharedPeer of sharedPeers) {
+        statements.markOrganizationVpnPeerError.run(
+          "VPN_KEY_ROTATION_FAILED",
+          nowIso(),
+          sharedPeer.device_id
+        );
+      }
+      if (sharedPeers.length === 0) {
+        statements.markOrganizationVpnPeerError.run("VPN_KEY_ROTATION_FAILED", nowIso(), device.id);
+      }
       throw error;
     }
     if (!alreadyRotated) {
-      statements.rotateOrganizationVpnPeer.run(
-        newPublicKey,
-        nowIso(),
-        device.id,
-        previousPublicKey
-      );
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        for (const sharedPeer of sharedPeers) {
+          const rotated = statements.rotateOrganizationVpnPeerPreservingDesiredState.run(
+            newPublicKey,
+            nowIso(),
+            sharedPeer.device_id,
+            previousPublicKey
+          );
+          if (Number(rotated.changes) !== 1) {
+            throw new Error("Conflit pendant la rotation VPN multi-organisation.");
+          }
+        }
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
     }
     statements.markOrganizationVpnPeerEnabled.run(
       provisioned.assigned_address ?? vpnPeer.vpn_ip,
@@ -6934,7 +7203,7 @@ const handlers = [
       max_devices: maxDevices,
       vpn: {
         address: provisioned.assigned_address ?? vpnPeer.vpn_ip,
-        allowed_ips: [tenant.address_pool],
+        allowed_ips: VPN_CLIENT_ALLOWED_IPS,
         config_version: Number(vpnPeer.config_version),
         endpoint: tenant.server_endpoint,
         gateway_id: vpnPeer.gateway_id,
@@ -6946,7 +7215,7 @@ const handlers = [
   }),
 
   route("POST", "/v1/saas/devices/revoke", async (request, body) => {
-    if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. RÃ©essayez plus tard.");
+    if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. Réessayez plus tard.");
     const context = requireOrganizationPermission(request, "global.vpn");
     const { organization, user, membership } = context;
     const deviceId = requireText(body, "device_id", 200);
@@ -7032,7 +7301,7 @@ const handlers = [
   }),
 
   route("GET", "/v1/saas/vpn/peers", async (request) => {
-    if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. RÃ©essayez plus tard.");
+    if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. Réessayez plus tard.");
     const { organization, user } = requireOrganizationPermission(request, "global.vpn", {
       requireActiveSubscription: true
     });

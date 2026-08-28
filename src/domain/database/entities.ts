@@ -1,5 +1,57 @@
 export type SyncStatus = "local" | "pending" | "synced" | "conflict";
 
+export type SyncOutboxStatus =
+  | "pending"
+  | "processing"
+  | "retry"
+  | "succeeded"
+  | "conflict"
+  | "failed"
+  | "cancelled";
+
+export type SyncOutboxRecord = {
+  id: string;
+  account_id: string;
+  router_id: string | null;
+  operation_type: string;
+  aggregate_type: string;
+  aggregate_id: string;
+  idempotency_key: string;
+  correlation_id: string;
+  payload_json: string;
+  status: SyncOutboxStatus;
+  priority: number;
+  attempt_count: number;
+  max_attempts: number;
+  next_attempt_at: string;
+  locked_at: string | null;
+  last_attempt_at: string | null;
+  completed_at: string | null;
+  last_error_code: string | null;
+  last_error_message: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CreateSyncOutboxInput = Omit<
+  SyncOutboxRecord,
+  | "attempt_count"
+  | "completed_at"
+  | "created_at"
+  | "last_attempt_at"
+  | "last_error_code"
+  | "last_error_message"
+  | "locked_at"
+  | "max_attempts"
+  | "next_attempt_at"
+  | "priority"
+  | "status"
+  | "updated_at"
+> & Partial<Pick<
+  SyncOutboxRecord,
+  "created_at" | "max_attempts" | "next_attempt_at" | "priority" | "status" | "updated_at"
+>>;
+
 export type RouterConnectionMode = "agent_future" | "distant_ip" | "local" | "vpn";
 
 export type RouterStatus = "active" | "offline" | "error" | "warning";
@@ -296,6 +348,12 @@ export type TicketRecord = {
   uptime_seconds?: number;
   remaining_seconds?: number | null;
   data_remaining_bytes?: number | null;
+  duration_minutes_snapshot?: number | null;
+  validity_minutes_snapshot?: number | null;
+  data_limit_mb_snapshot?: number | null;
+  download_limit_snapshot?: string | null;
+  upload_limit_snapshot?: string | null;
+  shared_users_snapshot?: number | null;
 };
 
 export type TicketStateHistoryRecord = {
@@ -378,6 +436,23 @@ export type RouterSnapshotRecord = {
   updated_at: string;
   deleted_at: string | null;
   sync_status: SyncStatus;
+};
+
+export type RouterManagedResourceManifestStatus = "drift" | "error" | "synced";
+
+export type RouterManagedResourceManifestRecord = {
+  account_id: string;
+  created_at: string;
+  desired_json: string;
+  last_error: string | null;
+  observed_at: string;
+  observed_json: string;
+  revision: number;
+  router_id: string;
+  schema_version: number;
+  status: RouterManagedResourceManifestStatus;
+  updated_at: string;
+  warnings_json: string;
 };
 
 export type AppLogRecord = {

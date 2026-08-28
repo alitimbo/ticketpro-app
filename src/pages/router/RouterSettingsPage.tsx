@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import {
   Ban,
@@ -14,6 +14,7 @@ import { useAuth } from "../../app/auth/AuthProvider";
 import type { RouterRecord } from "../../domain/database";
 import {
   RouterConnectionRepository,
+  RouterManagedResourceManifestRepository,
   RouterRepository,
   useAppDatabase
 } from "../../services/database";
@@ -28,16 +29,33 @@ import {
   type RouterAccessPolicy,
   type RouterAccessPolicySyncStatus
 } from "../../services/access";
-import { createPersistedRouterService, RouterServiceError } from "../../services/router";
+import {
+  createPersistedRouterService,
+  RouterManagementSecurityService,
+  RouterServiceError,
+  type PreparedRouterManagementSecurity
+} from "../../services/router";
 import { RouterCloudRecoveryService } from "../../services/recovery";
 import { encryptLocalSecret } from "../../services/security/localSecrets";
-import { Badge, Button, Card, DataListItem, PageHeader, PasswordField, StatusDot } from "../../shared/ui";
+import {
+  Badge,
+  Button,
+  Card,
+  ConfirmDialog,
+  DataListItem,
+  PageHeader,
+  PasswordField,
+  StatusDot
+} from "../../shared/ui";
 import {
   canEditRouterSensitiveSettings,
   canViewRouterSettings,
   defaultRouterSettings,
+  mergeRouterManagementSecurityManifest,
+  routerManagementSecurityAuditState,
   routerRecordToSettings,
   validateRouterSettings,
+  type RouterManagementSecurityAuditState,
   type RouterSettings
 } from "./routerSettingsPageModel";
 
@@ -63,6 +81,8 @@ const emptyBlockedDevice: Omit<BlockedDevice, "id"> = {
 
 export function RouterSettingsPage() {
   const { saasAccount, session } = useAuth();
+  const sessionAccountId = session?.account_id ?? null;
+  const sessionProfileId = session?.internal_profile_id ?? null;
   const { routerId = "" } = useParams();
   const [searchParams] = useSearchParams();
   const shouldFocusAntiSharing = searchParams.get("section") === "anti-partage";
@@ -71,21 +91,25 @@ export function RouterSettingsPage() {
   const canEditSensitive = canEditRouterSensitiveSettings(session?.internal_profile_role);
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
   const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
+  const managedResourceManifestRepository = useMemo(
+    () => new RouterManagedResourceManifestRepository(database),
+    [database]
+  );
   const accessPolicySyncService = useMemo(
     () => new RouterAccessPolicySyncService(database),
     [database]
   );
   const recoveryService = useMemo(
-    () => session
+    () => sessionAccountId && sessionProfileId
       ? new RouterCloudRecoveryService(
           database,
-          session.account_id,
-          session.internal_profile_id,
+          sessionAccountId,
+          sessionProfileId,
           undefined,
           saasAccount?.organization.id ?? null
         )
       : null,
-    [database, saasAccount?.organization.id, session]
+    [database, saasAccount?.organization.id, sessionAccountId, sessionProfileId]
   );
   const [router, setRouter] = useState<RouterRecord | null>(null);
   const [settings, setSettings] = useState<RouterSettings>(defaultRouterSettings);
@@ -110,9 +134,19 @@ export function RouterSettingsPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [isSavingAccessPolicy, setIsSavingAccessPolicy] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
+  const [managementSecurity, setManagementSecurity] =
+    useState<PreparedRouterManagementSecurity | null>(null);
+  const [isPreparingManagementSecurity, setIsPreparingManagementSecurity] = useState(false);
+  const [isApplyingManagementSecurity, setIsApplyingManagementSecurity] = useState(false);
+  const [managementSecurityApplied, setManagementSecurityApplied] = useState(false);
+  const [managementSecurityAudit, setManagementSecurityAudit] =
+    useState<RouterManagementSecurityAuditState>("unknown");
+  const [managementSecurityObservedAt, setManagementSecurityObservedAt] = useState<string | null>(null);
+  const [managementSecurityConfirmationOpen, setManagementSecurityConfirmationOpen] = useState(false);
+  const managementSecurityWorkflowRef = useRef<RouterManagementSecurityService | null>(null);
 
   useEffect(() => {
-    if (!isInitialized || !session || !routerId) {
+    if (!isInitialized || !sessionAccountId || !routerId) {
       return undefined;
     }
 
@@ -122,7 +156,7 @@ export function RouterSettingsPage() {
       try {
         const record = await routerRepository.findById(routerId);
         if (!mounted) return;
-        if (!record || record.deleted_at || record.account_id !== session.account_id) {
+        if (!record || record.deleted_at || record.account_id !== sessionAccountId) {
           setFeedback({ kind: "error", text: "Routeur introuvable pour cette organisation." });
           setIsLoading(false);
           return;
@@ -130,13 +164,28 @@ export function RouterSettingsPage() {
         const connections = await connectionRepository.listByRouter(routerId);
         const stableCloudRouterId = routerAccessPolicyCloudId(record, connections);
         const policySync = await accessPolicySyncService.load(
-          session.account_id,
+          sessionAccountId,
           routerId,
           stableCloudRouterId
         );
+        let securityAudit: RouterManagementSecurityAuditState = "unknown";
+        let securityObservedAt: string | null = null;
+        try {
+          const storedManifest = await managedResourceManifestRepository.findByRouter(routerId);
+          securityAudit = routerManagementSecurityAuditState(storedManifest?.manifest ?? null);
+          securityObservedAt = storedManifest?.record.observed_at ?? null;
+        } catch {
+          // A missing or unreadable diagnostic must never prevent the router
+          // settings themselves from loading.
+        }
         if (!mounted) return;
         setRouter(record);
         setSettings(routerRecordToSettings(record));
+        managementSecurityWorkflowRef.current = null;
+        setManagementSecurity(null);
+        setManagementSecurityAudit(securityAudit);
+        setManagementSecurityApplied(false);
+        setManagementSecurityObservedAt(securityObservedAt);
         setCloudRouterId(stableCloudRouterId);
         setAccessPolicy(policySync.policy);
         setSavedAccessPolicy(structuredClone(policySync.policy));
@@ -160,7 +209,15 @@ export function RouterSettingsPage() {
     return () => {
       mounted = false;
     };
-  }, [accessPolicySyncService, connectionRepository, isInitialized, routerId, routerRepository, session]);
+  }, [
+    accessPolicySyncService,
+    connectionRepository,
+    isInitialized,
+    managedResourceManifestRepository,
+    routerId,
+    routerRepository,
+    sessionAccountId
+  ]);
 
   useEffect(() => {
     if (isLoading || !shouldFocusAntiSharing) return undefined;
@@ -176,6 +233,13 @@ export function RouterSettingsPage() {
 
   const updateSettings = (partial: Partial<RouterSettings>) => {
     setSettings((current) => ({ ...current, ...partial }));
+    if (hasManagementConnectionChanges(partial)) {
+      managementSecurityWorkflowRef.current = null;
+      setManagementSecurity(null);
+      setManagementSecurityApplied(false);
+      setManagementSecurityAudit("unknown");
+      setManagementSecurityObservedAt(null);
+    }
     setFeedback(null);
     setTestMessage("À retester");
   };
@@ -393,6 +457,141 @@ export function RouterSettingsPage() {
       setFeedback({ kind: "error", text: accessActionError(error, `Impossible d'ajouter ${device.name}.`) });
     } finally {
       setIsSavingAccessPolicy(false);
+    }
+  };
+
+  const prepareManagementSecurity = async () => {
+    if (!canEditSensitive || !router || !session) {
+      setFeedback({ kind: "error", text: "Seul l'Admin peut préparer le compte RouterOS dédié." });
+      return;
+    }
+    if (hasUnsavedConnectionChanges(router, settings)) {
+      setFeedback({
+        kind: "error",
+        text: "Enregistrez et testez d'abord les paramètres de connexion actuels."
+      });
+      return;
+    }
+
+    setIsPreparingManagementSecurity(true);
+    setManagementSecurity(null);
+    setManagementSecurityApplied(false);
+    setFeedback(null);
+
+    try {
+      const connections = await connectionRepository.listByRouter(router.id);
+      const currentClient = await createPersistedRouterService({
+        authSession: session,
+        connections,
+        database,
+        router
+      });
+      const workflow = new RouterManagementSecurityService({
+        currentClient,
+        createCandidateClient: async (credentials) => {
+          const encryptedPassword = await encryptLocalSecret(credentials.password);
+          return createPersistedRouterService({
+            authSession: session,
+            connections,
+            database,
+            logActions: false,
+            router: {
+              ...router,
+              encrypted_password: encryptedPassword,
+              username: credentials.username
+            }
+          });
+        },
+        commitCredentials: async (credentials) => {
+          const encryptedPassword = await encryptLocalSecret(credentials.password);
+          const updated = await routerRepository.update({
+            ...router,
+            encrypted_password: encryptedPassword,
+            sync_status: "local",
+            username: credentials.username
+          });
+          setRouter(updated);
+          setSettings(routerRecordToSettings(updated));
+          try {
+            await recoveryService?.backupRouter(updated.id);
+          } catch {
+            // The local credentials are authoritative for the current device.
+            // Cloud backup will retry through the regular recovery workflow.
+          }
+        }
+      });
+      const prepared = router.username === "ticketpro-api"
+        ? await workflow.prepareExisting({
+            localRouterIp: router.local_ip,
+            username: router.username
+          })
+        : await workflow.prepare({ localRouterIp: router.local_ip });
+      managementSecurityWorkflowRef.current = workflow;
+      setManagementSecurity(prepared);
+      setFeedback({
+        kind: "success",
+        text: `Le compte ${prepared.username} a été créé et testé en mode ${prepared.connectionMode}. Aucune restriction n'est encore appliquée.`
+      });
+    } catch (error) {
+      managementSecurityWorkflowRef.current = null;
+      setFeedback({
+        kind: "error",
+        text: accessActionError(error, "Impossible de préparer le compte RouterOS dédié.")
+      });
+    } finally {
+      setIsPreparingManagementSecurity(false);
+    }
+  };
+
+  const applyManagementSecurity = async () => {
+    const workflow = managementSecurityWorkflowRef.current;
+    setManagementSecurityConfirmationOpen(false);
+    if (!workflow) {
+      setFeedback({
+        kind: "error",
+        text: "Le contrôle du compte dédié n'est plus valide. Relancez sa préparation."
+      });
+      return;
+    }
+
+    setIsApplyingManagementSecurity(true);
+    setFeedback(null);
+    try {
+      const result = await workflow.apply();
+      let manifestSaved = true;
+      try {
+        const existingManifest = await managedResourceManifestRepository.findByRouter(router!.id);
+        await managedResourceManifestRepository.save(
+          session!.account_id,
+          router!.id,
+          mergeRouterManagementSecurityManifest(
+            existingManifest?.manifest ?? null,
+            result.manifest
+          )
+        );
+      } catch {
+        manifestSaved = false;
+      }
+      managementSecurityWorkflowRef.current = null;
+      setManagementSecurity(result);
+      setManagementSecurityApplied(true);
+      setManagementSecurityAudit("secured");
+      setManagementSecurityObservedAt(new Date().toISOString());
+      setTestMessage("Routeur connecté");
+      setFeedback({
+        kind: "success",
+        text: `Administration RouterOS sécurisée. ${result.policy.disabledServices.length} service(s) inutilisé(s) désactivé(s) et ${result.policy.restrictedServices.length} service(s) limité(s) au LAN/VPN.${manifestSaved ? "" : " Le diagnostic local sera recapturé à la prochaine réconciliation."}`
+      });
+    } catch (error) {
+      setManagementSecurityApplied(false);
+      setManagementSecurityAudit("drift");
+      setManagementSecurityObservedAt(new Date().toISOString());
+      setFeedback({
+        kind: "error",
+        text: `La vérification finale a échoué. Le compte admin n'a pas été désactivé. ${accessActionError(error, "Contrôlez l'accès RouterOS.")}`
+      });
+    } finally {
+      setIsApplyingManagementSecurity(false);
     }
   };
 
@@ -1328,6 +1527,94 @@ export function RouterSettingsPage() {
         </div>
       </Card>
 
+      {canEditSensitive ? (
+        <Card
+          title="Sécurité de l'administration RouterOS"
+          description="Créez un compte TicketPro à permissions limitées, vérifiez-le, puis restreignez les services au LAN et au VPN."
+        >
+          <div className="data-list">
+            <DataListItem
+              description="Le compte admin existant reste disponible et n'est jamais supprimé ni désactivé par cette procédure."
+              icon={ShieldCheck}
+              meta={(
+                <Badge status={
+                  managementSecurityApplied || managementSecurityAudit === "secured"
+                    ? "success"
+                    : managementSecurityAudit === "drift"
+                      ? "error"
+                      : managementSecurity
+                        ? "warning"
+                        : "offline"
+                }>
+                  {managementSecurityApplied
+                    ? "Sécurisé · vérifié maintenant"
+                    : managementSecurityAudit === "secured"
+                      ? "Conforme au dernier audit"
+                    : managementSecurityAudit === "drift"
+                      ? "Dérive détectée"
+                    : managementSecurity
+                      ? "Compte vérifié"
+                      : "Audit à relire"}
+                </Badge>
+              )}
+              title="Compte dédié ticketpro-api"
+            />
+            <DataListItem
+              description={managementSecurity
+                ? managementSecurity.authorizedCidrs.join(" · ")
+                : "LAN du routeur · VPN TicketPro 10.250.0.0/16"}
+              icon={Network}
+              title="Réseaux d'administration autorisés"
+            />
+            <DataListItem
+              description={managementSecurityObservedAt
+                ? `Dernière observation : ${new Date(managementSecurityObservedAt).toLocaleString("fr-FR")}`
+                : "Aucune observation locale enregistrée. La préparation effectuera un test réel."}
+              icon={Search}
+              title="Fraîcheur du contrôle"
+            />
+          </div>
+          <div className="router-form-result">
+            <span>
+              Étape 1 : créer et tester le compte. Étape 2 : appliquer les restrictions après confirmation.
+            </span>
+            <Button
+              disabled={
+                isLoading
+                || isPreparingManagementSecurity
+                || isApplyingManagementSecurity
+                || !router
+              }
+              icon={ShieldCheck}
+              onClick={() => void prepareManagementSecurity()}
+            >
+              {isPreparingManagementSecurity
+                ? "Préparation et test…"
+                : managementSecurity
+                  ? "Retester le compte dédié"
+                  : managementSecurityApplied || managementSecurityAudit === "secured"
+                    ? "Revérifier le compte dédié"
+                    : "Préparer le compte dédié"}
+            </Button>
+          </div>
+          {managementSecurity && !managementSecurityApplied ? (
+            <div className="router-form-result">
+              <span>
+                Compte testé via {managementSecurity.connectionMode}. FTP, Telnet, WebFig HTTP/HTTPS et API-SSL non configurée seront désactivés ; API, WinBox et SSH seront limités aux réseaux affichés.
+              </span>
+              <Button
+                disabled={isApplyingManagementSecurity}
+                icon={ShieldCheck}
+                onClick={() => setManagementSecurityConfirmationOpen(true)}
+                variant="primary"
+              >
+                {isApplyingManagementSecurity ? "Sécurisation…" : "Appliquer les restrictions"}
+              </Button>
+            </div>
+          ) : null}
+        </Card>
+      ) : null}
+
       <Card
         title="IP Binding — appareils bloqués"
         description="Bloquez une adresse IP, une adresse MAC, ou les deux. TicketPro ne modifie que les bindings qu'il gère."
@@ -1408,6 +1695,15 @@ export function RouterSettingsPage() {
           <StatusDot label="La persistance native est indisponible dans ce mode." status="warning" />
         </Card>
       ) : null}
+
+      <ConfirmDialog
+        confirmLabel="Appliquer maintenant"
+        description="TicketPro va limiter les services d'administration au LAN du routeur et au VPN 10.250.0.0/16. Le compte admin existant restera actif. N'appliquez cette étape que si l'accès local ou VPN testé est votre chemin de secours."
+        isOpen={managementSecurityConfirmationOpen}
+        onCancel={() => setManagementSecurityConfirmationOpen(false)}
+        onConfirm={() => void applyManagementSecurity()}
+        title="Restreindre les services RouterOS ?"
+      />
     </div>
   );
 }
@@ -1439,6 +1735,17 @@ function hasUnsavedConnectionChanges(router: RouterRecord, settings: RouterSetti
     || router.username !== settings.username.trim()
     || router.connection_mode !== settings.connectionMode
     || settings.password.trim().length > 0;
+}
+
+function hasManagementConnectionChanges(partial: Partial<RouterSettings>): boolean {
+  return [
+    "apiPort",
+    "apiSslPort",
+    "connectionMode",
+    "ipAddress",
+    "password",
+    "username"
+  ].some((key) => key in partial);
 }
 
 function accessPolicySyncLabel(status: RouterAccessPolicySyncStatus): string {

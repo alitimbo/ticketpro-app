@@ -21,6 +21,7 @@ type DesktopLayoutProps = {
 export function DesktopLayout({ scope }: DesktopLayoutProps) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [isSwitchingOrganization, setIsSwitchingOrganization] = useState(false);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [organizationSwitchFeedback, setOrganizationSwitchFeedback] = useState<string | null>(null);
   const navigate = useNavigate();
   const { routerId = "" } = useParams();
@@ -30,9 +31,15 @@ export function DesktopLayout({ scope }: DesktopLayoutProps) {
     (item) => session && (item.permissions.length === 0 || item.permissions.some((permission) => session.permissions.includes(permission)))
   );
 
-  const handleAccountLogout = () => {
-    logoutAccount();
-    navigate("/acces", { replace: true });
+  const handleAccountLogout = async () => {
+    if (isLoggingOut) return;
+    setIsLoggingOut(true);
+    try {
+      await logoutAccount();
+      navigate("/acces", { replace: true });
+    } finally {
+      setIsLoggingOut(false);
+    }
   };
 
   const canSelectRouter = Boolean(session?.permissions.includes("global.routers.select"));
@@ -146,8 +153,13 @@ export function DesktopLayout({ scope }: DesktopLayoutProps) {
               </span>
             </label>
           ) : null}
-          <Button icon={LogOut} onClick={handleAccountLogout} variant="ghost">
-            Changer d'utilisateur
+          <Button
+            disabled={isLoggingOut || isSwitchingOrganization}
+            icon={isLoggingOut ? LoaderCircle : LogOut}
+            onClick={() => void handleAccountLogout()}
+            variant="ghost"
+          >
+            {isLoggingOut ? "Fermeture de la session…" : "Changer d'utilisateur"}
           </Button>
         </div>
       </aside>

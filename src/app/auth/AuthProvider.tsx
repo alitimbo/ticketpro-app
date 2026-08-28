@@ -53,8 +53,8 @@ type AuthContextValue = {
   isSubscriptionChecked: boolean;
   loginAccount: (email: string, password: string) => Promise<LoginResult>;
   loginProfile: (role: UserRole, password: string) => Promise<LoginResult>;
-  logout: () => void;
-  logoutAccount: () => void;
+  logout: () => Promise<void>;
+  logoutAccount: () => Promise<void>;
   logoutProfile: () => void;
   session: AuthSession | null;
   saasAccount: SaasAuthResult | null;
@@ -109,11 +109,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setSession(null);
   }, []);
 
-  const logoutAccount = useCallback(() => {
-    void getVpnProviderStatus()
-      .then((status) => status.provider === "EMBEDDED" ? disconnectEmbeddedVpn() : undefined)
-      .catch(() => undefined);
-    void logoutSaas();
+  const logoutAccount = useCallback(async () => {
+    await Promise.allSettled([
+      getVpnProviderStatus()
+        .then((status) => status.provider === "EMBEDDED" ? disconnectEmbeddedVpn() : undefined),
+      logoutSaas()
+    ]);
     clearStoredSession();
     clearMainAccountSession();
     setSession(null);
@@ -440,7 +441,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const onActivity = () => touchSession();
     const interval = window.setInterval(() => {
       if (accountSession && isMainAccountSessionExpired(accountSession)) {
-        logoutAccount();
+        void logoutAccount();
         return;
       }
 

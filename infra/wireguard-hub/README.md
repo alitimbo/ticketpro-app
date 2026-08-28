@@ -2,7 +2,9 @@
 
 Ce service est le plan de contrôle du VPN. Il ajoute et révoque les pairs sur `wg0` avec `wg set`, puis sauvegarde la configuration. Son secret maître n'est connu que par l'API de licences sur le même VPS : il n'est jamais transmis à l'application cliente.
 
-Chaque licence obtient automatiquement un sous-réseau `/24` dans le supernet `10.250.0.0/16`. Les adresses des pairs sont attribuées par le hub afin d'éviter les collisions entre plusieurs PC. Une chaîne `iptables` autorise uniquement les communications à l'intérieur du sous-réseau de la licence et bloque les échanges entre organisations.
+Chaque organisation obtient automatiquement un sous-réseau `/24` dans le supernet `10.250.0.0/16`. Les adresses des pairs sont attribuées par le hub afin d'éviter les collisions. Une même installation Windows conserve cependant une seule adresse lorsqu'elle rejoint plusieurs organisations. Le tunnel Windows route le supernet privé, tandis qu'une chaîne `iptables` n'autorise que les couples opérateur-routeur dérivés des appartenances actives et bloque les échanges entre organisations.
+
+La rotation interne `rotate_shared`, réservée au jeton maître, remplace atomiquement l'identité d'une installation dans toutes ses organisations sans changer son adresse VPN. Les anciennes clés restent dans l'historique du hub avec l'état révoqué, mais ne sont plus configurées dans WireGuard.
 
 ## Déploiement sur un VPS Linux
 

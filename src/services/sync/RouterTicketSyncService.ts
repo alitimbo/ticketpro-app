@@ -1,5 +1,9 @@
 import type { ActiveHotspotUser, HotspotUser, HotspotUserDraft } from "../../domain/router";
 import { RouterServiceError, type RouterService } from "../router";
+import {
+  canApplyPlanChangeToVoucher,
+  resolveObservedTicketStatus
+} from "../tickets/TicketLifecyclePolicy";
 
 export type RouterTicketSyncStatus =
   | "conflict"
@@ -37,6 +41,8 @@ export type SyncableLocalTicket = {
   lastRouterSyncAt?: string | null;
   routerDeletedAt?: string | null;
   archivedAt?: string | null;
+  exportedAt?: string | null;
+  printedCount?: number;
 };
 
 export type SyncedTicketUpdate = {
@@ -119,7 +125,7 @@ export class RouterTicketSyncService {
 
     if (!canSafelyRecreateTicket(ticket)) {
       const updates = report.updates.map((item) =>
-        item.id === ticket.id ? { ...item, status: "erreur_sync", syncStatus: "error" as const } : item
+        item.id === ticket.id ? { ...item, status: ticket.status, syncStatus: "error" as const } : item
       );
       return {
         ...report,
@@ -178,7 +184,7 @@ export class RouterTicketSyncService {
       }
 
       const updates = report.updates.map((item) =>
-        item.id === ticket.id ? { ...item, status: "erreur_sync", syncStatus: "error" as const } : item
+        item.id === ticket.id ? { ...item, status: ticket.status, syncStatus: "error" as const } : item
       );
 
       return {
@@ -222,7 +228,20 @@ export class RouterTicketSyncService {
         localMissing: [],
         logs: [{ level: "error", message: "Le plan local n'a pas de profil MikroTik exploitable.", ticketCode: ticket.code }],
         summary: buildSummary([], []),
-        updates: [{ id: ticket.id, status: "erreur_sync", syncStatus: "error" }]
+        updates: [{ id: ticket.id, status: ticket.status, syncStatus: "error" }]
+      };
+    }
+
+    if (!canSafelyChangeTicketPlan(ticket)) {
+      return {
+        localMissing: [],
+        logs: [{
+          level: "error",
+          message: "Le plan d'un voucher déjà émis ou utilisé est immuable. La correction doit porter sur les futurs vouchers.",
+          ticketCode: ticket.code
+        }],
+        summary: buildSummary([{ id: ticket.id, status: ticket.status, syncStatus: "error" }], []),
+        updates: [{ id: ticket.id, status: ticket.status, syncStatus: "error" }]
       };
     }
 
@@ -236,8 +255,8 @@ export class RouterTicketSyncService {
       return {
         localMissing: [],
         logs: [{ level: "error", message: "Le conflit n'a pas pu être résolu sur le routeur.", ticketCode: ticket.code }],
-        summary: buildSummary([{ id: ticket.id, status: "erreur_sync", syncStatus: "error" }], []),
-        updates: [{ id: ticket.id, status: "erreur_sync", syncStatus: "error" }]
+        summary: buildSummary([{ id: ticket.id, status: ticket.status, syncStatus: "error" }], []),
+        updates: [{ id: ticket.id, status: ticket.status, syncStatus: "error" }]
       };
     }
   }
@@ -247,8 +266,8 @@ export class RouterTicketSyncService {
       return {
         localMissing: [],
         logs: [{ level: "error", message: "La suppression distante n'est pas disponible.", ticketCode: ticket.code }],
-        summary: buildSummary([{ id: ticket.id, status: "erreur_sync", syncStatus: "error" }], []),
-        updates: [{ id: ticket.id, status: "erreur_sync", syncStatus: "error" }]
+        summary: buildSummary([{ id: ticket.id, status: ticket.status, syncStatus: "error" }], []),
+        updates: [{ id: ticket.id, status: ticket.status, syncStatus: "error" }]
       };
     }
 
@@ -272,8 +291,8 @@ export class RouterTicketSyncService {
       return {
         localMissing: [],
         logs: [{ level: "error", message: "Suppression impossible sur le routeur.", ticketCode: ticket.code }],
-        summary: buildSummary([{ id: ticket.id, status: "erreur_sync", syncStatus: "error" }], []),
-        updates: [{ id: ticket.id, status: "erreur_sync", syncStatus: "error" }]
+        summary: buildSummary([{ id: ticket.id, status: ticket.status, syncStatus: "error" }], []),
+        updates: [{ id: ticket.id, status: ticket.status, syncStatus: "error" }]
       };
     }
   }
@@ -290,7 +309,7 @@ export class RouterTicketSyncService {
       if (!canSafelyRecreateTicket(ticket)) {
         const index = updates.findIndex((update) => update.id === ticket.id);
         if (index >= 0) {
-          updates[index] = { ...updates[index], status: "erreur_sync", syncStatus: "error" };
+          updates[index] = { ...updates[index], status: ticket.status, syncStatus: "error" };
         }
         logs.unshift({
           level: "error",
@@ -336,7 +355,7 @@ export class RouterTicketSyncService {
         const index = updates.findIndex((update) => update.id === ticket.id);
 
         if (index >= 0) {
-          updates[index] = { ...updates[index], status: "erreur_sync", syncStatus: "error" };
+          updates[index] = { ...updates[index], status: ticket.status, syncStatus: "error" };
         }
 
         logs.unshift({ level: "error", message: "Resynchronisation impossible.", ticketCode: ticket.code });
@@ -384,7 +403,7 @@ export function compareLocalAndRouterTickets(
         routerDeletedAt: manuallyDeleted || automaticallyCleaned
           ? ticket.routerDeletedAt ?? synchronizedAt
           : ticket.routerDeletedAt,
-        status: manuallyDeleted || automaticallyCleaned ? "supprimé" : "erreur_sync",
+        status: manuallyDeleted ? "supprimé" : automaticallyCleaned ? "archivé" : ticket.status,
         syncStatus: manuallyDeleted || automaticallyCleaned ? "router_synced" : "router_missing"
       });
       logs.push({
@@ -406,6 +425,8 @@ export function compareLocalAndRouterTickets(
       : Boolean(ticket.planId && routerUser.planId && ticket.planId !== routerUser.planId);
 
     const usage = deriveTicketRuntime(routerUser, activeUser);
+    const lifecycle = resolveObservedTicketStatus(ticket.status, usage.status);
+    const routerLifecycleError = routerUser.status === "error";
     updates.push({
       archivedAt: ticket.archivedAt,
       activatedAt:
@@ -422,19 +443,29 @@ export function compareLocalAndRouterTickets(
         activeUser?.downloadedBytes ?? 0
       ),
       id: ticket.id,
-      dataRemainingBytes: usage.dataRemainingBytes,
+      dataRemainingBytes: minimumKnownRemaining(
+        ticket.dataRemainingBytes,
+        usage.dataRemainingBytes
+      ),
       expiresAt: usage.expiresAt ?? ticket.expiresAt,
       ipAddress: activeUser?.ipAddress ?? ticket.ipAddress,
       macAddress: activeUser?.macAddress ?? ticket.macAddress,
       mikrotikId: routerUser.id,
       profileName: routerUser.profileName,
-      remainingSeconds: usage.remainingSeconds,
+      remainingSeconds: minimumKnownRemaining(
+        ticket.remainingSeconds,
+        usage.remainingSeconds
+      ),
       serverName: routerUser.serverName ?? "all",
-      status: usage.status,
-      syncStatus: hasConflict ? "conflict" : "router_synced",
+      status: lifecycle.status,
+      syncStatus: routerLifecycleError
+        ? "error"
+        : hasConflict || lifecycle.regression
+          ? "conflict"
+          : "router_synced",
       lastRouterSyncAt: new Date().toISOString(),
       routerDeletedAt: null,
-      uptimeSeconds: usage.uptimeSeconds,
+      uptimeSeconds: Math.max(ticket.uptimeSeconds ?? 0, usage.uptimeSeconds),
       uploadedBytes: Math.max(
         ticket.uploadedBytes ?? 0,
         routerUser.uploadedBytes ?? 0,
@@ -446,6 +477,20 @@ export function compareLocalAndRouterTickets(
       logs.push({
         level: "warning",
         message: "Conflit détecté entre le plan local et le routeur.",
+        ticketCode: ticket.code
+      });
+    }
+    if (lifecycle.regression) {
+      logs.push({
+        level: "error",
+        message: "Régression RouterOS refusée : le voucher local reste dans son état le plus avancé et ne sera jamais recréé.",
+        ticketCode: ticket.code
+      });
+    }
+    if (routerLifecycleError) {
+      logs.push({
+        level: "error",
+        message: "Le nettoyage RouterOS du voucher a échoué. Son état commercial est conservé et aucune suppression n'est confirmée.",
         ticketCode: ticket.code
       });
     }
@@ -574,6 +619,15 @@ function inferActivationAt(expiresAt: string | null, validityMinutes: number | u
   return new Date(Date.parse(expiresAt) - validityMinutes * 60_000).toISOString();
 }
 
+function minimumKnownRemaining(
+  current: number | null | undefined,
+  observed: number | null | undefined
+): number | null {
+  if (current === null || current === undefined) return observed ?? null;
+  if (observed === null || observed === undefined) return current;
+  return Math.min(current, observed);
+}
+
 export function syncStatusLabel(status: RouterTicketSyncStatus): string {
   const labels: Record<RouterTicketSyncStatus, string> = {
     conflict: "Conflit",
@@ -614,6 +668,20 @@ export function canSafelyRecreateTicket(ticket: SyncableLocalTicket): boolean {
   return neverActivated
     && ["local_only", "error"].includes(ticket.syncStatus)
     && ["disponible", "imprimé"].includes(ticket.status);
+}
+
+export function canSafelyChangeTicketPlan(ticket: SyncableLocalTicket): boolean {
+  return canApplyPlanChangeToVoucher({
+    activated_at: ticket.activatedAt,
+    completed_at: ticket.completedAt ?? null,
+    downloaded_bytes: ticket.downloadedBytes ?? 0,
+    expires_at: ticket.expiresAt ?? null,
+    exported_at: ticket.exportedAt ?? null,
+    printed_count: ticket.printedCount ?? 0,
+    status: ticket.status,
+    uploaded_bytes: ticket.uploadedBytes ?? 0,
+    uptime_seconds: ticket.uptimeSeconds ?? 0
+  });
 }
 
 function minutesToRouterOsDuration(minutes: number | null | undefined): string | null {
