@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { listRoutersForAccount, type RouterCardData } from "./routerPageModel";
+import type { SaasSubscription } from "../../services/saas";
 import {
   changeSubscriptionPlan,
   defaultAccountSubscription,
@@ -29,6 +30,29 @@ function router(id: string, owner = accountId): RouterCardData {
     status: "active",
     subscriptionCounted: true
   } as RouterCardData;
+}
+
+function saasSubscription(routerLimit: number, overrides: Partial<SaasSubscription> = {}): SaasSubscription {
+  return {
+    access_ends_at: "2026-12-31T23:59:59.000Z",
+    current_period_end: "2026-12-31T23:59:59.000Z",
+    current_period_start: "2026-08-01T00:00:00.000Z",
+    device_limit_mode: "unlimited",
+    grace_days_remaining: 0,
+    grace_period_end: null,
+    is_active: true,
+    is_trial: false,
+    max_devices: null,
+    plan: {
+      code: `plan-${routerLimit}`,
+      id: `plan-${routerLimit}`,
+      name: `Pack ${routerLimit} routeurs`,
+      price_cfa: 100_000
+    },
+    router_limit: routerLimit,
+    status: "active",
+    ...overrides
+  };
 }
 
 afterEach(() => {
@@ -90,5 +114,41 @@ describe("limites de routeurs par abonnement", () => {
 
     expect(visibleRouters.map((item) => item.id)).toEqual(["router-1", "router-2"]);
     expect(getSubscriptionOverview(visibleRouters.length, accountId, now).canAddRouter).toBe(false);
+  });
+
+  it("8. le quota SaaS actif remplace immédiatement un ancien snapshot local", () => {
+    activateDefaultSubscription();
+
+    const overview = getSubscriptionOverview(1, accountId, now, saasSubscription(150));
+
+    expect(overview.subscription.routerLimitSnapshot).toBe(150);
+    expect(overview.plan.name).toBe("Pack 150 routeurs");
+    expect(overview.canAddRouter).toBe(true);
+  });
+
+  it("9. le changement d'organisation recalcule le quota sans conserver l'ancien pack", () => {
+    activateDefaultSubscription();
+
+    const limited = getSubscriptionOverview(1, accountId, now, saasSubscription(1));
+    const expanded = getSubscriptionOverview(1, accountId, now, saasSubscription(150));
+
+    expect(limited.canAddRouter).toBe(false);
+    expect(expanded.canAddRouter).toBe(true);
+    expect(expanded.subscription.routerLimitSnapshot).toBe(150);
+  });
+
+  it("10. un abonnement SaaS expiré bloque même si le cache local est actif", () => {
+    activateDefaultSubscription();
+    const expired = saasSubscription(150, {
+      access_ends_at: "2026-07-01T00:00:00.000Z",
+      current_period_end: "2026-07-01T00:00:00.000Z",
+      is_active: false,
+      status: "expired"
+    });
+
+    const overview = getSubscriptionOverview(0, accountId, now, expired);
+
+    expect(overview.subscription.status).toBe("expired");
+    expect(overview.canAddRouter).toBe(false);
   });
 });

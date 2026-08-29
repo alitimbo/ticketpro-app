@@ -58,6 +58,164 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Écran de démarrage de l'application */
+.app-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 320px;
+  overflow: hidden;
+  opacity: 1;
+  color: var(--color-text);
+  background:
+    radial-gradient(circle at 50% 48%, rgba(56, 165, 255, 0.08), transparent 34%),
+    linear-gradient(145deg, #ffffff 0%, var(--color-bg) 68%, #eef5ff 100%);
+  transition: opacity 220ms ease, visibility 220ms ease;
+}
+
+.app-splash--exiting {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.app-splash__glow {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: min(620px, 72vw);
+  height: min(420px, 58vh);
+  border-radius: 50%;
+  background: rgba(56, 165, 255, 0.07);
+  filter: blur(72px);
+  transform: translate(-50%, -50%);
+}
+
+.app-splash__content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  padding: 24px;
+  text-align: center;
+  animation: app-splash-enter 480ms ease-out both;
+}
+
+.app-splash__logo {
+  width: clamp(112px, 11vw, 144px);
+  height: clamp(112px, 11vw, 144px);
+  margin-bottom: 22px;
+  object-fit: contain;
+  filter: drop-shadow(0 14px 24px rgba(5, 27, 91, 0.12));
+}
+
+.app-splash__title {
+  margin: 0;
+  color: var(--color-brand-navy);
+  font-size: 1.9rem;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+}
+
+.app-splash__signature {
+  margin: 3px 0 0;
+  color: var(--color-muted);
+  font-size: 0.76rem;
+  letter-spacing: 0.02em;
+}
+
+.app-splash__status {
+  display: flex;
+  align-items: center;
+  min-height: 24px;
+  gap: 12px;
+  margin-top: 38px;
+  color: var(--color-muted);
+  font-size: 0.82rem;
+}
+
+.app-splash__status p,
+.app-splash__detail {
+  margin: 0;
+}
+
+.app-splash__status--error {
+  color: var(--color-error);
+  font-weight: 750;
+}
+
+.app-splash__dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.app-splash__dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  animation: app-splash-dot 1.25s ease-in-out infinite;
+}
+
+.app-splash__dots span:nth-child(2) {
+  animation-delay: 160ms;
+}
+
+.app-splash__dots span:nth-child(3) {
+  animation-delay: 320ms;
+}
+
+.app-splash__detail {
+  max-width: 440px;
+  margin-top: 10px;
+  color: var(--color-muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.app-splash__detail + .button {
+  margin-top: 20px;
+}
+
+@keyframes app-splash-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes app-splash-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.28;
+    transform: scale(0.82);
+  }
+  40% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-splash,
+  .app-splash__content,
+  .app-splash__dots span {
+    animation: none;
+    transition-duration: 0ms;
+  }
+}
+
 ::selection {
   background: var(--color-selection);
 }

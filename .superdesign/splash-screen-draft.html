@@ -1,0 +1,51 @@
+<!DOCTYPE html><html lang="fr"><head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="view-transition" content="same-origin">
+  <title>TicketPro — Démarrage</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://code.iconify.design/iconify-icon/1.0.7/iconify-icon.min.js"></script>
+  <style>
+    :root {
+      --navy: #051b5b;
+      --blue: #0666fd;
+      --cyan: #38a5ff;
+      --bg: #f5f8fd;
+    }
+    html { background: var(--bg); }
+    @keyframes fade-rise {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes dot-pulse {
+      0%, 80%, 100% { opacity: .28; transform: scale(.82); }
+      40% { opacity: 1; transform: scale(1); }
+    }
+    .splash-content { animation: fade-rise .48s ease-out both; }
+    .loading-dot { animation: dot-pulse 1.25s ease-in-out infinite; }
+    .loading-dot:nth-child(2) { animation-delay: .16s; }
+    .loading-dot:nth-child(3) { animation-delay: .32s; }
+    @media (prefers-reduced-motion: reduce) {
+      .splash-content, .loading-dot { animation: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="relative flex min-h-screen w-full items-center justify-center overflow-hidden bg-[#f5f8fd] font-sans text-[#0b1739]" data-sd-id="1">
+    <div class="pointer-events-none absolute left-1/2 top-1/2 h-[420px] w-[620px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-[#38a5ff]/[0.07] blur-3xl" data-sd-id="2"></div>
+    <main class="splash-content relative z-0 flex w-full flex-col items-center px-6 text-center" aria-label="Démarrage de TicketPro" data-sd-id="3">
+      <img src="https://vgbujcuwptvheqijyjbe.supabase.co/storage/v1/object/public/hmac-uploads/projects/23eb9d5f-923d-4ebe-86e6-43045087622f/brand-assets/src-tauri-icons-icon.png/icon.png" alt="Logo TicketPro" class="mb-6 h-32 w-32 object-contain sm:h-36 sm:w-36" data-sd-id="4">
+      <h1 class="text-[30px] font-semibold tracking-[-0.04em] text-[#051b5b]" data-sd-id="5">TicketPro</h1>
+      <p class="mt-1 text-[12px] font-normal tracking-[0.02em] text-[#051b5b]/60" data-sd-id="6">par Akicorp Solutions</p>
+      <div class="mt-10 flex min-h-[24px] items-center gap-3" role="status" aria-live="polite" data-sd-id="7">
+        <p class="text-[13px] font-normal text-[#051b5b]/70" data-sd-id="8">Préparation de votre espace sécurisé…</p>
+        <span class="flex items-center gap-1" aria-hidden="true" data-sd-id="9">
+          <span class="loading-dot h-1.5 w-1.5 rounded-full bg-[#0666fd]" data-sd-id="10"></span>
+          <span class="loading-dot h-1.5 w-1.5 rounded-full bg-[#0666fd]" data-sd-id="11"></span>
+          <span class="loading-dot h-1.5 w-1.5 rounded-full bg-[#0666fd]" data-sd-id="12"></span>
+        </span>
+      </div>
+    </main>
+  </div>
+
+</body></html>

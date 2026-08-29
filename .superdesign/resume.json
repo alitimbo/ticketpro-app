@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "targets": {
+    "startup-splash": {
+      "targetKind": "new-ui",
+      "projectId": "23eb9d5f-923d-4ebe-86e6-43045087622f",
+      "activeDraftId": "c46fba34-eab7-4cf2-9b10-b671674d2fbd",
+      "designSystemPath": ".superdesign/design-system.md",
+      "referenceIds": [
+        "src-tauri-icons-icon.png"
+      ],
+      "brandAssets": {
+        "logo": {
+          "assetKey": "src-tauri-icons-icon.png",
+          "url": "https://vgbujcuwptvheqijyjbe.supabase.co/storage/v1/object/public/hmac-uploads/projects/23eb9d5f-923d-4ebe-86e6-43045087622f/brand-assets/src-tauri-icons-icon.png/icon.png",
+          "sourcePath": "src-tauri/icons/icon.png"
+        }
+      },
+      "contextFiles": [
+        ".superdesign/design-system.md",
+        ".superdesign/init/theme.md",
+        "src/main.tsx",
+        "src/App.tsx",
+        "src/app/layouts/AppBootstrap.tsx",
+        "src/app/layouts/AppSplashScreen.tsx",
+        "src/styles.css:1:218"
+      ],
+      "fingerprints": {
+        ".superdesign/design-system.md": "5d2d47bf550c7285193086be07fa2a50d901ce5a7ab544f62a9ee5e2aed50d29",
+        ".superdesign/init/theme.md": "eb14fe5ea7053c7c26049a8eef67e924a0e7ed9b8fb4efebcf71eb0142ddca41",
+        "src/main.tsx": "18cdd1457d16e3981a0331d8f0f7a711776585eeeb919125db1498746aa42ab2",
+        "src/App.tsx": "745e6e97a54119cf914dace51ea5a06918d80f9f1c2705a2691d56ed2420940f",
+        "src/app/layouts/AppBootstrap.tsx": "e177e95d205f3ffacceefb65bbb0de7ad92e44117c8928178c94bdb4190148a3",
+        "src/app/layouts/AppSplashScreen.tsx": "b855423440c0a19102e3fcfc887ac2d4130546906a551aff5349505ec599acfa",
+        "src/styles.css": "01246838f99c3dc1e6065e0a145b60345e3326b901d3d29c06aa689ce64cbf46"
+      },
+      "components": [],
+      "drafts": {
+        "c46fba34-eab7-4cf2-9b10-b671674d2fbd": {
+          "title": "TicketPro — Écran de démarrage",
+          "visualDirection": "Splash minimal clair, logo officiel centré et animation de chargement discrète",
+          "currentVersion": 1
+        }
+      },
+      "updatedAt": "2026-08-29T06:40:00.000Z"
+    }
+  }
+}

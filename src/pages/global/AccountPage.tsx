@@ -50,8 +50,13 @@ export function AccountPage() {
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
   const [routersUsed, setRoutersUsed] = useState(0);
   const subscriptionOverview = useMemo(
-    () => getSubscriptionOverview(routersUsed),
-    [routersUsed]
+    () => getSubscriptionOverview(
+      routersUsed,
+      accountSession?.accountId,
+      Date.now(),
+      saasAccount?.subscription
+    ),
+    [accountSession?.accountId, routersUsed, saasAccount?.subscription]
   );
   const [detailsForm, setDetailsForm] = useState<DetailsFormState>({
     companyName: account?.companyName ?? "",

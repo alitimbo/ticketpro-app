@@ -1,0 +1,1 @@
+export { persistSaasSubscriptionSnapshot } from "./SaasSubscriptionSnapshotService";

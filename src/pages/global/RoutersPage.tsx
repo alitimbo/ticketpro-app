@@ -204,8 +204,13 @@ export function RoutersPage() {
     [accountRouters]
   );
   const subscriptionOverview = useMemo(
-    () => getSubscriptionOverview(countRoutersForSubscription(accountRouters)),
-    [accountRouters]
+    () => getSubscriptionOverview(
+      countRoutersForSubscription(accountRouters),
+      accountId ?? undefined,
+      Date.now(),
+      saasAccount?.subscription
+    ),
+    [accountId, accountRouters, saasAccount?.subscription]
   );
   const quotaMessage = getRouterLimitMessage(subscriptionOverview.canAddRouter);
   const canStartRouterCreation = canAddRouter && subscriptionOverview.canAddRouter;

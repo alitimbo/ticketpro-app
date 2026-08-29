@@ -38,6 +38,7 @@ import {
 } from "../../services/saas";
 import { completeFirstLaunch, defaultFirstLaunchState } from "../../pages/auth/firstLaunchModel";
 import { disconnectEmbeddedVpn, getVpnProviderStatus } from "../../services/vpn";
+import { persistSaasSubscriptionSnapshot } from "../../services/subscriptions";
 
 type LoginResult = {
   ok: boolean;
@@ -91,6 +92,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [saasAccount, setSaasAccount] = useState<SaasAuthResult | null>(null);
   const [isSubscriptionChecked, setIsSubscriptionChecked] = useState(false);
 
+  const cacheSaasSubscription = useCallback(async (current: SaasAuthResult, accountId: string) => {
+    try {
+      await persistSaasSubscriptionSnapshot({
+        accountId,
+        database: isPersistent && isInitialized ? database : undefined,
+        saasAccount: current
+      });
+    } catch {
+      // Le quota SaaS reçu reste prioritaire dans l'interface. Une panne du
+      // cache local ne doit jamais empêcher la connexion au compte.
+    }
+  }, [database, isInitialized, isPersistent]);
+
   useEffect(() => {
     if (!isPersistent || !isInitialized || !session?.account_id) {
       return;
@@ -138,6 +152,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setSaasAccount(current);
       const storedAccount = readMainAccountSession();
       if (storedAccount) {
+        await cacheSaasSubscription(current, storedAccount.accountId);
         const restoredSession = createSession(
           current.user.app_role,
           current.user.email,
@@ -154,7 +169,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsSubscriptionChecked(true);
     }
-  }, []);
+  }, [cacheSaasSubscription]);
 
   const refreshAccountSessionFromStorage = useCallback(() => {
     const stored = readMainAccountSession();
@@ -167,6 +182,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setSaasAccount(selected);
       const storedAccount = readMainAccountSession();
       if (!storedAccount) return { ok: false, message: "Session locale introuvable." };
+      await cacheSaasSubscription(selected, storedAccount.accountId);
       const updatedAccount = { ...storedAccount, companyLabel: selected.organization.name };
       storeMainAccountSession(updatedAccount);
       setAccountSession(updatedAccount);
@@ -187,7 +203,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         message: error instanceof Error ? error.message : "Changement d'organisation impossible."
       };
     }
-  }, []);
+  }, [cacheSaasSubscription]);
 
   const touchSession = useCallback(() => {
     setAccountSession((current) => {
@@ -298,6 +314,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     if (persistentAccount) {
+      await cacheSaasSubscription(saasAccount, persistentAccount.id);
       saveMainAccountRecord(mainAccountRecordFromDatabase(persistentAccount));
       await accountRepository.recordLogin(persistentAccount.id);
       await auditLogService.write({
@@ -329,7 +346,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     return { ok: true };
-  }, [accountRepository, auditLogService, database, isInitialized, isPersistent]);
+  }, [accountRepository, auditLogService, cacheSaasSubscription, database, isInitialized, isPersistent]);
 
   useEffect(() => {
     if (!accountSession) {

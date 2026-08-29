@@ -4,6 +4,7 @@ import type {
   BillingInvoiceRecord,
   SubscriptionPlanRecord
 } from "../../domain/database";
+import type { SaasSubscription } from "../../services/saas";
 
 export type SubscriptionStatus = "active" | "cancelled" | "expired" | "suspended" | "trial";
 export type SubscriptionPaymentStatus = "manual" | "paid" | "pending" | "unpaid";
@@ -266,10 +267,26 @@ export function canAddRouterForSubscription(
   return hasActiveAccess && periodIsValid && routersUsed < subscription.routerLimitSnapshot;
 }
 
-export function getSubscriptionOverview(routersUsed: number, accountId?: string, now = Date.now()): SubscriptionOverview {
+export function getSubscriptionOverview(
+  routersUsed: number,
+  accountId?: string,
+  now = Date.now(),
+  saasSubscription?: SaasSubscription | null
+): SubscriptionOverview {
+  const cachedSubscription = loadAccountSubscription(accountId);
+  const currentSubscription = saasSubscription
+    ? subscriptionFromSaas(saasSubscription, cachedSubscription)
+    : cachedSubscription;
+  const currentPlan = saasSubscription
+    ? subscriptionPlanFromSaas(saasSubscription, currentSubscription)
+    : null;
+  const plans = currentPlan
+    ? [currentPlan, ...subscriptionPlans.filter((plan) => plan.id !== currentPlan.id)]
+    : subscriptionPlans;
+
   return buildSubscriptionOverview(
-    loadAccountSubscription(accountId),
-    subscriptionPlans,
+    currentSubscription,
+    plans,
     loadBillingInvoices(accountId),
     routersUsed,
     now
@@ -293,7 +310,7 @@ export function buildSubscriptionOverview(
     isOverLimit: routersUsed > limit,
     paymentStatusLabel: paymentStatusLabel(subscription.paymentStatus),
     plan,
-    plans: subscriptionPlans,
+    plans,
     routerUsagePercent,
     routersUsed,
     statusLabel: subscriptionStatusLabel(subscription.status),
@@ -398,6 +415,59 @@ export function formatCfa(value: number | null): string {
   }
 
   return `${new Intl.NumberFormat("fr-FR").format(value)} CFA`;
+}
+
+/**
+ * Convertit l'abonnement de l'organisation active en snapshot local. Le SaaS
+ * reste prioritaire tant qu'il est joignable ; ce snapshot sert au mode hors ligne.
+ */
+export function subscriptionFromSaas(
+  subscription: SaasSubscription,
+  fallback: AccountSubscription = defaultAccountSubscription
+): AccountSubscription {
+  const routerLimit = Math.max(0, Number(subscription.router_limit) || 0);
+  const priceCfa = subscription.plan?.price_cfa ?? fallback.priceCfaSnapshot;
+
+  return {
+    currentPeriodEnd:
+      subscription.access_ends_at
+      ?? subscription.current_period_end
+      ?? (subscription.is_active ? "9999-12-31T23:59:59.999Z" : fallback.currentPeriodEnd),
+    currentPeriodStart: subscription.current_period_start ?? fallback.currentPeriodStart,
+    paymentStatus: subscription.is_trial ? "pending" : subscription.is_active ? "paid" : "unpaid",
+    planId: subscription.plan?.id ?? fallback.planId,
+    priceCfaSnapshot: priceCfa,
+    pricePerRouterCfaSnapshot:
+      priceCfa === null || routerLimit < 1 ? null : Math.round(priceCfa / routerLimit),
+    routerLimitSnapshot: routerLimit,
+    status: mapSaasSubscriptionStatus(subscription)
+  };
+}
+
+export function subscriptionPlanFromSaas(
+  subscription: SaasSubscription,
+  snapshot = subscriptionFromSaas(subscription)
+): SubscriptionPlan {
+  return {
+    billingPeriod: "monthly",
+    description: "Abonnement de l'organisation active, vérifié par TicketPro.",
+    id: snapshot.planId,
+    isActive: subscription.is_active,
+    isRecommended: false,
+    name: subscription.plan?.name ?? "Abonnement TicketPro",
+    priceCfa: snapshot.priceCfaSnapshot,
+    pricePerRouterCfa: snapshot.pricePerRouterCfaSnapshot,
+    routerLimit: snapshot.routerLimitSnapshot
+  };
+}
+
+function mapSaasSubscriptionStatus(subscription: SaasSubscription): SubscriptionStatus {
+  if (subscription.is_active) {
+    return subscription.is_trial ? "trial" : "active";
+  }
+
+  if (subscription.status === "cancelled") return "cancelled";
+  return "expired";
 }
 
 export function formatPlanDuration(durationDays: number): string {
