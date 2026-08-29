@@ -3,6 +3,8 @@ export type RouterConnectionMode = "agent_future" | "distant_ip" | "local" | "vp
 export type RouterErrorCode =
   | "api_disabled"
   | "authentication_failed"
+  | "device_mode_flagged"
+  | "device_mode_restricted"
   | "duplicate_user"
   | "hotspot_not_found"
   | "permission_denied"

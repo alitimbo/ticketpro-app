@@ -100,6 +100,10 @@ describe("RouterService", () => {
     });
     expect(JSON.stringify(logs)).not.toContain("password");
     expect(translateRouterError("timeout")).toBe("Le routeur ne répond pas. Réessayez dans un instant.");
+    expect(translateRouterError("device_mode_restricted")).toContain(
+      "/system device-mode update scheduler=yes hotspot=yes"
+    );
+    expect(translateRouterError("device_mode_flagged")).toContain("flagged");
   });
 
   it("simule les erreurs métier attendues", async () => {

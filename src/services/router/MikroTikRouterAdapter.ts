@@ -152,6 +152,7 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       );
     }
 
+    await this.assertVoucherAutomationAllowedByDeviceMode(routerOsVersion);
     await this.ensureRouterClock();
     await this.upsertSystemScript(
       VOUCHER_EXPIRATION_SCRIPT,
@@ -1893,6 +1894,35 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     }
   }
 
+  private async assertVoucherAutomationAllowedByDeviceMode(
+    routerOsVersion: string
+  ): Promise<void> {
+    if (!isRouterOsVersionAtLeast(routerOsVersion, 7, 17)) return;
+
+    const deviceMode = firstRow(await this.call("/system/device-mode/print"));
+    if (Object.keys(deviceMode).length === 0) return;
+
+    if (isTruthy(pick(deviceMode, "flagged"))) {
+      throw new RouterAdapterError(
+        "device_mode_flagged",
+        "RouterOS Device Mode is flagged"
+      );
+    }
+
+    const scheduler = pick(deviceMode, "scheduler");
+    const hotspot = pick(deviceMode, "hotspot");
+    if (isExplicitlyDisabled(scheduler) || isExplicitlyDisabled(hotspot)) {
+      const disabledFeatures = [
+        isExplicitlyDisabled(scheduler) ? "scheduler" : null,
+        isExplicitlyDisabled(hotspot) ? "hotspot" : null
+      ].filter((feature): feature is string => Boolean(feature));
+      throw new RouterAdapterError(
+        "device_mode_restricted",
+        `RouterOS Device Mode blocks: ${disabledFeatures.join(", ")}`
+      );
+    }
+  }
+
   private async call(command: string, params: RouterOsApiRequest["params"] = {}): Promise<RouterOsApiRow[]> {
     try {
       return await this.transport.call({ ...this.config, command, params });
@@ -2195,6 +2225,22 @@ function parseInteger(value: string | undefined): number {
 
 function isTruthy(value: string | undefined): boolean {
   return value === "true" || value === "yes";
+}
+
+function isExplicitlyDisabled(value: string | undefined): boolean {
+  return value === "false" || value === "no";
+}
+
+function isRouterOsVersionAtLeast(
+  version: string,
+  expectedMajor: number,
+  expectedMinor: number
+): boolean {
+  const match = version.match(/^(\d+)\.(\d+)/);
+  if (!match) return false;
+  const major = Number.parseInt(match[1], 10);
+  const minor = Number.parseInt(match[2], 10);
+  return major > expectedMajor || (major === expectedMajor && minor >= expectedMinor);
 }
 
 function bitsToBytes(bitsPerSecond: number): number {

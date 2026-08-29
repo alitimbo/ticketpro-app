@@ -52,10 +52,12 @@ import {
   listRoutersForAccount,
   mapRouterErrorToTestStatus,
   normalizeHotspotDnsName,
+  routerPageScopeKey,
   routerCardFromRecord,
   routerConnectionInputsFromCard,
   routerRecordFromCard,
   routerTestMessage,
+  shouldPauseRouterStatusRefresh,
   type RouterCardData,
   type RouterConnectionTestStatus,
   type RouterFilter,
@@ -88,6 +90,8 @@ export function RoutersPage() {
   const { accountSession, saasAccount, session, userCan } = useAuth();
   const { database, isInitialized, isPersistent } = useAppDatabase();
   const accountId = accountSession?.accountId ?? session?.account_id ?? null;
+  const organizationId = saasAccount?.organization.id ?? null;
+  const internalProfileId = session?.internal_profile_id ?? null;
   const canAddRouter = userCan("global.routers.add");
   const canEditRouter = userCan("global.routers.edit");
   const canDeleteRouter = userCan("global.routers.delete");
@@ -105,30 +109,38 @@ export function RoutersPage() {
   const [connectingRouterIds, setConnectingRouterIds] = useState<Set<string>>(() => new Set());
   const connectionAttemptsRef = useRef<Set<string>>(new Set());
   const routersForHealthCheckRef = useRef<RouterCardData[]>([]);
+  const currentScopeKey = routerPageScopeKey(accountId, organizationId);
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
   const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
   const recoveryService = useMemo(
-    () => accountId && session
+    () => accountId && internalProfileId
       ? new RouterCloudRecoveryService(
           database,
           accountId,
-          session.internal_profile_id,
+          internalProfileId,
           undefined,
-          saasAccount?.organization.id ?? null
+          organizationId
         )
       : null,
-    [accountId, database, saasAccount?.organization.id, session]
+    [accountId, database, internalProfileId, organizationId]
   );
+
+  useEffect(() => {
+    // Uniquement un vrai changement de compte ou d'organisation peut fermer
+    // les actions en cours. Le rafraîchissement périodique de la session doit
+    // préserver intégralement le formulaire et ses valeurs.
+    setRouters([]);
+    setSelectedRouter(null);
+    setRouterToDelete(null);
+    setFormState(null);
+    setFormOperation(null);
+  }, [currentScopeKey]);
 
   useEffect(() => {
     if (!isInitialized || !accountId) return undefined;
     let mounted = true;
     const scopedAccountId = accountId;
-    const selectedOrganizationId = saasAccount?.organization.id ?? null;
-    setRouters([]);
-    setSelectedRouter(null);
-    setRouterToDelete(null);
-    setFormState(null);
+    const selectedOrganizationId = organizationId;
 
     async function loadRouters() {
       try {
@@ -176,7 +188,7 @@ export function RoutersPage() {
     isPersistent,
     recoveryService,
     routerRepository,
-    saasAccount?.organization.id
+    organizationId
   ]);
 
   const accountRouters = useMemo(() => {
@@ -203,6 +215,11 @@ export function RoutersPage() {
       .join("|"),
     [accountRouters]
   );
+  const pauseRouterStatusRefresh = shouldPauseRouterStatusRefresh({
+    connectionDialogOpen: selectedRouter !== null,
+    deleteDialogOpen: routerToDelete !== null,
+    formDialogOpen: formState !== null
+  });
   const subscriptionOverview = useMemo(
     () => getSubscriptionOverview(
       countRoutersForSubscription(accountRouters),
@@ -558,10 +575,10 @@ export function RoutersPage() {
       resolvedPassword,
       state.router?.status
     );
+    await service.ensureVoucherLifecycleEngine();
     const hotspotDns = await service.upsertHotspotDns(
       normalizeHotspotDnsName(state.values.hotspotAddress)
     );
-    await service.ensureVoucherLifecycleEngine();
     return hotspotDns;
   };
 
@@ -712,7 +729,7 @@ export function RoutersPage() {
   };
 
   useEffect(() => {
-    if (!isPersistent || !routerHealthScopeKey) return undefined;
+    if (!isPersistent || !routerHealthScopeKey || pauseRouterStatusRefresh) return undefined;
     let cancelled = false;
 
     const refreshRealStatuses = async () => {
@@ -732,7 +749,7 @@ export function RoutersPage() {
       window.clearTimeout(initialTimer);
       window.clearInterval(interval);
     };
-  }, [isPersistent, routerHealthScopeKey]);
+  }, [isPersistent, pauseRouterStatusRefresh, routerHealthScopeKey]);
 
   return (
     <div className="page-stack">

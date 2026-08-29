@@ -59,6 +59,25 @@ export type RouterCardData = {
 
 export type RouterFilter = "all" | RouterCardStatus;
 
+export function routerPageScopeKey(
+  accountId: string | null,
+  organizationId: string | null
+): string {
+  return `${accountId ?? "anonymous"}:${organizationId ?? "default"}`;
+}
+
+export function shouldPauseRouterStatusRefresh({
+  connectionDialogOpen,
+  deleteDialogOpen,
+  formDialogOpen
+}: {
+  connectionDialogOpen: boolean;
+  deleteDialogOpen: boolean;
+  formDialogOpen: boolean;
+}): boolean {
+  return connectionDialogOpen || deleteDialogOpen || formDialogOpen;
+}
+
 export type RouterFormValues = {
   apiPort: string;
   apiSslPort: string;
@@ -410,6 +429,8 @@ export function mapRouterErrorToTestStatus(code: RouterErrorCode): RouterConnect
   const mapping: Record<RouterErrorCode, RouterConnectionTestStatus> = {
     api_disabled: "api_disabled",
     authentication_failed: "authentication_failed",
+    device_mode_flagged: "timeout",
+    device_mode_restricted: "timeout",
     duplicate_user: "timeout",
     hotspot_not_found: "hotspot_not_found",
     permission_denied: "permission_denied",

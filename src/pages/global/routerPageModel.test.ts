@@ -9,9 +9,11 @@ import {
   isValidHotspotDnsName,
   listRoutersForAccount,
   normalizeHotspotDnsName,
+  routerPageScopeKey,
   routerCardFromRecord,
   routerConnectionInputsFromCard,
-  routerRecordFromCard
+  routerRecordFromCard,
+  shouldPauseRouterStatusRefresh
 } from "./routerPageModel";
 import { countRoutersForSubscription, getSubscriptionOverview } from "./subscriptionPageModel";
 
@@ -165,5 +167,27 @@ describe("routerPageModel", () => {
     const localCard = { ...card, preferredMode: "local" as const };
     expect(localCard.remoteMode).toBe("vpn");
     expect(routerConnectionInputsFromCard(localCard).map((connection) => connection.mode)).toEqual(["local", "vpn"]);
+  });
+
+  it("conserve le même périmètre pendant un simple rafraîchissement de session", () => {
+    expect(routerPageScopeKey("account-1", "organization-1")).toBe(
+      routerPageScopeKey("account-1", "organization-1")
+    );
+    expect(routerPageScopeKey("account-1", "organization-1")).not.toBe(
+      routerPageScopeKey("account-1", "organization-2")
+    );
+  });
+
+  it("suspend le rafraîchissement des statuts pendant un formulaire routeur", () => {
+    expect(shouldPauseRouterStatusRefresh({
+      connectionDialogOpen: false,
+      deleteDialogOpen: false,
+      formDialogOpen: true
+    })).toBe(true);
+    expect(shouldPauseRouterStatusRefresh({
+      connectionDialogOpen: false,
+      deleteDialogOpen: false,
+      formDialogOpen: false
+    })).toBe(false);
   });
 });

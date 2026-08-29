@@ -426,6 +426,8 @@ export function translateRouterError(code: RouterErrorCode): string {
   const messages: Partial<Record<RouterErrorCode, string>> = {
     api_disabled: "Le service du routeur n'est pas activé.",
     authentication_failed: "Identifiants du routeur incorrects.",
+    device_mode_flagged: "RouterOS signale ce routeur comme suspect (Device Mode flagged). Auditez et sécurisez le routeur avant de poursuivre.",
+    device_mode_restricted: "RouterOS bloque l'automatisation TicketPro. Dans WinBox, exécutez /system device-mode update scheduler=yes hotspot=yes, confirmez physiquement la demande, puis réessayez l'ajout.",
     duplicate_user: "Ce ticket existe déjà.",
     hotspot_not_found: "Le service de tickets est introuvable sur ce routeur.",
     permission_denied: "Vous n'avez pas l'autorisation d'effectuer cette action.",

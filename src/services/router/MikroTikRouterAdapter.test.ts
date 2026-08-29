@@ -129,6 +129,33 @@ function createAdapter(transport: RouterOsApiTransport) {
 }
 
 describe("MikroTikRouterAdapter", () => {
+  it("bloque le provisionnement avant toute écriture lorsque Device Mode interdit le scheduler", async () => {
+    const transport = new MockRouterOsTransport({
+      "/system/device-mode/print": [{ flagged: "no", hotspot: "yes", scheduler: "no" }],
+      "/system/resource/print": [{ version: "7.21.5 (long-term)" }]
+    });
+
+    await expect(createAdapter(transport).ensureVoucherLifecycleEngine()).rejects.toMatchObject({
+      code: "device_mode_restricted"
+    });
+    expect(transport.calls.map((call) => call.command)).toEqual([
+      "/system/resource/print",
+      "/system/device-mode/print"
+    ]);
+  });
+
+  it("refuse le provisionnement d'un routeur signalé flagged par RouterOS", async () => {
+    const transport = new MockRouterOsTransport({
+      "/system/device-mode/print": [{ flagged: "yes", hotspot: "yes", scheduler: "yes" }],
+      "/system/resource/print": [{ version: "7.21.5" }]
+    });
+
+    await expect(createAdapter(transport).ensureVoucherLifecycleEngine()).rejects.toMatchObject({
+      code: "device_mode_flagged"
+    });
+    expect(transport.calls.some((call) => call.command === "/system/script/add")).toBe(false);
+  });
+
   it("installe et repare le moteur autonome des vouchers", async () => {
     const transport = new MockRouterOsTransport({
       "/ip/hotspot/user/profile/print": [{

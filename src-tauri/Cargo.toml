@@ -1,6 +1,6 @@
 [package]
 name = "ticketpro"
-version = "0.3.1"
+version = "0.3.2"
 description = "Gestion locale et distante de hotspots MikroTik"
 authors = ["Akicorp Solutions"]
 license = ""
