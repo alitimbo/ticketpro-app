@@ -45,6 +45,7 @@ export function getRouterNavigation(routerId: string, role?: UserRole): Navigati
     { icon: Home, label: "Maison", permissions: ["router.home"], to: `${basePath}/maison` },
     { icon: ListChecks, label: "Plans", permissions: ["router.plans.read"], to: `${basePath}/plans` },
     {
+      end: true,
       icon: Ticket,
       label: role === "agent" ? "Mes tickets" : "Tickets",
       permissions: ["router.tickets.read", "router.tickets.own"],

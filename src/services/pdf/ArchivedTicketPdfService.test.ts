@@ -30,6 +30,10 @@ describe("ArchivedTicketPdfService", () => {
     expect(text).toContain("(Contact : +227 90 00 00 01)");
     expect(text).toContain("(LOGIN)");
     expect(text).toContain("(TP1001)");
+    expect(result.input.durationLabel).toBe("1 h");
+    expect(result.input.validityLabel).toBe("3H");
+    expect(text).toContain("(Duree : 1 h)");
+    expect(text).toContain("(Validite : 3H)");
   });
 
   it("refuse de mélanger les données de deux comptes", async () => {
@@ -168,6 +172,7 @@ const ticket: TicketRecord = {
   created_by_profile_id: "account-a:internal-profile-operator",
   deleted_at: null,
   downloaded_bytes: 0,
+  duration_minutes_snapshot: 60,
   expires_at: null,
   id: "ticket-a",
   ip_address: null,
@@ -181,5 +186,6 @@ const ticket: TicketRecord = {
   sync_status: "synced",
   updated_at: now,
   uploaded_bytes: 0,
+  validity_minutes_snapshot: 180,
   username: "TP1001"
 };

@@ -229,6 +229,39 @@ describe("RouterTicketSyncService", () => {
     expect(report.logs[0]).toMatchObject({ level: "error" });
   });
 
+  it("utilise une seule operation RouterOS groupee pour supprimer un grand lot", async () => {
+    const removeHotspotUsersBatch = vi.fn(async (usernames: string[]) => [
+      ...usernames.map((username) => ({
+        message: username === "654321" ? "autorisation externe" : undefined,
+        status: username === "654321" ? "error" as const : "removed" as const,
+        username
+      })),
+      { status: "removed" as const, username: "voucher-orphelin" }
+    ]);
+    const service = new RouterTicketSyncService({
+      createHotspotUser: async () => routerUsers[0],
+      listActiveUsers: async () => [],
+      listHotspotUsers: async () => routerUsers,
+      removeHotspotUsersBatch
+    });
+
+    const report = await service.removeBatch(localTickets, "batch-1");
+
+    expect(removeHotspotUsersBatch).toHaveBeenCalledOnce();
+    expect(removeHotspotUsersBatch).toHaveBeenCalledWith(["123456", "654321"], "batch-1");
+    expect(report.updates).toEqual([
+      expect.objectContaining({ id: "ticket-1", status: "supprimé", syncStatus: "router_synced" }),
+      expect.objectContaining({ id: "ticket-2", status: "disponible", syncStatus: "error" })
+    ]);
+    expect(report.logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ level: "error", message: expect.stringContaining("autorisation externe") })
+    ]));
+    expect(report).toMatchObject({
+      remoteBatchExtrasDiscovered: 1,
+      remoteBatchExtrasRemoved: 1
+    });
+  });
+
   it("récupère un ticket créé malgré une erreur réseau de confirmation", async () => {
     let listCalls = 0;
     const service = new RouterTicketSyncService({

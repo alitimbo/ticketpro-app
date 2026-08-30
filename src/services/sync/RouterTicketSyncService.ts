@@ -80,6 +80,8 @@ export type RouterOnlyTicket = {
 export type TicketSyncReport = {
   localMissing: RouterOnlyTicket[];
   logs: TicketSyncLog[];
+  remoteBatchExtrasDiscovered?: number;
+  remoteBatchExtrasRemoved?: number;
   summary: TicketSyncSummary;
   updates: SyncedTicketUpdate[];
 };
@@ -103,7 +105,7 @@ export type TicketSyncSummary = {
 export class RouterTicketSyncService {
   constructor(
     private readonly routerService: Pick<RouterService, "createHotspotUser" | "listActiveUsers" | "listHotspotUsers"> &
-      Partial<Pick<RouterService, "removeHotspotUser" | "updateHotspotUser">>
+      Partial<Pick<RouterService, "removeHotspotUser" | "removeHotspotUsersBatch" | "updateHotspotUser">>
   ) {}
 
   async compareTickets(localTickets: SyncableLocalTicket[]): Promise<TicketSyncReport> {
@@ -299,7 +301,8 @@ export class RouterTicketSyncService {
 
   async removeBatch(
     localTickets: SyncableLocalTicket[],
-    batchId: string
+    batchId: string,
+    onProgress?: Parameters<RouterService["removeHotspotUsersBatch"]>[2]
   ): Promise<TicketSyncReport> {
     const batchTickets = localTickets.filter((ticket) => ticket.batchId === batchId);
     if (batchTickets.length === 0) {
@@ -313,21 +316,77 @@ export class RouterTicketSyncService {
 
     const updates: SyncedTicketUpdate[] = [];
     const logs: TicketSyncLog[] = [];
-    for (const ticket of batchTickets) {
-      const report = await this.removeTicket(ticket);
-      updates.push(...report.updates);
-      logs.push(...report.logs);
+    let remoteBatchExtrasDiscovered = 0;
+    let remoteBatchExtrasRemoved = 0;
+    if (this.routerService.removeHotspotUsersBatch) {
+      try {
+        const usernames = batchTickets.map((ticket) => ticket.code);
+        const removalResults = onProgress
+          ? await this.routerService.removeHotspotUsersBatch(usernames, batchId, onProgress)
+          : await this.routerService.removeHotspotUsersBatch(usernames, batchId);
+        const resultByUsername = new Map(removalResults.map((result) => [result.username, result]));
+        const localUsernames = new Set(batchTickets.map((ticket) => ticket.code));
+        const remoteExtras = removalResults.filter((result) => !localUsernames.has(result.username));
+        remoteBatchExtrasDiscovered = remoteExtras.length;
+        remoteBatchExtrasRemoved = remoteExtras.filter((result) => result.status === "removed").length;
+        for (const result of remoteExtras) {
+          logs.push({
+            level: result.status === "removed" ? "warning" : "error",
+            message: result.status === "removed"
+              ? "Voucher orphelin du lot confirmé absent du routeur."
+              : `Suppression du voucher orphelin impossible${result.message ? ` : ${result.message.slice(0, 180)}` : "."}`,
+            ticketCode: result.username
+          });
+        }
+        for (const ticket of batchTickets) {
+          const result = resultByUsername.get(ticket.code);
+          const removed = result?.status === "removed";
+          updates.push({
+            id: ticket.id,
+            status: removed ? "supprimé" : ticket.status,
+            syncStatus: removed ? "router_synced" : "error"
+          });
+          logs.push({
+            level: removed ? "info" : "error",
+            message: removed
+              ? "Ticket confirmé absent du routeur."
+              : `Suppression impossible sur le routeur${result?.message ? ` : ${result.message.slice(0, 180)}` : "."}`,
+            ticketCode: ticket.code
+          });
+        }
+      } catch (error) {
+        const detail = error instanceof Error ? error.message.slice(0, 180) : "routeur inaccessible";
+        for (const ticket of batchTickets) {
+          updates.push({ id: ticket.id, status: ticket.status, syncStatus: "error" });
+          logs.push({
+            level: "error",
+            message: `Suppression du lot interrompue : ${detail}`,
+            ticketCode: ticket.code
+          });
+        }
+      }
+    } else {
+      for (const ticket of batchTickets) {
+        const report = await this.removeTicket(ticket);
+        updates.push(...report.updates);
+        logs.push(...report.logs);
+      }
     }
-    const errorCount = updates.filter((update) => update.syncStatus === "error").length;
+    const localErrorCount = updates.filter((update) => update.syncStatus === "error").length;
+    const errorCount = logs.filter((log) => log.level === "error").length;
+    const confirmedCount = updates.length - localErrorCount + remoteBatchExtrasRemoved;
+    const expectedCount = updates.length + remoteBatchExtrasDiscovered;
     logs.unshift({
       level: errorCount > 0 ? "error" : "info",
       message: errorCount > 0
-        ? `Suppression partielle : ${updates.length - errorCount}/${updates.length} voucher(s) confirmés absents de RouterOS.`
-        : `${updates.length} voucher(s) du lot confirmés absents de RouterOS.`
+        ? `Suppression partielle : ${confirmedCount}/${expectedCount} voucher(s) confirmés absents de RouterOS.`
+        : `${confirmedCount} voucher(s) du lot confirmés absents de RouterOS.`
     });
     return {
       localMissing: [],
       logs,
+      remoteBatchExtrasDiscovered,
+      remoteBatchExtrasRemoved,
       summary: buildSummary(updates, []),
       updates
     };

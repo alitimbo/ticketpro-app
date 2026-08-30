@@ -7084,6 +7084,42 @@ a {
 }
 
 .ticket-creation-preview-actions { margin-top: 16px; }
+.ticket-generation-progress {
+  background: color-mix(in srgb, var(--color-primary, #2563eb) 7%, var(--color-surface, #fff));
+  border: 1px solid color-mix(in srgb, var(--color-primary, #2563eb) 28%, transparent);
+  border-radius: 14px;
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 13px 15px;
+}
+
+.ticket-generation-progress__heading {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.ticket-generation-progress__heading strong { font-size: 0.88rem; }
+.ticket-generation-progress__heading span {
+  color: var(--color-primary, #2563eb);
+  font-size: 0.82rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.ticket-generation-progress progress {
+  accent-color: var(--color-primary, #2563eb);
+  height: 9px;
+  overflow: hidden;
+  width: 100%;
+}
+
+.ticket-generation-progress small {
+  color: var(--color-text-muted, #64748b);
+  font-size: 0.75rem;
+}
 .ticket-settings-form { display: grid; gap: 14px; }
 
 .ticket-settings-section {
@@ -7118,4 +7154,30 @@ a {
 @media (max-width: 620px) {
   .ticket-creation-preview-summary, .ticket-settings-toggles, .ticket-template-grid { grid-template-columns: 1fr; }
   .ticket-pdf-preview-frame iframe { height: 420px; }
+}
+.batch-delete-progress {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.9rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid rgba(234, 179, 8, 0.28);
+  border-radius: 0.9rem;
+  background: rgba(234, 179, 8, 0.07);
+}
+
+.batch-delete-progress > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.batch-delete-progress progress {
+  width: 100%;
+  height: 0.55rem;
+  accent-color: #d97706;
+}
+
+.batch-delete-progress small {
+  color: var(--text-muted);
 }

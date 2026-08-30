@@ -17,6 +17,18 @@ import type {
   RouterSystemInfo
 } from "../../domain/router";
 
+export type HotspotUserBatchRemovalResult = {
+  message?: string;
+  status: "error" | "removed";
+  username: string;
+};
+
+export type HotspotUserBatchRemovalProgress = {
+  completed: number;
+  phase: "removing" | "verifying";
+  total: number;
+};
+
 export interface RouterAdapter {
   testConnection(): Promise<RouterConnectionTest>;
   getSystemInfo(): Promise<RouterSystemInfo>;
@@ -47,6 +59,11 @@ export interface RouterAdapter {
   disableHotspotUser(username: string): Promise<HotspotUser>;
   enableHotspotUser(username: string): Promise<HotspotUser>;
   removeHotspotUser(username: string): Promise<void>;
+  removeHotspotUsersBatch?(
+    usernames: string[],
+    batchId?: string,
+    onProgress?: (progress: HotspotUserBatchRemovalProgress) => void
+  ): Promise<HotspotUserBatchRemovalResult[]>;
   bindHotspotUserToMac(username: string, macAddress: string): Promise<HotspotUser>;
   clearHotspotUserMac(username: string): Promise<HotspotUser>;
   configureHotspotAntiTethering(config: HotspotAntiTetheringConfig): Promise<void>;

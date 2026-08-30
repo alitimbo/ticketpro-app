@@ -39,6 +39,7 @@ import {
 import {
   buildGeneratedTicketPdfRecord,
   createTicketPrintArchivePayload,
+  formatTicketValidityLabel,
   generateTicketPdf,
   resolveTicketPdfPassword,
   type TicketPdfFormat,
@@ -67,6 +68,7 @@ import {
   findConfirmedVoucherBatchUsers,
   getSelectedQuantity,
   getTicketSummary,
+  inspectVoucherBatchIntegrity,
   normalizeCurrency,
   normalizePrefix,
   quickQuantities,
@@ -108,6 +110,13 @@ const stepLabels = [
 
 type RouterCatalogStatus = "loading" | "ready" | "error";
 
+type TicketGenerationProgress = {
+  completed: number;
+  label: string;
+  phase: "preparing" | "creating" | "verifying" | "saving" | "publishing" | "pdf";
+  total: number;
+};
+
 export function TicketGenerationPage() {
   const { routerId = "routeur-demo" } = useParams();
   const { session } = useAuth();
@@ -128,6 +137,7 @@ export function TicketGenerationPage() {
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [showPreviewSettings, setShowPreviewSettings] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [generationProgress, setGenerationProgress] = useState<TicketGenerationProgress | null>(null);
   const [catalogStatus, setCatalogStatus] = useState<RouterCatalogStatus>("loading");
   const catalogRequestIdRef = useRef(0);
   const generationLockRef = useRef(false);
@@ -676,6 +686,12 @@ export function TicketGenerationPage() {
 
     const batchId = createBatchId();
     const requestedQuantity = getSelectedQuantity(state);
+    setGenerationProgress({
+      completed: 0,
+      label: "Préparation et contrôle du routeur…",
+      phase: "preparing",
+      total: requestedQuantity
+    });
     let succeededTickets: CreateTicketInput[] = [];
     let failedTickets: CreateTicketInput[] = [];
     let firstCreationError: string | null = null;
@@ -806,6 +822,13 @@ export function TicketGenerationPage() {
         ? await voucherOutbox.enqueueTickets(pendingTickets)
         : new Map();
 
+      let processedTickets = 0;
+      setGenerationProgress({
+        completed: 0,
+        label: `Création des ${requestedQuantity} vouchers sur RouterOS…`,
+        phase: "creating",
+        total: requestedQuantity
+      });
       await forEachWithConcurrency(generatedCredentials, 3, async (credential, credentialIndex) => {
         const pendingTicket = pendingTickets[credentialIndex];
         const voucherOperation = voucherOperations.get(pendingTicket.id);
@@ -907,11 +930,25 @@ export function TicketGenerationPage() {
               userMessage: `Le voucher ${credential.username} reste en attente : ${creationErrorMessage}`
             }
           ]);
+        } finally {
+          processedTickets += 1;
+          setGenerationProgress({
+            completed: processedTickets,
+            label: `${processedTickets}/${requestedQuantity} vouchers traités sur RouterOS`,
+            phase: "creating",
+            total: requestedQuantity
+          });
         }
       });
 
       // RouterOS can apply an add command even when the API response times out.
       // Re-read the complete batch before deciding which vouchers may be printed.
+      setGenerationProgress({
+        completed: requestedQuantity,
+        label: "Vérification exacte du lot sur RouterOS…",
+        phase: "verifying",
+        total: requestedQuantity
+      });
       const confirmedByUsername = new Map(
         succeededTickets.map((ticket) => [ticket.username, ticket] as const)
       );
@@ -965,10 +1002,66 @@ export function TicketGenerationPage() {
         }
       }
 
+      const finalRouterUsers = await generationService.listHotspotUsers();
+      const finalConfirmedUsers = findConfirmedVoucherBatchUsers({
+        batchId,
+        pendingTickets,
+        profileName: selectedPlan.profileName,
+        routerUsers: finalRouterUsers
+      });
+      for (const confirmedUser of finalConfirmedUsers) {
+        if (confirmedByUsername.has(confirmedUser.username)) continue;
+        const pendingTicket = pendingByUsername.get(confirmedUser.username);
+        if (!pendingTicket) continue;
+
+        const confirmedTicket = userToTicketRecord({
+          accountId: session.account_id,
+          batchId,
+          createdByProfileId: session.internal_profile_id,
+          createdByProfile: session.internal_profile_role,
+          passwordSecretRef: pendingTicket.password_encrypted,
+          planId: state.selectedPlanId,
+          planSnapshot: selectedPlan,
+          routerId: state.selectedRouterId,
+          user: confirmedUser
+        });
+        const voucherOperation = voucherOperations.get(pendingTicket.id);
+        if (voucherOutbox && voucherOperation) {
+          await voucherOutbox.complete(voucherOperation.id, confirmedTicket);
+        } else if (isPersistent) {
+          await ticketRepository.update(confirmedTicket);
+        }
+        confirmedByUsername.set(confirmedUser.username, confirmedTicket);
+      }
+
+      const routerIntegrity = inspectVoucherBatchIntegrity({
+        batchId,
+        expectedTickets: pendingTickets,
+        profileName: selectedPlan.profileName,
+        routerUsers: finalRouterUsers
+      });
+      if (!routerIntegrity.isExact) {
+        throw new Error(
+          `Intégrité du lot refusée : ${routerIntegrity.managedQuantity}/${routerIntegrity.expectedQuantity} vouchers `
+          + "correspondent au lot sur RouterOS. Aucun PDF n'a été produit ; utilisez Réparer/Synchroniser avant de réessayer."
+        );
+      }
+
       succeededTickets = pendingTickets
         .map((ticket) => confirmedByUsername.get(ticket.username))
         .filter((ticket): ticket is CreateTicketInput => Boolean(ticket));
       failedTickets = pendingTickets.filter((ticket) => !confirmedByUsername.has(ticket.username));
+
+      if (isPersistent) {
+        setGenerationProgress({
+          completed: requestedQuantity,
+          label: "Contrôle des enregistrements TicketPro…",
+          phase: "saving",
+          total: requestedQuantity
+        });
+        const localBatchTickets = await ticketRepository.listByBatch(batchId);
+        assertExactLocalTicketBatch(pendingTickets, localBatchTickets);
+      }
 
       const syncStatus: SyncStatus = failedTickets.length > 0 ? "pending" : "synced";
       const batch = buildTicketBatch({
@@ -998,6 +1091,12 @@ export function TicketGenerationPage() {
 
       let organizationSyncError: string | null = null;
       if (isPersistent && organizationTicketCatalog) {
+        setGenerationProgress({
+          completed: requestedQuantity,
+          label: "Partage du lot avec l'organisation…",
+          phase: "publishing",
+          total: requestedQuantity
+        });
         try {
           await organizationTicketCatalog.publishBatch(state.selectedRouterId, batch.id);
         } catch (cloudError) {
@@ -1014,6 +1113,12 @@ export function TicketGenerationPage() {
       if (fileName) {
         try {
           if (succeededTickets.length === requestedQuantity) {
+            setGenerationProgress({
+              completed: requestedQuantity,
+              label: `Création du PDF avec ${requestedQuantity} tickets…`,
+              phase: "pdf",
+              total: requestedQuantity
+            });
             createdPdf = await createAndStorePdf(batch, succeededTickets, fileName);
           }
         } catch (fileError) {
@@ -1049,6 +1154,7 @@ export function TicketGenerationPage() {
     } finally {
       generationLockRef.current = false;
       setIsGenerating(false);
+      setGenerationProgress(null);
     }
   };
 
@@ -1410,6 +1516,7 @@ export function TicketGenerationPage() {
       <TicketCreationPreviewDialog
         companyName={companyName}
         displaySettings={effectiveDisplaySettings}
+        generationProgress={generationProgress}
         isGenerating={isGenerating}
         onBack={() => {
           if (!isGenerating) setIsPreviewOpen(false);
@@ -1749,6 +1856,7 @@ function StepConfirmation({
 function TicketCreationPreviewDialog({
   companyName,
   displaySettings,
+  generationProgress,
   isGenerating,
   onBack,
   onConfirm,
@@ -1764,6 +1872,7 @@ function TicketCreationPreviewDialog({
 }: {
   companyName: string | null;
   displaySettings: TicketDisplaySettings;
+  generationProgress: TicketGenerationProgress | null;
   isGenerating: boolean;
   onBack: () => void;
   onConfirm: () => void;
@@ -1823,6 +1932,25 @@ function TicketCreationPreviewDialog({
             </aside>
           ) : null}
         </div>
+
+        {isGenerating && generationProgress ? (
+          <div aria-live="polite" className="ticket-generation-progress" role="status">
+            <div className="ticket-generation-progress__heading">
+              <strong>{generationProgress.label}</strong>
+              <span>
+                {generationProgress.phase === "creating"
+                  ? `${generationProgress.completed}/${generationProgress.total}`
+                  : `${Math.round((generationProgress.completed / Math.max(1, generationProgress.total)) * 100)} %`}
+              </span>
+            </div>
+            <progress
+              aria-label="Progression de la génération du lot"
+              max={generationProgress.total}
+              value={generationProgress.completed}
+            />
+            <small>Le lot sera validé seulement si RouterOS, TicketPro et le PDF contiennent exactement la même quantité.</small>
+          </div>
+        ) : null}
 
         <div className="confirm-dialog__actions ticket-creation-preview-actions">
           <Button disabled={isGenerating} icon={ChevronLeft} onClick={onBack} variant="ghost">Retour et modifier</Button>
@@ -2160,7 +2288,7 @@ function buildCreationPreviewPdfInput(input: {
       username
     }],
     titleLabel: input.titleLabel,
-    validityLabel: formatPlanDurationLabel(input.plan.validityMinutes ?? input.plan.durationMinutes),
+    validityLabel: formatTicketValidityLabel(input.plan.validityMinutes ?? input.plan.durationMinutes),
     zoneName: input.router.name
   };
 }
@@ -2283,6 +2411,31 @@ function assertCompleteTicketBatch(
     throw new Error(
       `Lot incomplet : ${uniqueUsernames.size}/${batch.quantity} vouchers uniques sont confirmés sur RouterOS. `
       + "Le PDF et l'impression restent bloqués jusqu'à une synchronisation complète."
+    );
+  }
+}
+
+function assertExactLocalTicketBatch(
+  expectedTickets: Pick<CreateTicketInput, "username">[],
+  localTickets: Array<{ deleted_at?: string | null; sync_status: SyncStatus; username: string }>
+): void {
+  const expectedUsernames = new Set(expectedTickets.map((ticket) => ticket.username));
+  const activeTickets = localTickets.filter((ticket) => !ticket.deleted_at);
+  const localUsernames = new Set(activeTickets.map((ticket) => ticket.username));
+  const allExpectedAreSynced = activeTickets.every(
+    (ticket) => expectedUsernames.has(ticket.username) && ticket.sync_status === "synced"
+  );
+
+  if (
+    expectedUsernames.size !== expectedTickets.length
+    || activeTickets.length !== expectedTickets.length
+    || localUsernames.size !== expectedTickets.length
+    || [...expectedUsernames].some((username) => !localUsernames.has(username))
+    || !allExpectedAreSynced
+  ) {
+    throw new Error(
+      `Intégrité locale refusée : ${localUsernames.size}/${expectedTickets.length} vouchers uniques sont confirmés dans TicketPro. `
+      + "Le PDF reste bloqué jusqu'à une synchronisation complète."
     );
   }
 }

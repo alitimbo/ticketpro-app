@@ -31,7 +31,11 @@ import {
   type RemoteConnectionProvider,
   type RemoteConnectionRequest
 } from "./RemoteConnectionProvider";
-import type { RouterAdapter } from "./RouterAdapter";
+import type {
+  HotspotUserBatchRemovalProgress,
+  HotspotUserBatchRemovalResult,
+  RouterAdapter
+} from "./RouterAdapter";
 import { isRouterAdapterError } from "./RouterAdapterError";
 
 export type RouterAdapterMode = "fake" | "mikrotik";
@@ -229,6 +233,36 @@ export class RouterService {
 
   removeHotspotUser(username: string) {
     return this.run("removeHotspotUser", () => this.adapter.removeHotspotUser(username), "router.tickets.delete");
+  }
+
+  removeHotspotUsersBatch(
+    usernames: string[],
+    batchId?: string,
+    onProgress?: (progress: HotspotUserBatchRemovalProgress) => void
+  ): Promise<HotspotUserBatchRemovalResult[]> {
+    return this.run("removeHotspotUsersBatch", async () => {
+      if (this.adapter.removeHotspotUsersBatch) {
+        return this.adapter.removeHotspotUsersBatch(usernames, batchId, onProgress);
+      }
+
+      const results: HotspotUserBatchRemovalResult[] = [];
+      onProgress?.({ completed: 0, phase: "removing", total: usernames.length });
+      for (const username of usernames) {
+        try {
+          await this.adapter.removeHotspotUser(username);
+          results.push({ status: "removed", username });
+        } catch (error) {
+          results.push({
+            message: error instanceof Error ? error.message : "Suppression RouterOS impossible.",
+            status: "error",
+            username
+          });
+        }
+        onProgress?.({ completed: results.length, phase: "removing", total: usernames.length });
+      }
+      onProgress?.({ completed: results.length, phase: "verifying", total: usernames.length });
+      return results;
+    }, "router.tickets.delete");
   }
 
   bindHotspotUserToMac(username: string, macAddress: string) {

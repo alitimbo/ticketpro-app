@@ -118,6 +118,36 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
     return this.delegate.removeHotspotUser(username);
   }
 
+  removeHotspotUsersBatch(
+    usernames: string[],
+    batchId?: string,
+    onProgress?: Parameters<NonNullable<RouterAdapter["removeHotspotUsersBatch"]>>[2]
+  ) {
+    if (this.delegate.removeHotspotUsersBatch) {
+      return this.delegate.removeHotspotUsersBatch(usernames, batchId, onProgress);
+    }
+    onProgress?.({ completed: 0, phase: "removing", total: usernames.length });
+    let completed = 0;
+    return Promise.all(usernames.map(async (username) => {
+      try {
+        await this.delegate.removeHotspotUser(username);
+        return { status: "removed" as const, username };
+      } catch (error) {
+        return {
+          message: error instanceof Error ? error.message : "Suppression RouterOS impossible.",
+          status: "error" as const,
+          username
+        };
+      } finally {
+        completed += 1;
+        onProgress?.({ completed, phase: "removing", total: usernames.length });
+      }
+    })).then((results) => {
+      onProgress?.({ completed, phase: "verifying", total: usernames.length });
+      return results;
+    });
+  }
+
   bindHotspotUserToMac(username: string, macAddress: string) {
     return this.delegate.bindHotspotUserToMac(username, macAddress);
   }

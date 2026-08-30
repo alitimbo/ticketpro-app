@@ -26,6 +26,7 @@ import { TauriFileService } from "../../services/files";
 import { AuditLogService } from "../../services/logging";
 import { OrganizationOperationsSyncService, OrganizationTicketCatalogService } from "../../services/sync";
 import {
+  applyArchivedTicketTimingSnapshots,
   createTicketPrintArchivePayload,
   generateTicketPdf,
   regenerateArchivedTicketPdf,
@@ -296,6 +297,11 @@ export function FilesPage() {
       throw new Error("Les données d'origine du fichier sont introuvables.");
     }
 
+    const [timingPlan, timingTickets] = await Promise.all([
+      planRepository.findById(batch.plan_id),
+      ticketRepository.listByBatch(batch.id)
+    ]);
+
     let bytes: Uint8Array | null = null;
     let format: "a4" | "a5" | "thermal58" | "thermal80" = "a4";
     let ticketCount = 0;
@@ -304,17 +310,26 @@ export function FilesPage() {
     if (organizationOperations) {
       try {
         const archive = await organizationOperations.getTicketPrintArchive(file.routerId, record.id);
-        const pdfInput = ticketPdfInputFromPrintArchive(archive, {
-          accountId: session.account_id,
-          batchId: batch.id,
-          createdByProfile: record.created_by_profile,
-          createdByProfileId: record.created_by_profile_id,
-          fileName: record.file_name,
-          routerId: record.router_id
+        const pdfInput = applyArchivedTicketTimingSnapshots({
+          input: ticketPdfInputFromPrintArchive(archive, {
+            accountId: session.account_id,
+            batchId: batch.id,
+            createdByProfile: record.created_by_profile,
+            createdByProfileId: record.created_by_profile_id,
+            fileName: record.file_name,
+            routerId: record.router_id
+          }),
+          plan: timingPlan,
+          tickets: timingTickets
         });
         bytes = generateTicketPdf(pdfInput);
         format = pdfInput.format;
         ticketCount = pdfInput.tickets.length;
+        await organizationOperations.publishTicketPrintArchive(
+          file.routerId,
+          record.id,
+          createTicketPrintArchivePayload(pdfInput)
+        ).catch(() => undefined);
       } catch (error) {
         cloudFailure = error;
       }
@@ -322,22 +337,20 @@ export function FilesPage() {
 
     if (!bytes) {
       try {
-        const [account, router, plan, tickets] = await Promise.all([
+        const [account, router] = await Promise.all([
           accountRepository.findById(session.account_id),
-          routerRepository.findById(batch.router_id),
-          planRepository.findById(batch.plan_id),
-          ticketRepository.listByBatch(batch.id)
+          routerRepository.findById(batch.router_id)
         ]);
-        if (!account || !router || !plan) {
+        if (!account || !router || !timingPlan) {
           throw new Error("Le compte, le routeur ou le plan d'origine est introuvable.");
         }
         const regenerated = await regenerateArchivedTicketPdf({
           account,
           batch,
           file: record,
-          plan,
+          plan: timingPlan,
           router,
-          tickets
+          tickets: timingTickets
         });
         bytes = regenerated.bytes;
         format = regenerated.format;

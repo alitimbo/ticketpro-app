@@ -126,6 +126,12 @@ export function TicketsPage() {
   const [batchToDeleteId, setBatchToDeleteId] = useState<string | null>(null);
   const [busyTicketId, setBusyTicketId] = useState<string | null>(null);
   const [isBulkBusy, setIsBulkBusy] = useState(false);
+  const [batchDeleteProgress, setBatchDeleteProgress] = useState<{
+    completed: number;
+    phase: "removing" | "verifying";
+    total: number;
+  } | null>(null);
+  const bulkBusyRef = useRef(false);
   const [printers, setPrinters] = useState<LocalPrinter[]>([]);
   const [printHistory, setPrintHistory] = useState<PrintHistoryEntry[]>([]);
   const [printSettings, setPrintSettings] = useState<PrintSettings>({
@@ -249,7 +255,7 @@ export function TicketsPage() {
     let disposed = false;
     let running = false;
     const resumeVoucherCommands = async () => {
-      if (running || disposed) return;
+      if (running || disposed || bulkBusyRef.current) return;
       running = true;
       try {
         const report = await new RouterVoucherOutboxService(
@@ -328,6 +334,7 @@ export function TicketsPage() {
     if (!isPersistent || !isInitialized || !session || !organizationTicketCatalog) return undefined;
     let disposed = false;
     const refreshSharedCatalog = async () => {
+      if (bulkBusyRef.current) return;
       try {
         const result = await organizationTicketCatalog.pullRouter(routerId);
         if (disposed || (result.importedBatches === 0 && result.importedTickets === 0)) return;
@@ -467,7 +474,10 @@ export function TicketsPage() {
     setSelectedTicket((current) => (current?.id === ticket.id ? ticket : current));
   };
 
-  const applySyncReport = async (report: TicketSyncReport) => {
+  const applySyncReport = async (
+    report: TicketSyncReport,
+    options: { publishOrganization?: boolean } = {}
+  ) => {
     const currentTickets = ticketsRef.current;
     const updates = new Map(report.updates.map((update) => [update.id, update]));
     let nextTickets = currentTickets.map((ticket) => mergeTicketUpdate(ticket, updates.get(ticket.id)));
@@ -481,9 +491,16 @@ export function TicketsPage() {
           ticketRepository,
           tickets: currentTickets
         });
-        await Promise.allSettled(
-          report.updates.map((update) => publishTicketToOrganization(update.id))
-        );
+        if (options.publishOrganization !== false && organizationTicketCatalog) {
+          const affectedBatchIds = Array.from(new Set(
+            currentTickets
+              .filter((ticket) => updates.has(ticket.id))
+              .map((ticket) => ticket.batchId)
+          ));
+          await Promise.allSettled(
+            affectedBatchIds.map((batchId) => organizationTicketCatalog.publishBatch(routerId, batchId))
+          );
+        }
       }
     }
     setTickets(nextTickets);
@@ -867,29 +884,49 @@ export function TicketsPage() {
       setError("Ce lot ne contient aucun voucher local.");
       return;
     }
+    bulkBusyRef.current = true;
     setIsBulkBusy(true);
+    setBatchDeleteProgress({ completed: 0, phase: "removing", total: batchTickets.length });
     clearFeedback();
     try {
       const actionSyncService = new RouterTicketSyncService(await getRouterServiceForAction());
-      const report = await actionSyncService.removeBatch(scopedTickets, batchToDeleteId);
-      await applySyncReport(report);
-      const hasErrors = report.summary.error > 0;
+      const report = await actionSyncService.removeBatch(
+        scopedTickets,
+        batchToDeleteId,
+        (progress) => setBatchDeleteProgress(progress)
+      );
+      await applySyncReport(report, { publishOrganization: false });
+      const hasErrors = report.logs.some((log) => log.level === "error");
+      const localErrorCount = report.updates.filter((update) => update.syncStatus === "error").length;
       await batchRepository.updateState(
         batchToDeleteId,
         session.account_id,
         hasErrors ? "suppression_partielle" : "supprimé",
         hasErrors ? "pending" : "synced"
       );
-      await organizationTicketCatalog?.publishRouter(routerId).catch(() => undefined);
       setBatchToDeleteId(null);
+      bulkBusyRef.current = false;
+      setIsBulkBusy(false);
+      setBatchDeleteProgress(null);
+      const organizationPublished = organizationTicketCatalog
+        ? await organizationTicketCatalog.publishBatch(routerId, batchToDeleteId)
+          .then(() => true)
+          .catch(() => false)
+        : true;
       if (hasErrors) {
+        const firstFailure = report.logs.find((log) => log.level === "error" && log.ticketCode)?.message;
         setError(
-          `Suppression partielle : ${batchTickets.length - report.summary.error}/${batchTickets.length} voucher(s) confirmés supprimés. `
+          `Suppression partielle : ${batchTickets.length - localErrorCount}/${batchTickets.length} voucher(s) locaux confirmés supprimés. `
           + "Les échecs restent visibles et doivent être relancés."
+          + (firstFailure ? ` Premier échec : ${firstFailure}` : "")
         );
       } else {
+        const orphanDetail = report.remoteBatchExtrasRemoved
+          ? ` ${report.remoteBatchExtrasRemoved} voucher(s) orphelin(s) rattaché(s) au même lot ont également été supprimés.`
+          : "";
         setMessage(
-          `${batchTickets.length} voucher(s) supprimés de RouterOS. Le lot, son PDF et son historique restent archivés dans TicketPro.`
+          `${batchTickets.length} voucher(s) supprimés de RouterOS.${orphanDetail} Le lot, son PDF et son historique restent archivés dans TicketPro.`
+          + (organizationPublished ? "" : " Le partage avec l’organisation sera repris automatiquement.")
         );
       }
       writeLog({
@@ -900,7 +937,9 @@ export function TicketsPage() {
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : "La suppression du lot a échoué.");
     } finally {
+      bulkBusyRef.current = false;
       setIsBulkBusy(false);
+      setBatchDeleteProgress(null);
     }
   };
 
@@ -908,7 +947,7 @@ export function TicketsPage() {
     if (!effectiveRouterService || !isPersistent) return undefined;
     let disposed = false;
     const synchronize = async () => {
-      if (disposed || automaticSyncRunning.current || ticketsRef.current.length === 0) return;
+      if (disposed || bulkBusyRef.current || automaticSyncRunning.current || ticketsRef.current.length === 0) return;
       automaticSyncRunning.current = true;
       try {
         const report = await syncService.compareTickets(ticketsRef.current.filter((ticket) => ticket.status !== "supprimé"));
@@ -1048,6 +1087,7 @@ export function TicketsPage() {
           : 0}
         onCancel={() => setBatchToDeleteId(null)}
         onConfirm={() => void executeDeleteBatch()}
+        progress={batchDeleteProgress}
       />
       <TicketDisplaySettingsDialog
         onClose={() => setSettingsOpen(false)}
@@ -1367,13 +1407,19 @@ function DeleteBatchDialog({
   busy,
   count,
   onCancel,
-  onConfirm
+  onConfirm,
+  progress
 }: {
   batchId: string | null;
   busy: boolean;
   count: number;
   onCancel: () => void;
   onConfirm: () => void;
+  progress: {
+    completed: number;
+    phase: "removing" | "verifying";
+    total: number;
+  } | null;
 }) {
   if (!batchId) return null;
   return (
@@ -1390,6 +1436,16 @@ function DeleteBatchDialog({
           </div>
         </header>
         <p className="muted-inline">Lot : {batchId}</p>
+        {busy ? (
+          <div aria-live="polite" className="batch-delete-progress" role="status">
+            <div>
+              <strong>{progress?.phase === "verifying" ? "Vérification finale sur RouterOS" : "Suppression en cours sur RouterOS"}</strong>
+              <span>{progress ? `${progress.completed} / ${progress.total}` : "Préparation…"}</span>
+            </div>
+            <progress max={Math.max(progress?.total ?? count, 1)} value={progress?.completed ?? 0} />
+            <small>Ne fermez pas TicketPro. Les synchronisations automatiques sont temporairement suspendues.</small>
+          </div>
+        ) : null}
         <div className="confirm-dialog__actions">
           <Button disabled={busy} onClick={onCancel} variant="ghost">Annuler</Button>
           <Button disabled={busy} icon={Trash2} onClick={onConfirm} variant="danger">

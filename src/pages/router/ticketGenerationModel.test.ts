@@ -7,6 +7,7 @@ import {
   defaultTicketGenerationOptions,
   findConfirmedVoucherBatchUsers,
   getTicketSummary,
+  inspectVoucherBatchIntegrity,
   validateTicketGeneration
 } from "./ticketGenerationModel";
 
@@ -221,5 +222,76 @@ describe("ticketGenerationModel", () => {
     expect(routerUsers).toHaveLength(102);
     expect(confirmed).toHaveLength(100);
     expect(confirmed.map((user) => user.username)).toEqual(pendingTickets.map((ticket) => ticket.username));
+  });
+
+  it("refuse un lot RouterOS qui contient plus de vouchers que la quantité demandée", () => {
+    const batchId = "batch-exact-100";
+    const expectedTickets = Array.from({ length: 100 }, (_, index) => ({
+      username: `TP${String(index + 1).padStart(3, "0")}`
+    }));
+    const makeUser = (username: string, id: string) => ({
+      bytesIn: 0,
+      bytesOut: 0,
+      comment: `TicketPro:v1;batch=${batchId};`,
+      createdAt: "2026-08-30T00:00:00.000Z",
+      disabled: false,
+      id,
+      limitBytesTotal: null,
+      limitUptime: "1h",
+      macAddress: null,
+      passwordSecretRef: `secret://test/${username}/password`,
+      planId: "plan-1h",
+      profileName: "plan-1h",
+      serverName: "all",
+      status: "available" as const,
+      uptime: "0s",
+      username
+    });
+    const routerUsers = [
+      ...expectedTickets.map((ticket, index) => makeUser(ticket.username, `*${index + 1}`)),
+      makeUser("EXTRA101", "*101"),
+      makeUser("EXTRA102", "*102")
+    ];
+
+    const integrity = inspectVoucherBatchIntegrity({
+      batchId,
+      expectedTickets,
+      profileName: "plan-1h",
+      routerUsers
+    });
+
+    expect(integrity.isExact).toBe(false);
+    expect(integrity.managedQuantity).toBe(102);
+    expect(integrity.unexpectedUsernames).toEqual(["EXTRA101", "EXTRA102"]);
+  });
+
+  it("valide uniquement un lot RouterOS exactement identique aux 100 vouchers attendus", () => {
+    const batchId = "batch-exact-ok";
+    const expectedTickets = Array.from({ length: 100 }, (_, index) => ({ username: `OK${index + 1}` }));
+    const routerUsers = expectedTickets.map((ticket, index) => ({
+      bytesIn: 0,
+      bytesOut: 0,
+      comment: `TicketPro:v1;batch=${batchId};`,
+      createdAt: "2026-08-30T00:00:00.000Z",
+      disabled: false,
+      id: `*${index + 1}`,
+      limitBytesTotal: null,
+      limitUptime: "1h",
+      macAddress: null,
+      passwordSecretRef: `secret://test/${ticket.username}/password`,
+      planId: "plan-1h",
+      profileName: "plan-1h",
+      serverName: "all",
+      status: "available" as const,
+      uptime: "0s",
+      username: ticket.username
+    }));
+
+    expect(inspectVoucherBatchIntegrity({
+      batchId,
+      expectedTickets,
+      profileName: "plan-1h",
+      routerUsers
+    })).toMatchObject({ isExact: true, managedQuantity: 100 });
   });
 });

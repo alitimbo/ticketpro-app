@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   buildGeneratedTicketPdfRecord,
+  formatTicketValidityLabel,
   generateTicketPdf,
+  normalizeTicketValidityLabel,
   resolveTicketPdfPassword,
   ticketQrValue,
   type TicketPdfInput
@@ -22,7 +24,7 @@ describe("TicketPdfService", () => {
     expect(text).toContain("(DUREE)");
     expect(text).toContain("(VALIDITE)");
     expect(text).toContain("(3 h)");
-    expect(text).toContain("(6 h)");
+    expect(text).toContain("(6H)");
     expect(text).toContain("(Portail : wifi.ticketpro.local)");
     expect(text).not.toContain("(Contact : +227 90 12 34 56)");
     expect(text).toContain("(Propulse par TicketPro)");
@@ -43,7 +45,7 @@ describe("TicketPdfService", () => {
     expect(text).toContain("(123100)");
   });
 
-  it("affiche distinctement une durée de 1 h et une validité de 3 j", () => {
+  it("affiche distinctement une durée de 1 h et une validité commerciale de 3Jrs", () => {
     const input = buildPdfInput(1);
     input.durationLabel = "1 h";
     input.validityLabel = "3 j";
@@ -52,7 +54,16 @@ describe("TicketPdfService", () => {
     expect(text).toContain("(DUREE)");
     expect(text).toContain("(1 h)");
     expect(text).toContain("(VALIDITE)");
-    expect(text).toContain("(3 j)");
+    expect(text).toContain("(3Jrs)");
+  });
+
+  it("formate la validité en minutes, heures et jours compacts", () => {
+    expect(formatTicketValidityLabel(30)).toBe("30Min");
+    expect(formatTicketValidityLabel(180)).toBe("3H");
+    expect(formatTicketValidityLabel(1440)).toBe("1Jr");
+    expect(formatTicketValidityLabel(2880)).toBe("2Jrs");
+    expect(normalizeTicketValidityLabel("3 h")).toBe("3H");
+    expect(normalizeTicketValidityLabel("2 jours")).toBe("2Jrs");
   });
 
   it("génère l'aperçu sur une seule cellule fidèle plutôt que sur une page A4", () => {

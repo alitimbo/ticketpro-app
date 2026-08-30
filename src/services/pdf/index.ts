@@ -1,6 +1,8 @@
 export {
   buildGeneratedTicketPdfRecord,
+  formatTicketValidityLabel,
   generateTicketPdf,
+  normalizeTicketValidityLabel,
   parseTicketPdfArchiveMetadata,
   resolveTicketPdfPassword,
   type TicketPdfArchiveMetadata,
@@ -10,6 +12,7 @@ export {
   type TicketPdfTicket
 } from "./TicketPdfService";
 export {
+  applyArchivedTicketTimingSnapshots,
   regenerateArchivedTicketPdf,
   type RegeneratedTicketPdf
 } from "./ArchivedTicketPdfService";

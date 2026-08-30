@@ -50,7 +50,7 @@ for (const format of ["a4", "thermal58", "thermal80"] satisfies TicketPdfFormat[
       username: String(638473 + index)
     }))],
     titleLabel: "WiFi Zone Grand Marche Niamey",
-    validityLabel: "3 j",
+    validityLabel: "3Jrs",
     zoneName: "WiFi Zone Grand Marche Niamey"
   };
 

@@ -16,7 +16,8 @@ describe("navigation", () => {
   });
 
   it("adapte les entrées routeur selon le rôle", () => {
-    expect(getRouterNavigation("demo", "operator").map((item) => item.label)).toEqual([
+    const operatorNavigation = getRouterNavigation("demo", "operator");
+    expect(operatorNavigation.map((item) => item.label)).toEqual([
       "Maison",
       "Plans",
       "Tickets",
@@ -28,6 +29,13 @@ describe("navigation", () => {
       "Logs",
       "Paramètres routeur"
     ]);
+    expect(operatorNavigation.find((item) => item.label === "Tickets")).toMatchObject({
+      end: true,
+      to: "/routeurs/demo/tickets"
+    });
+    const generationItem = operatorNavigation.find((item) => item.label === "Génération tickets");
+    expect(generationItem).toMatchObject({ to: "/routeurs/demo/tickets/generation" });
+    expect(generationItem?.end).toBeUndefined();
 
     expect(getRouterNavigation("demo", "agent").map((item) => item.label)).toContain("Mes tickets");
   });

@@ -25,12 +25,16 @@ import type {
   VoucherLifecycleEngineOptions,
   VoucherLifecycleEngineState
 } from "../../domain/router";
-import { extractVoucherBatchOwnershipSuffix, TicketCodeGenerator } from "../tickets";
+import {
+  extractVoucherBatchOwnershipSuffix,
+  TicketCodeGenerator,
+  voucherBelongsToBatch
+} from "../tickets";
 import {
   protectTicketPassword,
   resolveTicketPasswordValue
 } from "../tickets/TicketPasswordService";
-import type { RouterAdapter } from "./RouterAdapter";
+import type { HotspotUserBatchRemovalResult, RouterAdapter } from "./RouterAdapter";
 import { RouterAdapterError } from "./RouterAdapterError";
 import {
   TauriRouterOsApiTransport,
@@ -1114,6 +1118,23 @@ export class MikroTikRouterAdapter implements RouterAdapter {
   }
 
   async removeHotspotUser(username: string): Promise<void> {
+    const result = (await this.removeHotspotUsersBatch([username]))[0];
+    if (!result || result.status === "error") {
+      throw new RouterAdapterError(
+        "router_rejected",
+        result?.message ?? "RouterOS kept the Hotspot voucher after removal"
+      );
+    }
+  }
+
+  async removeHotspotUsersBatch(
+    usernames: string[],
+    batchId?: string,
+    onProgress?: Parameters<NonNullable<RouterAdapter["removeHotspotUsersBatch"]>>[2]
+  ): Promise<HotspotUserBatchRemovalResult[]> {
+    const requestedUsernames = usernames.map((username) => username.trim()).filter(Boolean);
+    if (requestedUsernames.length === 0 && !batchId?.trim()) return [];
+
     const [userRows, activeRows, cookieRows, hostRows, bindingRows, connectionRows] = await Promise.all([
       this.call("/ip/hotspot/user/print"),
       this.call("/ip/hotspot/active/print"),
@@ -1122,101 +1143,111 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       this.call("/ip/hotspot/ip-binding/print"),
       this.call("/ip/firewall/connection/print")
     ]);
-    const userRow = userRows.find((row) => pick(row, "name", "user") === username);
-    const userId = userRow ? pick(userRow, ".id", "id") : null;
-    const activeIds = activeRows
-      .filter((row) => pick(row, "user", "name") === username)
-      .map((row) => pick(row, ".id", "id"))
-      .filter((id): id is string => Boolean(id));
-    const cookieIds = cookieRows
-      .filter((row) => pick(row, "user", "name") === username)
-      .map((row) => pick(row, ".id", "id"))
-      .filter((id): id is string => Boolean(id));
-    const clientMacAddresses = new Set(
-      [
+    const ownedUsernames = batchId?.trim()
+      ? userRows
+        .filter((row) => voucherBelongsToBatch(pick(row, "comment"), batchId))
+        .map((row) => pick(row, "name", "user"))
+        .filter((username): username is string => Boolean(username))
+      : [];
+    const uniqueUsernames = Array.from(new Set([...requestedUsernames, ...ownedUsernames]));
+    const targets = uniqueUsernames.map((username) => {
+      const userRow = userRows.find((row) => pick(row, "name", "user") === username);
+      const userId = userRow ? pick(userRow, ".id", "id") : undefined;
+      const userActiveRows = activeRows.filter((row) => pick(row, "user", "name") === username);
+      const userCookieRows = cookieRows.filter((row) => pick(row, "user", "name") === username);
+      const clientMacAddresses = new Set([
         normalizeOptionalMacAddress(userRow ? pick(userRow, "mac-address") : undefined),
-        ...cookieRows
-          .filter((row) => pick(row, "user", "name") === username)
-          .map((row) => normalizeOptionalMacAddress(pick(row, "mac-address")))
-      ].filter((value): value is string => Boolean(value))
-    );
-    const clientAddresses = new Set(
-      [
-        ...activeRows
-          .filter((row) => pick(row, "user", "name") === username)
-          .map((row) => pick(row, "address")),
+        ...userActiveRows.map((row) => normalizeOptionalMacAddress(pick(row, "mac-address"))),
+        ...userCookieRows.map((row) => normalizeOptionalMacAddress(pick(row, "mac-address")))
+      ].filter((value): value is string => Boolean(value)));
+      const clientAddresses = new Set([
+        ...userActiveRows.map((row) => pick(row, "address")),
         ...hostRows
           .filter((row) => {
             const macAddress = normalizeOptionalMacAddress(pick(row, "mac-address"));
             return Boolean(macAddress && clientMacAddresses.has(macAddress));
           })
           .map((row) => pick(row, "address"))
-      ].filter((value): value is string => Boolean(value))
-    );
-    const hostIds = hostRows
-      .filter((row) => {
+      ].filter((value): value is string => Boolean(value)));
+      const bindingMatchesClient = (row: RouterOsApiRow) => {
         const macAddress = normalizeOptionalMacAddress(pick(row, "mac-address"));
-        return Boolean(
-          (macAddress && clientMacAddresses.has(macAddress))
-          || (pick(row, "address") && clientAddresses.has(pick(row, "address")!))
-        );
-      })
-      .map((row) => pick(row, ".id", "id"))
-      .filter((id): id is string => Boolean(id));
-    const bindingMatchesClient = (row: RouterOsApiRow) => {
-      const macAddress = normalizeOptionalMacAddress(pick(row, "mac-address"));
-      const address = pick(row, "address");
-      return Boolean(macAddress && clientMacAddresses.has(macAddress))
-        || Boolean(address && clientAddresses.has(address));
+        const address = pick(row, "address");
+        return Boolean(macAddress && clientMacAddresses.has(macAddress))
+          || Boolean(address && clientAddresses.has(address));
+      };
+      const ids = (rows: RouterOsApiRow[]) => rows
+        .map((row) => pick(row, ".id", "id"))
+        .filter((id): id is string => Boolean(id));
+
+      return {
+        activeIds: ids(userActiveRows),
+        bindingIds: ids(bindingRows.filter((row) => isManagedVoucherBinding(row, username))),
+        clientAddresses,
+        clientMacAddresses,
+        connectionIds: ids(connectionRows.filter((row) => Array.from(clientAddresses).some((address) =>
+          connectionAddressMatches(pick(row, "src-address"), address)
+          || connectionAddressMatches(pick(row, "dst-address"), address)
+        ))),
+        cookieIds: ids(userCookieRows),
+        externalAuthorizationBindings: bindingRows.filter((row) =>
+          !isManagedVoucherBinding(row, username)
+          && pick(row, "type") === "bypassed"
+          && bindingMatchesClient(row)
+        ),
+        hostIds: ids(hostRows.filter((row) => {
+          const macAddress = normalizeOptionalMacAddress(pick(row, "mac-address"));
+          const address = pick(row, "address");
+          return Boolean(macAddress && clientMacAddresses.has(macAddress))
+            || Boolean(address && clientAddresses.has(address));
+        })),
+        mutationErrors: [] as string[],
+        userId,
+        username
+      };
+    });
+    const removedIds = new Set<string>();
+    const mutateOnce = async (
+      target: (typeof targets)[number],
+      command: string,
+      id: string
+    ) => {
+      const key = `${command}:${id}`;
+      if (removedIds.has(key)) return;
+      removedIds.add(key);
+      try {
+        await this.call(command, { numbers: id });
+      } catch (error) {
+        target.mutationErrors.push(error instanceof Error ? error.message : `${command} failed`);
+      }
     };
-    const bindingIds = bindingRows
-      .filter((row) => {
-        return isManagedVoucherBinding(row, username);
-      })
-      .map((row) => pick(row, ".id", "id"))
-      .filter((id): id is string => Boolean(id));
-    const externalAuthorizationBindings = bindingRows.filter((row) =>
-      !isManagedVoucherBinding(row, username)
-      && pick(row, "type") === "bypassed"
-      && bindingMatchesClient(row)
-    );
-    const connectionIds = connectionRows
-      .filter((row) => Array.from(clientAddresses).some((address) =>
-        connectionAddressMatches(pick(row, "src-address"), address)
-        || connectionAddressMatches(pick(row, "dst-address"), address)
-      ))
-      .map((row) => pick(row, ".id", "id"))
-      .filter((id): id is string => Boolean(id));
 
-    if (userId) {
-      await this.call("/ip/hotspot/user/disable", { numbers: userId });
-    }
+    let completedTargets = 0;
+    onProgress?.({ completed: 0, phase: "removing", total: targets.length });
+    await Promise.all(targets.map(async (target) => {
+      const hasClientAuthorization = target.activeIds.length > 0
+        || target.cookieIds.length > 0
+        || target.hostIds.length > 0
+        || target.bindingIds.length > 0
+        || target.connectionIds.length > 0
+        || target.externalAuthorizationBindings.length > 0;
+      if (target.userId && hasClientAuthorization) {
+        await mutateOnce(target, "/ip/hotspot/user/disable", target.userId);
+      }
+      for (const id of target.activeIds) await mutateOnce(target, "/ip/hotspot/active/remove", id);
+      for (const id of target.cookieIds) await mutateOnce(target, "/ip/hotspot/cookie/remove", id);
+      for (const id of target.hostIds) await mutateOnce(target, "/ip/hotspot/host/remove", id);
+      for (const id of target.bindingIds) await mutateOnce(target, "/ip/hotspot/ip-binding/remove", id);
+      for (const id of target.connectionIds) await mutateOnce(target, "/ip/firewall/connection/remove", id);
+      if (target.externalAuthorizationBindings.length > 0) {
+        target.mutationErrors.push("An external Hotspot bypass still authorizes this voucher device");
+      } else if (target.userId) {
+        await mutateOnce(target, "/ip/hotspot/user/remove", target.userId);
+      }
+      completedTargets += 1;
+      onProgress?.({ completed: completedTargets, phase: "removing", total: targets.length });
+    }));
 
-    for (const activeId of activeIds) {
-      await this.call("/ip/hotspot/active/remove", { numbers: activeId });
-    }
-    for (const cookieId of cookieIds) {
-      await this.call("/ip/hotspot/cookie/remove", { numbers: cookieId });
-    }
-    for (const hostId of hostIds) {
-      await this.call("/ip/hotspot/host/remove", { numbers: hostId });
-    }
-    for (const bindingId of bindingIds) {
-      await this.call("/ip/hotspot/ip-binding/remove", { numbers: bindingId });
-    }
-    for (const connectionId of connectionIds) {
-      await this.call("/ip/firewall/connection/remove", { numbers: connectionId });
-    }
-    if (externalAuthorizationBindings.length > 0) {
-      throw new RouterAdapterError(
-        "router_rejected",
-        "An external Hotspot bypass still authorizes this voucher device"
-      );
-    }
-    if (userId) {
-      await this.call("/ip/hotspot/user/remove", { numbers: userId });
-    }
-
+    onProgress?.({ completed: targets.length, phase: "verifying", total: targets.length });
     const [remainingUsers, remainingActiveRows, remainingCookieRows, remainingHosts, remainingBindings, remainingConnections] = await Promise.all([
       this.call("/ip/hotspot/user/print"),
       this.call("/ip/hotspot/active/print"),
@@ -1225,36 +1256,37 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       this.call("/ip/hotspot/ip-binding/print"),
       this.call("/ip/firewall/connection/print")
     ]);
-    const stillPresent = (rows: RouterOsApiRow[]) => rows.some(
-      (row) => pick(row, "user", "name") === username
-    );
-    if (
-      stillPresent(remainingUsers)
-      || stillPresent(remainingActiveRows)
-      || stillPresent(remainingCookieRows)
-      || remainingHosts.some((row) => {
-        const macAddress = normalizeOptionalMacAddress(pick(row, "mac-address"));
-        const address = pick(row, "address");
-        return Boolean(macAddress && clientMacAddresses.has(macAddress))
-          || Boolean(address && clientAddresses.has(address));
-      })
-      || remainingBindings.some((row) => {
-        const macAddress = normalizeOptionalMacAddress(pick(row, "mac-address"));
-        const address = pick(row, "address");
-        return isManagedVoucherBinding(row, username)
-          || Boolean(macAddress && clientMacAddresses.has(macAddress))
-          || Boolean(address && clientAddresses.has(address));
-      })
-      || remainingConnections.some((row) => Array.from(clientAddresses).some((address) =>
-        connectionAddressMatches(pick(row, "src-address"), address)
-        || connectionAddressMatches(pick(row, "dst-address"), address)
-      ))
-    ) {
-      throw new RouterAdapterError(
-        "router_rejected",
-        "RouterOS kept a Hotspot authorization or network connection after removal"
+    return targets.map((target) => {
+      const stillPresent = (rows: RouterOsApiRow[]) => rows.some(
+        (row) => pick(row, "user", "name") === target.username
       );
-    }
+      const authorizationRemains = stillPresent(remainingUsers)
+        || stillPresent(remainingActiveRows)
+        || stillPresent(remainingCookieRows)
+        || remainingHosts.some((row) => {
+          const macAddress = normalizeOptionalMacAddress(pick(row, "mac-address"));
+          const address = pick(row, "address");
+          return Boolean(macAddress && target.clientMacAddresses.has(macAddress))
+            || Boolean(address && target.clientAddresses.has(address));
+        })
+        || remainingBindings.some((row) => {
+          const macAddress = normalizeOptionalMacAddress(pick(row, "mac-address"));
+          const address = pick(row, "address");
+          return isManagedVoucherBinding(row, target.username)
+            || Boolean(macAddress && target.clientMacAddresses.has(macAddress))
+            || Boolean(address && target.clientAddresses.has(address));
+        })
+        || remainingConnections.some((row) => Array.from(target.clientAddresses).some((address) =>
+          connectionAddressMatches(pick(row, "src-address"), address)
+          || connectionAddressMatches(pick(row, "dst-address"), address)
+        ));
+      if (!authorizationRemains) return { status: "removed" as const, username: target.username };
+      return {
+        message: target.mutationErrors[0] ?? "RouterOS kept a Hotspot authorization or network connection after removal",
+        status: "error" as const,
+        username: target.username
+      };
+    });
   }
 
   async bindHotspotUserToMac(username: string, macAddress: string): Promise<HotspotUser> {

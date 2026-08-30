@@ -56,6 +56,29 @@ export type TicketPdfArchiveMetadata = Pick<
   | "displaySettings"
 >;
 
+export function formatTicketValidityLabel(minutes: number): string {
+  const normalizedMinutes = Math.max(0, Math.round(minutes));
+  if (normalizedMinutes >= 1440 && normalizedMinutes % 1440 === 0) {
+    const days = normalizedMinutes / 1440;
+    return `${days}${days === 1 ? "Jr" : "Jrs"}`;
+  }
+  if (normalizedMinutes >= 60 && normalizedMinutes % 60 === 0) {
+    return `${normalizedMinutes / 60}H`;
+  }
+  return `${normalizedMinutes}Min`;
+}
+
+export function normalizeTicketValidityLabel(value: string): string {
+  const normalized = value.trim();
+  const match = normalized.match(/^(\d+)\s*(min(?:ute)?s?|m|h|hr|heure?s?|j|jr|jrs|jour?s?)$/i);
+  if (!match) return normalized;
+  const amount = Number(match[1]);
+  const unit = match[2].toLowerCase();
+  if (unit.startsWith("j")) return `${amount}${amount === 1 ? "Jr" : "Jrs"}`;
+  if (unit === "h" || unit === "hr" || unit.startsWith("heure")) return `${amount}H`;
+  return `${amount}Min`;
+}
+
 type PageSize = {
   height: number;
   width: number;
@@ -94,7 +117,7 @@ export function buildGeneratedTicketPdfRecord(input: TicketPdfInput): CreateGene
     qrCodeEnabled: input.qrCodeEnabled,
     template: input.template,
     titleLabel: input.titleLabel,
-    validityLabel: input.validityLabel,
+    validityLabel: normalizeTicketValidityLabel(input.validityLabel),
     zoneName: input.zoneName,
     displaySettings: input.displaySettings
   };
@@ -146,7 +169,10 @@ export function parseTicketPdfArchiveMetadata(value: string | null | undefined):
       qrCodeEnabled: parsed.qrCodeEnabled === true,
       template: parsed.template as TicketPdfTemplate,
       titleLabel: typeof parsed.titleLabel === "string" ? parsed.titleLabel : parsed.zoneName,
-      validityLabel: typeof parsed.validityLabel === "string" ? parsed.validityLabel : parsed.durationLabel,
+      // Older TicketPro files did not persist validity separately. Keep the
+      // field empty so regeneration can recover it from immutable ticket
+      // snapshots instead of silently copying the usage duration.
+      validityLabel: typeof parsed.validityLabel === "string" ? parsed.validityLabel : "",
       zoneName: parsed.zoneName,
       displaySettings: parsed.displaySettings
     };
@@ -156,6 +182,10 @@ export function parseTicketPdfArchiveMetadata(value: string | null | undefined):
 }
 
 export function generateTicketPdf(input: TicketPdfInput): Uint8Array {
+  input = {
+    ...input,
+    validityLabel: normalizeTicketValidityLabel(input.validityLabel)
+  };
   const writer = new PdfWriter();
   const isSingleTicketPreview = input.previewMode === "single-ticket";
   const grid = isSingleTicketPreview ? singleTicketPreviewGrid : grids[input.format];
@@ -425,24 +455,25 @@ function drawEconomyCodeBody(
   const bandTop = y + cellHeight * (settings?.showPlanName ? 0.69 : 0.72);
   const bandHeight = singleCode ? cellHeight * 0.2 : cellHeight * 0.27;
   const bandBottom = bandTop - bandHeight;
-  const iconSize = compact ? 8 : 11;
-  const iconX = bandX + (compact ? 9 : 12);
-  const iconY = bandBottom + bandHeight / 2;
-  const valueCenterX = bandX + iconSize + (bandWidth - iconSize) / 2;
+  const iconColumnWidth = compact ? 12 : 16;
+  const iconX = bandX + iconColumnWidth / 2;
+  const valueCenterX = bandX + iconColumnWidth + (bandWidth - iconColumnWidth) / 2;
 
   page.rect(bandX, bandBottom, bandWidth, bandHeight);
-  drawUserKeyIcon(page, iconX, iconY, iconSize);
 
   if (singleCode) {
+    drawUserOutlineIcon(page, iconX, bandBottom + bandHeight / 2, compact ? 5.5 : 7.5);
     page.text(ticket.username, valueCenterX, bandBottom + bandHeight * 0.32, {
       align: "center",
       font: "bold",
-      size: fitTextSize(ticket.username, bandWidth - iconSize - 12, compact ? 10.5 : 14, compact ? 6.3 : 8)
+      size: fitTextSize(ticket.username, bandWidth - iconColumnWidth - 12, compact ? 10.5 : 14, compact ? 6.3 : 8)
     });
   } else {
-    const rightX = bandX + iconSize + (compact ? 7 : 9);
+    const rightX = bandX + iconColumnWidth;
     const rightWidth = bandX + bandWidth - rightX - 3;
     const dividerY = bandBottom + bandHeight / 2;
+    drawUserOutlineIcon(page, iconX, dividerY + bandHeight / 4, compact ? 4.8 : 6.6);
+    drawLockOutlineIcon(page, iconX, bandBottom + bandHeight / 4, compact ? 4.8 : 6.6);
     page.line(rightX, dividerY, bandX + bandWidth - 3, dividerY);
     page.text("LOGIN", rightX, dividerY + (compact ? 3.2 : 4.2), {
       font: "bold",
@@ -528,7 +559,7 @@ function drawEconomyQrBody(
     size: fitTextSize("Scannez pour vous connecter", qrSize + 5, compact ? 2.2 : 3, compact ? 1.8 : 2.3)
   });
 
-  drawUserKeyIcon(page, detailsX + (compact ? 4 : 5), mainTop - (compact ? 5 : 7), compact ? 6 : 8);
+  drawUserOutlineIcon(page, detailsX + (compact ? 4 : 5), mainTop - (compact ? 5 : 7), compact ? 5 : 7);
   page.text("LOGIN", detailsX + (compact ? 11 : 14), mainTop - (compact ? 5.5 : 7), {
     font: "bold",
     size: compact ? 2.8 : 3.7
@@ -542,10 +573,11 @@ function drawEconomyQrBody(
   let detailY = mainTop - (compact ? 27 : 35);
   if (!singleCode) {
     const passwordLabel = `MOT DE PASSE ${password}`;
-    page.text(passwordLabel, detailsCenterX, detailY, {
+    drawLockOutlineIcon(page, detailsX + (compact ? 4 : 5), detailY + (compact ? 1 : 1.5), compact ? 4.8 : 6.5);
+    page.text(passwordLabel, detailsCenterX + (compact ? 3 : 4), detailY, {
       align: "center",
       font: "bold",
-      size: fitTextSize(passwordLabel, detailsWidth, compact ? 4.2 : 5.5, compact ? 3 : 4)
+      size: fitTextSize(passwordLabel, detailsWidth - (compact ? 7 : 10), compact ? 4.2 : 5.5, compact ? 3 : 4)
     });
     detailY -= compact ? 7 : 9;
   }
@@ -565,19 +597,32 @@ function drawEconomyQrBody(
   });
 }
 
-function drawUserKeyIcon(page: PdfPage, centerX: number, centerY: number, size: number) {
-  const headRadius = size * 0.13;
-  const personX = centerX - size * 0.22;
-  page.fillCircle(personX, centerY + size * 0.2, headRadius);
-  page.line(personX, centerY + size * 0.06, personX, centerY - size * 0.25);
-  page.line(personX, centerY, personX - size * 0.14, centerY - size * 0.13);
-  page.line(personX, centerY, personX + size * 0.14, centerY - size * 0.13);
+function drawUserOutlineIcon(page: PdfPage, centerX: number, centerY: number, size: number) {
+  const headRadius = size * 0.2;
+  const headY = centerY + size * 0.22;
+  const shoulderY = centerY - size * 0.3;
+  page.strokeCircle(centerX, headY, headRadius);
+  page.line(centerX - size * 0.36, shoulderY, centerX - size * 0.28, centerY - size * 0.08);
+  page.line(centerX - size * 0.28, centerY - size * 0.08, centerX, centerY);
+  page.line(centerX, centerY, centerX + size * 0.28, centerY - size * 0.08);
+  page.line(centerX + size * 0.28, centerY - size * 0.08, centerX + size * 0.36, shoulderY);
+}
 
-  const keyX = centerX + size * 0.1;
-  const keyY = centerY + size * 0.08;
-  page.rect(keyX, keyY, size * 0.22, size * 0.22);
-  page.line(keyX + size * 0.22, keyY + size * 0.11, keyX + size * 0.48, keyY - size * 0.15);
-  page.line(keyX + size * 0.36, keyY - size * 0.03, keyX + size * 0.43, keyY + size * 0.04);
+function drawLockOutlineIcon(page: PdfPage, centerX: number, centerY: number, size: number) {
+  const bodyWidth = size * 0.62;
+  const bodyHeight = size * 0.46;
+  const bodyX = centerX - bodyWidth / 2;
+  const bodyY = centerY - size * 0.34;
+  const shackleHalfWidth = size * 0.2;
+  const shackleTop = centerY + size * 0.34;
+  const shackleBottom = bodyY + bodyHeight;
+  page.rect(bodyX, bodyY, bodyWidth, bodyHeight);
+  page.line(centerX - shackleHalfWidth, shackleBottom, centerX - shackleHalfWidth, shackleTop - size * 0.09);
+  page.line(centerX - shackleHalfWidth, shackleTop - size * 0.09, centerX - size * 0.1, shackleTop);
+  page.line(centerX - size * 0.1, shackleTop, centerX + size * 0.1, shackleTop);
+  page.line(centerX + size * 0.1, shackleTop, centerX + shackleHalfWidth, shackleTop - size * 0.09);
+  page.line(centerX + shackleHalfWidth, shackleTop - size * 0.09, centerX + shackleHalfWidth, shackleBottom);
+  page.fillCircle(centerX, bodyY + bodyHeight * 0.48, Math.max(0.35, size * 0.055));
 }
 
 function drawThermalTicket(
@@ -841,6 +886,17 @@ class PdfPage {
 
   circle(x: number, y: number, radius: number) {
     this.fillCircle(x, y, radius);
+  }
+
+  strokeCircle(x: number, y: number, radius: number) {
+    const control = radius * 0.55228475;
+    this.commands.push(
+      `0.35 w ${fixed(x + radius)} ${fixed(y)} m `
+      + `${fixed(x + radius)} ${fixed(y + control)} ${fixed(x + control)} ${fixed(y + radius)} ${fixed(x)} ${fixed(y + radius)} c `
+      + `${fixed(x - control)} ${fixed(y + radius)} ${fixed(x - radius)} ${fixed(y + control)} ${fixed(x - radius)} ${fixed(y)} c `
+      + `${fixed(x - radius)} ${fixed(y - control)} ${fixed(x - control)} ${fixed(y - radius)} ${fixed(x)} ${fixed(y - radius)} c `
+      + `${fixed(x + control)} ${fixed(y - radius)} ${fixed(x + radius)} ${fixed(y - control)} ${fixed(x + radius)} ${fixed(y)} c S`
+    );
   }
 
   fillCircle(x: number, y: number, radius: number) {

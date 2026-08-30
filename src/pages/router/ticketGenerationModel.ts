@@ -1,7 +1,12 @@
 import type { HotspotPlan, HotspotServer, HotspotUser, RouterSummary } from "../../domain/router";
 import type { CreateTicketBatchInput, CreateTicketInput, SyncStatus } from "../../domain/database";
 import type { UserRole } from "../../domain/auth";
-import type { TicketPdfFormat, TicketPdfInput, TicketPdfTemplate } from "../../services/pdf";
+import {
+  formatTicketValidityLabel,
+  type TicketPdfFormat,
+  type TicketPdfInput,
+  type TicketPdfTemplate
+} from "../../services/pdf";
 import { normalizeTicketPrefix, secretRefForTicket, voucherBelongsToBatch } from "../../services/tickets";
 
 export { secretRefForTicket };
@@ -124,6 +129,56 @@ export function findConfirmedVoucherBatchUsers(input: {
   return input.pendingTickets
     .map((ticket) => usersByName.get(ticket.username))
     .filter((user): user is HotspotUser => Boolean(user));
+}
+
+export type VoucherBatchIntegrity = {
+  duplicateUsernames: string[];
+  expectedQuantity: number;
+  isExact: boolean;
+  managedQuantity: number;
+  missingUsernames: string[];
+  profileMismatchUsernames: string[];
+  unexpectedUsernames: string[];
+};
+
+export function inspectVoucherBatchIntegrity(input: {
+  batchId: string;
+  expectedTickets: Pick<CreateTicketInput, "username">[];
+  profileName: string;
+  routerUsers: HotspotUser[];
+}): VoucherBatchIntegrity {
+  const expectedUsernames = new Set(input.expectedTickets.map((ticket) => ticket.username));
+  const managedUsers = input.routerUsers.filter((user) => voucherBelongsToBatch(user.comment, input.batchId));
+  const managedCounts = new Map<string, number>();
+
+  managedUsers.forEach((user) => {
+    managedCounts.set(user.username, (managedCounts.get(user.username) ?? 0) + 1);
+  });
+
+  const duplicateUsernames = [...managedCounts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([username]) => username);
+  const missingUsernames = [...expectedUsernames].filter((username) => !managedCounts.has(username));
+  const unexpectedUsernames = [...managedCounts.keys()].filter((username) => !expectedUsernames.has(username));
+  const profileMismatchUsernames = managedUsers
+    .filter((user) => expectedUsernames.has(user.username) && user.profileName !== input.profileName)
+    .map((user) => user.username);
+
+  return {
+    duplicateUsernames,
+    expectedQuantity: expectedUsernames.size,
+    isExact:
+      input.expectedTickets.length === expectedUsernames.size
+      && managedUsers.length === expectedUsernames.size
+      && duplicateUsernames.length === 0
+      && missingUsernames.length === 0
+      && unexpectedUsernames.length === 0
+      && profileMismatchUsernames.length === 0,
+    managedQuantity: managedUsers.length,
+    missingUsernames,
+    profileMismatchUsernames,
+    unexpectedUsernames
+  };
 }
 
 export function validateTicketGeneration(
@@ -395,7 +450,7 @@ export function buildTicketPdfInput(input: {
       username: ticket.username
     })),
     titleLabel: input.router.name,
-    validityLabel: formatDuration(input.plan.validityMinutes ?? input.plan.durationMinutes),
+    validityLabel: formatTicketValidityLabel(input.plan.validityMinutes ?? input.plan.durationMinutes),
     zoneName: input.router.name
   };
 }

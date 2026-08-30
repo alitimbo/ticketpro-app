@@ -1056,6 +1056,51 @@ describe("MikroTikRouterAdapter", () => {
     ]);
   });
 
+  it("supprime un lot avec un seul inventaire RouterOS avant et apres les mutations", async () => {
+    const usernames = Array.from({ length: 100 }, (_, index) => `voucher-${index + 1}`);
+    const allUsernames = [...usernames, "voucher-orphelin"];
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/active/print": [],
+      "/ip/hotspot/cookie/print": [],
+      "/ip/hotspot/host/print": [],
+      "/ip/hotspot/ip-binding/print": [],
+      "/ip/firewall/connection/print": [],
+      "/ip/hotspot/user/print": allUsernames.map((username, index) => ({
+        ".id": `*U${index + 1}`,
+        comment: username === "voucher-orphelin"
+          ? "TicketPro:v1;validity=180;expires=0;state=new;batch=batch-yesterday;"
+          : "",
+        name: username,
+        profile: "plan-1h"
+      }))
+    });
+    const adapter = createAdapter(transport);
+    const progress: Array<{ completed: number; phase: "removing" | "verifying"; total: number }> = [];
+
+    const result = await adapter.removeHotspotUsersBatch(
+      usernames,
+      "batch-yesterday",
+      (value) => progress.push(value)
+    );
+
+    expect(result).toHaveLength(101);
+    expect(result.every((item) => item.status === "removed")).toBe(true);
+    expect(progress[0]).toEqual({ completed: 0, phase: "removing", total: 101 });
+    expect(progress[progress.length - 1]).toEqual({ completed: 101, phase: "verifying", total: 101 });
+
+    for (const command of [
+      "/ip/hotspot/user/print",
+      "/ip/hotspot/active/print",
+      "/ip/hotspot/cookie/print",
+      "/ip/hotspot/host/print",
+      "/ip/hotspot/ip-binding/print",
+      "/ip/firewall/connection/print"
+    ]) {
+      expect(transport.calls.filter((call) => call.command === command)).toHaveLength(2);
+    }
+    expect(transport.calls.filter((call) => call.command === "/ip/hotspot/user/remove")).toHaveLength(101);
+  });
+
   it("refuse la suppression définitive si un bypass externe autorise encore l'appareil", async () => {
     const transport = new MockRouterOsTransport({
       "/ip/hotspot/active/print": [{
