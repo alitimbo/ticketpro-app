@@ -43,9 +43,9 @@ Les fichiers PDF déjà générés ne sont pas recréés automatiquement. Les vo
 
 La variable serveur `ROUTER_VAULT_KEY` doit être une clé aléatoire de 32 octets encodée en base64. Les identifiants RouterOS sont chiffrés avec AES-256-GCM et liés à l'organisation et au routeur par des données authentifiées.
 
-La base SQLite du VPS ne contient pas le mot de passe RouterOS en clair. Les journaux d'audit ne contiennent ni mot de passe ni clé WireGuard privée.
+La base SQLite du VPS ne contient pas le mot de passe RouterOS en clair. Les archives de réimpression contenant les identifiants vouchers sont chiffrées séparément avec `TICKET_ARCHIVE_KEY`, en AES-256-GCM et avec un contexte authentifié organisation/routeur/fichier. Les journaux d'audit ne contiennent ni mot de passe voucher, ni mot de passe RouterOS, ni clé WireGuard privée.
 
-`ROUTER_VAULT_KEY` doit être sauvegardée hors du VPS avec les sauvegardes de la base. Perdre cette clé rend les identifiants RouterOS sauvegardés définitivement illisibles. Exposer cette clé impose sa rotation et le rechiffrement du coffre.
+`ROUTER_VAULT_KEY` et `TICKET_ARCHIVE_KEY` doivent être sauvegardées hors du VPS avec les sauvegardes de la base. Perdre une clé rend les données correspondantes définitivement illisibles. Exposer une clé impose sa rotation et le rechiffrement du coffre concerné.
 
 ## Sauvegarde à conserver hors VPS
 
@@ -53,6 +53,7 @@ Une restauration complète du serveur exige au minimum :
 
 - la base `licenses.sqlite` et ses fichiers SQLite associés si présents ;
 - `ROUTER_VAULT_KEY` ;
+- `TICKET_ARCHIVE_KEY` ;
 - `LICENSE_HASH_SECRET` ;
 - les secrets SMTP et iPay ;
 - la configuration Caddy ;

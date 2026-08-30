@@ -25,7 +25,12 @@ import {
 import { TauriFileService } from "../../services/files";
 import { AuditLogService } from "../../services/logging";
 import { OrganizationOperationsSyncService, OrganizationTicketCatalogService } from "../../services/sync";
-import { parseTicketPdfArchiveMetadata, regenerateArchivedTicketPdf } from "../../services/pdf";
+import {
+  createTicketPrintArchivePayload,
+  generateTicketPdf,
+  regenerateArchivedTicketPdf,
+  ticketPdfInputFromPrintArchive
+} from "../../services/pdf";
 import {
   ActionMenu,
   Badge,
@@ -279,8 +284,89 @@ export function FilesPage() {
     }
   };
 
+  const regenerateFileContent = async (file: ArchivedGeneratedFile) => {
+    if (!file.batchId || !session) {
+      throw new Error("Le fichier ou son lot d'origine est introuvable.");
+    }
+    const [record, batch] = await Promise.all([
+      generatedFileRepository.findById(file.id),
+      batchRepository.findById(file.batchId)
+    ]);
+    if (!record || record.account_id !== session.account_id || !batch) {
+      throw new Error("Les données d'origine du fichier sont introuvables.");
+    }
+
+    let bytes: Uint8Array | null = null;
+    let format: "a4" | "a5" | "thermal58" | "thermal80" = "a4";
+    let ticketCount = 0;
+    let cloudFailure: unknown = null;
+
+    if (organizationOperations) {
+      try {
+        const archive = await organizationOperations.getTicketPrintArchive(file.routerId, record.id);
+        const pdfInput = ticketPdfInputFromPrintArchive(archive, {
+          accountId: session.account_id,
+          batchId: batch.id,
+          createdByProfile: record.created_by_profile,
+          createdByProfileId: record.created_by_profile_id,
+          fileName: record.file_name,
+          routerId: record.router_id
+        });
+        bytes = generateTicketPdf(pdfInput);
+        format = pdfInput.format;
+        ticketCount = pdfInput.tickets.length;
+      } catch (error) {
+        cloudFailure = error;
+      }
+    }
+
+    if (!bytes) {
+      try {
+        const [account, router, plan, tickets] = await Promise.all([
+          accountRepository.findById(session.account_id),
+          routerRepository.findById(batch.router_id),
+          planRepository.findById(batch.plan_id),
+          ticketRepository.listByBatch(batch.id)
+        ]);
+        if (!account || !router || !plan) {
+          throw new Error("Le compte, le routeur ou le plan d'origine est introuvable.");
+        }
+        const regenerated = await regenerateArchivedTicketPdf({
+          account,
+          batch,
+          file: record,
+          plan,
+          router,
+          tickets
+        });
+        bytes = regenerated.bytes;
+        format = regenerated.format;
+        ticketCount = regenerated.ticketCount;
+        await organizationOperations?.publishTicketPrintArchive(
+          file.routerId,
+          record.id,
+          createTicketPrintArchivePayload(regenerated.input)
+        ).catch(() => undefined);
+      } catch (localError) {
+        const localDetail = localError instanceof Error ? localError.message : "données locales illisibles";
+        const cloudDetail = cloudFailure instanceof Error ? cloudFailure.message : "archive distante absente";
+        throw new Error(
+          `Impossible de reconstruire ce lot (${cloudDetail}; ${localDetail}). `
+          + "Pour un ancien lot à mots de passe distincts, utilisez le PC d'origine ou le PDF déjà exporté."
+        );
+      }
+    }
+
+    await fileService.writeBytes(record.file_path, bytes);
+    await generatedFileRepository.markRegenerated(record.id, session.account_id);
+    setFiles((current) =>
+      current.map((item) => (item.id === file.id ? { ...item, status: "available" } : item))
+    );
+    return { filePath: record.file_path, format, ticketCount };
+  };
+
   const reprintFile = async (file: ArchivedGeneratedFile) => {
-    if (file.status === "missing" || !file.batchId || !session) {
+    if (!file.batchId || !session) {
       setMessage("Fichier ou lot introuvable : réimpression impossible.");
       writeLog(file, "file.print.failed", "Réimpression refusée : fichier ou lot introuvable.", "warning");
       return;
@@ -294,26 +380,26 @@ export function FilesPage() {
         throw new Error("Aucune imprimante Windows n'est installée.");
       }
 
-      await fileService.printFile(file.localPath, printer.name);
-      const pdfFormat = parseTicketPdfArchiveMetadata(file.metadataJson)?.format ?? "a4";
+      const regenerated = await regenerateFileContent(file);
+      await fileService.printFile(regenerated.filePath, printer.name);
       try {
         await printHistoryRepository.create({
           account_id: session.account_id,
           batch_id: file.batchId,
           created_by_profile: session.internal_profile_role,
           created_by_profile_id: session.internal_profile_id,
-          format: pdfFormat,
+          format: regenerated.format,
           id: `print-${crypto.randomUUID()}`,
           mode: "batch",
           printer_id: printer.id,
           printer_name: printer.name,
           router_id: file.routerId,
           status: "printed",
-          ticket_count: file.ticketQuantity ?? 0,
-          user_message: `${file.ticketQuantity ?? 0} ticket(s) envoyés à ${printer.name}.`
+          ticket_count: regenerated.ticketCount,
+          user_message: `${regenerated.ticketCount} ticket(s) envoyés à ${printer.name}.`
         });
-        setMessage(`${file.fileName} envoyé à ${printer.name}.`);
-        writeLog(file, "file.printed", `Fichier envoyé à ${printer.name}.`);
+        setMessage(`${file.fileName} régénéré avec la mise en page actuelle puis envoyé à ${printer.name}.`);
+        writeLog(file, "file.printed", `PDF actuel envoyé à ${printer.name}.`);
       } catch {
         setMessage(`${file.fileName} a été envoyé à ${printer.name}, mais l'historique n'a pas pu être enregistré.`);
         writeLog(
@@ -341,37 +427,7 @@ export function FilesPage() {
 
     setBusyFileId(file.id);
     try {
-      const [record, account, batch] = await Promise.all([
-        generatedFileRepository.findById(file.id),
-        accountRepository.findById(session.account_id),
-        batchRepository.findById(file.batchId)
-      ]);
-      if (!record || record.account_id !== session.account_id || !account || !batch) {
-        throw new Error("Les données d'origine du fichier sont introuvables.");
-      }
-
-      const [router, plan, tickets] = await Promise.all([
-        routerRepository.findById(batch.router_id),
-        planRepository.findById(batch.plan_id),
-        ticketRepository.listByBatch(batch.id)
-      ]);
-      if (!router || !plan) {
-        throw new Error("Le routeur ou le plan d'origine est introuvable.");
-      }
-
-      const regenerated = await regenerateArchivedTicketPdf({
-        account,
-        batch,
-        file: record,
-        plan,
-        router,
-        tickets
-      });
-      await fileService.writeBytes(record.file_path, regenerated.bytes);
-      await generatedFileRepository.markRegenerated(record.id, session.account_id);
-      setFiles((current) =>
-        current.map((item) => (item.id === file.id ? { ...item, status: "available" } : item))
-      );
+      const regenerated = await regenerateFileContent(file);
       setMessage(`${file.fileName} régénéré avec ${regenerated.ticketCount} ticket(s).`);
       writeLog(file, "file.regenerated", `PDF régénéré avec ${regenerated.ticketCount} ticket(s).`);
     } catch (error) {

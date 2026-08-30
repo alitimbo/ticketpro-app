@@ -1,11 +1,13 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { generateTicketPdf, type TicketPdfFormat, type TicketPdfInput } from "../src/services/pdf";
+import { defaultTicketDisplaySettings } from "../src/services/tickets/TicketDisplaySettingsService";
 
 const outputDirectory = resolve(process.cwd(), "tmp/pdfs");
 mkdirSync(outputDirectory, { recursive: true });
 
-for (const format of ["thermal58", "thermal80"] satisfies TicketPdfFormat[]) {
+for (const format of ["a4", "thermal58", "thermal80"] satisfies TicketPdfFormat[]) {
+  const ticketCount = format === "a4" ? 40 : 1;
   const input: TicketPdfInput = {
     accountId: "qa-account",
     batchId: `qa-${format}`,
@@ -13,6 +15,7 @@ for (const format of ["thermal58", "thermal80"] satisfies TicketPdfFormat[]) {
     createdByProfileId: "qa-account:admin",
     dataLimitLabel: "Illimite",
     displaySettings: {
+      ...defaultTicketDisplaySettings,
       showContact: true,
       showCreatedAt: false,
       showDataLimit: true,
@@ -41,7 +44,13 @@ for (const format of ["thermal58", "thermal80"] satisfies TicketPdfFormat[]) {
       password: "847295",
       passwordSecretRef: "dpapi:fixture",
       username: "638472"
-    }],
+    }, ...Array.from({ length: ticketCount - 1 }, (_, index) => ({
+      password: String(847296 + index),
+      passwordSecretRef: `dpapi:fixture-${index}`,
+      username: String(638473 + index)
+    }))],
+    titleLabel: "WiFi Zone Grand Marche Niamey",
+    validityLabel: "3 j",
     zoneName: "WiFi Zone Grand Marche Niamey"
   };
 

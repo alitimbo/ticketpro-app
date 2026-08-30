@@ -5,6 +5,7 @@ import {
   buildTicketRecord,
   createInitialTicketGenerationState,
   defaultTicketGenerationOptions,
+  findConfirmedVoucherBatchUsers,
   getTicketSummary,
   validateTicketGeneration
 } from "./ticketGenerationModel";
@@ -180,5 +181,45 @@ describe("ticketGenerationModel", () => {
     expect(validateTicketGeneration(state, routers, plans, servers)).toContain("Choisissez un serveur");
     expect(validateTicketGeneration({ ...state, selectedServerName: "all" }, routers, plans, servers)).toBeNull();
     expect(validateTicketGeneration({ ...state, selectedServerName: "hotspot2" }, routers, plans, servers)).toBeNull();
+  });
+  it("confirme exactement les vouchers du lot et ignore les utilisateurs RouterOS externes", () => {
+    const batchId = "batch-100";
+    const pendingTickets = Array.from({ length: 100 }, (_, index) => ({
+      username: `TP${String(index + 1).padStart(3, "0")}`
+    }));
+    const managedUsers = pendingTickets.map((ticket, index) => ({
+      bytesIn: 0,
+      bytesOut: 0,
+      comment: `TicketPro:v1;batch=${batchId};`,
+      createdAt: "2026-08-30T00:00:00.000Z",
+      disabled: false,
+      id: `*${index + 1}`,
+      limitBytesTotal: null,
+      limitUptime: "1h",
+      macAddress: null,
+      passwordSecretRef: `secret://test/${ticket.username}/password`,
+      planId: "plan-1h",
+      profileName: "plan-1h",
+      serverName: "all",
+      status: "available" as const,
+      uptime: "0s",
+      username: ticket.username
+    }));
+    const routerUsers = [
+      ...managedUsers,
+      { ...managedUsers[0], comment: "TicketPro:v1;batch=ancien-lot;", id: "*101", username: "ANCIEN01" },
+      { ...managedUsers[0], comment: "Utilisateur externe", id: "*102", username: "EXTERNE01" }
+    ];
+
+    const confirmed = findConfirmedVoucherBatchUsers({
+      batchId,
+      pendingTickets,
+      profileName: "plan-1h",
+      routerUsers
+    });
+
+    expect(routerUsers).toHaveLength(102);
+    expect(confirmed).toHaveLength(100);
+    expect(confirmed.map((user) => user.username)).toEqual(pendingTickets.map((ticket) => ticket.username));
   });
 });

@@ -206,6 +206,29 @@ describe("RouterTicketSyncService", () => {
     expect(report.logs[0]).toMatchObject({ level: "warning" });
   });
 
+  it("supprime un lot complet et conserve en erreur les vouchers non confirmés", async () => {
+    const removedUsers: string[] = [];
+    const service = new RouterTicketSyncService({
+      createHotspotUser: async () => routerUsers[0],
+      listActiveUsers: async () => [],
+      listHotspotUsers: async () => routerUsers,
+      removeHotspotUser: async (username) => {
+        removedUsers.push(username);
+        if (username === "654321") throw new Error("routeur inaccessible");
+      }
+    });
+
+    const report = await service.removeBatch(localTickets, "batch-1");
+
+    expect(removedUsers).toEqual(["123456", "654321"]);
+    expect(report.updates).toEqual([
+      expect.objectContaining({ id: "ticket-1", status: "supprimé", syncStatus: "router_synced" }),
+      expect.objectContaining({ id: "ticket-2", status: "disponible", syncStatus: "error" })
+    ]);
+    expect(report.summary.error).toBe(1);
+    expect(report.logs[0]).toMatchObject({ level: "error" });
+  });
+
   it("récupère un ticket créé malgré une erreur réseau de confirmation", async () => {
     let listCalls = 0;
     const service = new RouterTicketSyncService({

@@ -1,6 +1,10 @@
 import type { UserRole } from "../../domain/auth";
 import type { AppLogRecord, GeneratedFileRecord, SyncStatus } from "../../domain/database";
 import {
+  normalizeTicketPrintArchivePayload,
+  type TicketPrintArchivePayload
+} from "../pdf";
+import {
   AppLogRepository,
   GeneratedFileRepository,
   RouterRepository,
@@ -10,8 +14,10 @@ import {
   cleanSaasRouterActivityLogs,
   getSaasRouterActivityLogs,
   getSaasRouterFiles,
+  getSaasTicketPrintArchive,
   saveSaasRouterActivityLogs,
-  saveSaasRouterFiles
+  saveSaasRouterFiles,
+  saveSaasTicketPrintArchive
 } from "../saas";
 
 export class OrganizationOperationsSyncService {
@@ -84,6 +90,36 @@ export class OrganizationOperationsSyncService {
       });
     }
     return remoteFiles.length;
+  }
+
+  async publishTicketPrintArchive(
+    routerId: string,
+    fileId: string,
+    archive: TicketPrintArchivePayload
+  ): Promise<void> {
+    const router = await this.requireRouter(routerId);
+    const file = await this.files.findById(fileId);
+    if (!file || file.account_id !== this.accountId || file.router_id !== routerId) {
+      throw new Error("Le fichier local de l'archive d'impression est introuvable.");
+    }
+    await saveSaasTicketPrintArchive({
+      archive: normalizeTicketPrintArchivePayload(archive),
+      file_id: cloudFileId(routerId, file.id),
+      router_id: router.cloud_router_id ?? router.id
+    });
+  }
+
+  async getTicketPrintArchive(
+    routerId: string,
+    fileId: string
+  ): Promise<TicketPrintArchivePayload> {
+    const router = await this.requireRouter(routerId);
+    return normalizeTicketPrintArchivePayload(
+      await getSaasTicketPrintArchive(
+        router.cloud_router_id ?? router.id,
+        cloudFileId(routerId, fileId)
+      )
+    );
   }
 
   async publishLog(record: AppLogRecord): Promise<void> {
@@ -189,6 +225,13 @@ function normalizeSyncStatus(value: string): SyncStatus {
 
 function sharedLocalId(kind: "file" | "log", routerId: string, cloudId: string): string {
   return `${kind}-shared-${routerId}-${cloudId}`.slice(0, 500);
+}
+
+function cloudFileId(routerId: string, localFileId: string): string {
+  const sharedPrefix = `file-shared-${routerId}-`;
+  return localFileId.startsWith(sharedPrefix)
+    ? localFileId.slice(sharedPrefix.length)
+    : localFileId;
 }
 
 function cloudProfileId(accountId: string, userId: string, name: string, email: string): string {

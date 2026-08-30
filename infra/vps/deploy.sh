@@ -12,6 +12,13 @@ if [ -f "$LICENSE_ENV" ] && ! grep -q '^ROUTER_VAULT_KEY=' "$LICENSE_ENV"; then
   echo "ROUTER_VAULT_KEY générée. Sauvegardez immédiatement le fichier license-api/.env hors du VPS."
 fi
 
+if [ -f "$LICENSE_ENV" ] && ! grep -q '^TICKET_ARCHIVE_KEY=' "$LICENSE_ENV"; then
+  umask 077
+  TICKET_ARCHIVE_KEY=$(openssl rand -base64 32 | tr -d '\n')
+  printf 'TICKET_ARCHIVE_KEY=%s\n' "$TICKET_ARCHIVE_KEY" >> "$LICENSE_ENV"
+  echo "TICKET_ARCHIVE_KEY générée. Sauvegardez immédiatement le fichier license-api/.env hors du VPS."
+fi
+
 "$SCRIPT_DIR/preflight.sh"
 
 docker compose -f "$INFRA_DIR/wireguard-hub/docker-compose.yml" \

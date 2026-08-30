@@ -26,6 +26,7 @@ export type TicketPdfInput = {
   hotspotAddress: string;
   ownerPhone: string;
   planName: string;
+  previewMode?: "single-ticket";
   priceLabel?: string | null;
   qrCodeEnabled: boolean;
   routerId: string;
@@ -156,12 +157,15 @@ export function parseTicketPdfArchiveMetadata(value: string | null | undefined):
 
 export function generateTicketPdf(input: TicketPdfInput): Uint8Array {
   const writer = new PdfWriter();
-  const grid = grids[input.format];
+  const isSingleTicketPreview = input.previewMode === "single-ticket";
+  const grid = isSingleTicketPreview ? singleTicketPreviewGrid : grids[input.format];
   const perPage = grid.columns * grid.rows;
-  const chunks = chunk(input.tickets, perPage);
+  const chunks = chunk(isSingleTicketPreview ? input.tickets.slice(0, 1) : input.tickets, perPage);
 
   chunks.forEach((tickets, pageIndex) => {
-    const pageSize = isThermalFormat(input.format)
+    const pageSize = isSingleTicketPreview
+      ? getSingleTicketPreviewPageSize(input.format)
+      : isThermalFormat(input.format)
       ? getThermalPageSize(input, tickets[0])
       : pageSizes[input.format];
     const page = new PdfPage(pageSize);
@@ -178,6 +182,29 @@ export function resolveTicketPdfPassword(ticket: TicketPdfTicket): string {
   }
   const expectedRef = `/${ticket.username}/password`;
   return ticket.passwordSecretRef.endsWith(expectedRef) ? ticket.username : "******";
+}
+
+const singleTicketPreviewGrid: TicketGrid = { columns: 1, margin: 1, rows: 1 };
+
+function getSingleTicketPreviewPageSize(format: TicketPdfFormat): PageSize {
+  const pageSize = pageSizes[format];
+  const sourceGrid = grids[format];
+  const ticketGap = isThermalFormat(format) ? 0 : 5;
+  const cellWidth = (
+    pageSize.width
+    - sourceGrid.margin * 2
+    - ticketGap * (sourceGrid.columns - 1)
+  ) / sourceGrid.columns;
+  const cellHeight = (
+    pageSize.height
+    - sourceGrid.margin * 2
+    - ticketGap * (sourceGrid.rows - 1)
+  ) / sourceGrid.rows;
+
+  return {
+    height: cellHeight + singleTicketPreviewGrid.margin * 2,
+    width: cellWidth + singleTicketPreviewGrid.margin * 2
+  };
 }
 
 export function ticketQrValue(ticket: TicketPdfTicket): string {
@@ -327,7 +354,6 @@ function drawEconomyGridTicket(
       compact,
       input,
       password,
-      showPrice,
       singleCode,
       ticket,
       x,
@@ -336,6 +362,7 @@ function drawEconomyGridTicket(
   }
 
   const footerLines: Array<{ bold?: boolean; text: string }> = [
+    ...(!showQr && showPrice && input.priceLabel ? [{ bold: true, text: `Tarif : ${input.priceLabel}` }] : []),
     ...(showData && input.dataLimitLabel ? [{ text: `Volume : ${input.dataLimitLabel}` }] : []),
     ...(showCreatedAt ? [{ text: `Cree le ${input.generatedAt.slice(0, 16).replace("T", " ")}` }] : []),
     ...(showPortal ? [{ text: `Portail : ${input.hotspotAddress}` }] : []),
@@ -343,7 +370,7 @@ function drawEconomyGridTicket(
     ...(showNote && settings?.noteText ? [{ text: settings.noteText }] : [])
   ];
   const footerBottom = y + (showPoweredBy ? (compact ? 8 : 10) : compact ? 3 : 4);
-  const footerTop = y + (showQr ? cellHeight * 0.29 : cellHeight * 0.3);
+  const footerTop = y + (showQr ? cellHeight * 0.29 : cellHeight * 0.24);
   const footerGap = Math.max(
     compact ? 3.4 : 4.2,
     Math.min(compact ? 5.3 : 6.5, (footerTop - footerBottom) / Math.max(1, footerLines.length))
@@ -375,7 +402,6 @@ function drawEconomyCodeBody(
     compact,
     input,
     password,
-    showPrice,
     singleCode,
     ticket,
     x,
@@ -386,7 +412,6 @@ function drawEconomyCodeBody(
     compact: boolean;
     input: TicketPdfInput;
     password: string;
-    showPrice: boolean;
     singleCode: boolean;
     ticket: TicketPdfTicket;
     x: number;
@@ -442,7 +467,6 @@ function drawEconomyCodeBody(
   const metricTop = bandBottom - (compact ? 5 : 7);
   const metrics = [
     { label: "DUREE", value: input.durationLabel },
-    ...(showPrice && input.priceLabel ? [{ label: "TARIF", value: input.priceLabel }] : []),
     { label: "VALIDITE", value: input.validityLabel }
   ];
   const metricWidth = (cellWidth - padding * 2) / metrics.length;

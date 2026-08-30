@@ -297,6 +297,42 @@ export class RouterTicketSyncService {
     }
   }
 
+  async removeBatch(
+    localTickets: SyncableLocalTicket[],
+    batchId: string
+  ): Promise<TicketSyncReport> {
+    const batchTickets = localTickets.filter((ticket) => ticket.batchId === batchId);
+    if (batchTickets.length === 0) {
+      return {
+        localMissing: [],
+        logs: [{ level: "error", message: "Aucun voucher local ne correspond à ce lot." }],
+        summary: buildSummary([], []),
+        updates: []
+      };
+    }
+
+    const updates: SyncedTicketUpdate[] = [];
+    const logs: TicketSyncLog[] = [];
+    for (const ticket of batchTickets) {
+      const report = await this.removeTicket(ticket);
+      updates.push(...report.updates);
+      logs.push(...report.logs);
+    }
+    const errorCount = updates.filter((update) => update.syncStatus === "error").length;
+    logs.unshift({
+      level: errorCount > 0 ? "error" : "info",
+      message: errorCount > 0
+        ? `Suppression partielle : ${updates.length - errorCount}/${updates.length} voucher(s) confirmés absents de RouterOS.`
+        : `${updates.length} voucher(s) du lot confirmés absents de RouterOS.`
+    });
+    return {
+      localMissing: [],
+      logs,
+      summary: buildSummary(updates, []),
+      updates
+    };
+  }
+
   private async resyncMany(localTickets: SyncableLocalTicket[]): Promise<TicketSyncReport> {
     const initialReport = await this.compareTickets(localTickets);
     const missingTickets = localTickets.filter((ticket) =>

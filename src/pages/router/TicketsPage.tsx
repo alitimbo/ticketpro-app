@@ -123,6 +123,7 @@ export function TicketsPage() {
   const [selectedTicket, setSelectedTicket] = useState<TicketListItem | null>(null);
   const [selectedTicketHistory, setSelectedTicketHistory] = useState<TicketStateHistoryRecord[]>([]);
   const [ticketToDelete, setTicketToDelete] = useState<TicketListItem | null>(null);
+  const [batchToDeleteId, setBatchToDeleteId] = useState<string | null>(null);
   const [busyTicketId, setBusyTicketId] = useState<string | null>(null);
   const [isBulkBusy, setIsBulkBusy] = useState(false);
   const [printers, setPrinters] = useState<LocalPrinter[]>([]);
@@ -858,6 +859,51 @@ export function TicketsPage() {
     clearFeedback();
   };
 
+  const executeDeleteBatch = async () => {
+    if (!batchToDeleteId || !session?.permissions.includes("router.tickets.delete")) return;
+    const batchTickets = scopedTickets.filter((ticket) => ticket.batchId === batchToDeleteId);
+    if (batchTickets.length === 0) {
+      setBatchToDeleteId(null);
+      setError("Ce lot ne contient aucun voucher local.");
+      return;
+    }
+    setIsBulkBusy(true);
+    clearFeedback();
+    try {
+      const actionSyncService = new RouterTicketSyncService(await getRouterServiceForAction());
+      const report = await actionSyncService.removeBatch(scopedTickets, batchToDeleteId);
+      await applySyncReport(report);
+      const hasErrors = report.summary.error > 0;
+      await batchRepository.updateState(
+        batchToDeleteId,
+        session.account_id,
+        hasErrors ? "suppression_partielle" : "supprimé",
+        hasErrors ? "pending" : "synced"
+      );
+      await organizationTicketCatalog?.publishRouter(routerId).catch(() => undefined);
+      setBatchToDeleteId(null);
+      if (hasErrors) {
+        setError(
+          `Suppression partielle : ${batchTickets.length - report.summary.error}/${batchTickets.length} voucher(s) confirmés supprimés. `
+          + "Les échecs restent visibles et doivent être relancés."
+        );
+      } else {
+        setMessage(
+          `${batchTickets.length} voucher(s) supprimés de RouterOS. Le lot, son PDF et son historique restent archivés dans TicketPro.`
+        );
+      }
+      writeLog({
+        message: hasErrors ? "Suppression partielle du lot." : "Suppression complète et confirmée du lot.",
+        ticketCode: batchToDeleteId,
+        type: "delete"
+      });
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : "La suppression du lot a échoué.");
+    } finally {
+      setIsBulkBusy(false);
+    }
+  };
+
   useEffect(() => {
     if (!effectiveRouterService || !isPersistent) return undefined;
     let disposed = false;
@@ -946,6 +992,7 @@ export function TicketsPage() {
                 busy={isBulkBusy || busyTicketId !== null}
                 key={ticket.id}
                 onDelete={() => setTicketToDelete(ticket)}
+                onDeleteBatch={() => setBatchToDeleteId(ticket.batchId)}
                 onDisable={() => void disableTicket(ticket)}
                 onEnable={() => void enableTicket(ticket)}
                 onExport={() => void exportTicket(ticket)}
@@ -956,6 +1003,7 @@ export function TicketsPage() {
                 onSync={() => void syncTicket(ticket)}
                 onSyncBatch={() => void syncBatch(ticket.batchId)}
                 role={session?.internal_profile_role ?? "guest"}
+                canDeleteBatch={Boolean(session?.permissions.includes("router.tickets.delete"))}
                 displaySettings={displaySettings}
                 ticket={ticket}
               />
@@ -992,6 +1040,15 @@ export function TicketsPage() {
         onConfirm={() => void executeDeleteTicket()}
         ticket={ticketToDelete}
       />
+      <DeleteBatchDialog
+        batchId={batchToDeleteId}
+        busy={isBulkBusy}
+        count={batchToDeleteId
+          ? scopedTickets.filter((ticket) => ticket.batchId === batchToDeleteId).length
+          : 0}
+        onCancel={() => setBatchToDeleteId(null)}
+        onConfirm={() => void executeDeleteBatch()}
+      />
       <TicketDisplaySettingsDialog
         onClose={() => setSettingsOpen(false)}
         onSave={(next) => {
@@ -1012,8 +1069,10 @@ export function TicketsPage() {
 
 function TicketRow({
   busy,
+  canDeleteBatch,
   displaySettings,
   onDelete,
+  onDeleteBatch,
   onDisable,
   onEnable,
   onExport,
@@ -1027,8 +1086,10 @@ function TicketRow({
   ticket
 }: {
   busy: boolean;
+  canDeleteBatch: boolean;
   displaySettings: TicketDisplaySettings;
   onDelete: () => void;
+  onDeleteBatch: () => void;
   onDisable: () => void;
   onEnable: () => void;
   onExport: () => void;
@@ -1056,6 +1117,7 @@ function TicketRow({
     if (ticket.syncStatus === "conflict") menuItems.push({ icon: CheckCircle2, label: "Conserver le plan local", onSelect: onResolveConflict });
   }
   if (permissions.canDelete) menuItems.push({ icon: Trash2, label: "Supprimer", onSelect: onDelete });
+  if (canDeleteBatch) menuItems.push({ icon: Layers, label: "Supprimer tout le lot", onSelect: onDeleteBatch });
 
   return (
     <article
@@ -1295,6 +1357,45 @@ function DeleteTicketDialog({
       <section aria-modal="true" className="connection-dialog" role="dialog">
         <header className="connection-dialog__header"><div className="router-card__icon"><Trash2 aria-hidden="true" /></div><div><h2>Supprimer {ticket.code} ?</h2><p>Le voucher sera supprimé sur RouterOS avant d'être masqué dans TicketPro.</p></div></header>
         <div className="confirm-dialog__actions"><Button disabled={busy} onClick={onCancel} variant="ghost">Annuler</Button><Button disabled={busy} icon={Trash2} onClick={onConfirm} variant="danger">{busy ? "Suppression…" : "Supprimer"}</Button></div>
+      </section>
+    </div>
+  );
+}
+
+function DeleteBatchDialog({
+  batchId,
+  busy,
+  count,
+  onCancel,
+  onConfirm
+}: {
+  batchId: string | null;
+  busy: boolean;
+  count: number;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  if (!batchId) return null;
+  return (
+    <div className="dialog-backdrop" role="presentation">
+      <section aria-modal="true" className="connection-dialog" role="dialog">
+        <header className="connection-dialog__header">
+          <div className="router-card__icon"><Layers aria-hidden="true" /></div>
+          <div>
+            <h2>Supprimer tout le lot ?</h2>
+            <p>
+              {count} voucher(s) seront révoqués sur RouterOS, avec nettoyage des sessions,
+              cookies et autorisations TicketPro associées. L'historique et le PDF seront conservés.
+            </p>
+          </div>
+        </header>
+        <p className="muted-inline">Lot : {batchId}</p>
+        <div className="confirm-dialog__actions">
+          <Button disabled={busy} onClick={onCancel} variant="ghost">Annuler</Button>
+          <Button disabled={busy} icon={Trash2} onClick={onConfirm} variant="danger">
+            {busy ? "Suppression du lot…" : `Supprimer les ${count} vouchers`}
+          </Button>
+        </div>
       </section>
     </div>
   );

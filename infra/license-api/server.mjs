@@ -14,6 +14,7 @@ const APP_UPDATE_MANIFEST_PATH = process.env.APP_UPDATE_MANIFEST_PATH
 const MASTER_TOKEN = process.env.LICENSE_MASTER_TOKEN ?? "";
 const HASH_SECRET = process.env.LICENSE_HASH_SECRET ?? "";
 const ROUTER_VAULT_KEY = process.env.ROUTER_VAULT_KEY ?? "";
+const TICKET_ARCHIVE_KEY = process.env.TICKET_ARCHIVE_KEY ?? "";
 const IPAY_BASE_URL = String(process.env.IPAY_BASE_URL ?? "https://api.i-pay.money").replace(/\/$/, "");
 const IPAY_ENV = process.env.IPAY_ENV ?? "";
 const IPAY_PUBLIC_KEY = process.env.IPAY_PUBLIC_KEY ?? "";
@@ -45,7 +46,10 @@ const parsedInvitationTtlHours = Number(process.env.SAAS_INVITATION_TTL_HOURS ??
 const SAAS_INVITATION_TTL_HOURS = Number.isFinite(parsedInvitationTtlHours)
   ? Math.min(168, Math.max(1, Math.trunc(parsedInvitationTtlHours)))
   : 24;
-const MAX_BODY_BYTES = 64 * 1024;
+const parsedMaxBodyBytes = Number(process.env.LICENSE_MAX_BODY_BYTES ?? 256 * 1024);
+const MAX_BODY_BYTES = Number.isFinite(parsedMaxBodyBytes)
+  ? Math.min(1024 * 1024, Math.max(64 * 1024, Math.trunc(parsedMaxBodyBytes)))
+  : 256 * 1024;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = Math.max(1, Number(process.env.LICENSE_RATE_LIMIT_MAX ?? 60));
 const SAAS_TRIAL_DAYS = 7;
@@ -93,6 +97,7 @@ if (HASH_SECRET.length < 32) {
   throw new Error("LICENSE_HASH_SECRET doit contenir au moins 32 caractères.");
 }
 const routerVaultKey = decodeRouterVaultKey(ROUTER_VAULT_KEY);
+const ticketArchiveKey = decodeOptionalTicketArchiveKey(TICKET_ARCHIVE_KEY);
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const db = new DatabaseSync(DB_PATH);
@@ -509,7 +514,12 @@ db.exec(`
     created_by_role TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    deleted_at TEXT
+    deleted_at TEXT,
+    print_archive_ciphertext TEXT,
+    print_archive_iv TEXT,
+    print_archive_tag TEXT,
+    print_archive_version INTEGER,
+    print_archive_updated_at TEXT
   );
 
   CREATE TABLE IF NOT EXISTS organization_activity_logs (
@@ -678,6 +688,11 @@ ensureColumn("organization_tickets", "data_limit_mb_snapshot", "INTEGER");
 ensureColumn("organization_tickets", "download_limit_snapshot", "TEXT");
 ensureColumn("organization_tickets", "upload_limit_snapshot", "TEXT");
 ensureColumn("organization_tickets", "shared_users_snapshot", "INTEGER");
+ensureColumn("organization_generated_files", "print_archive_ciphertext", "TEXT");
+ensureColumn("organization_generated_files", "print_archive_iv", "TEXT");
+ensureColumn("organization_generated_files", "print_archive_tag", "TEXT");
+ensureColumn("organization_generated_files", "print_archive_version", "INTEGER");
+ensureColumn("organization_generated_files", "print_archive_updated_at", "TEXT");
 migrateOrganizationVpnPeersForSharedDevices();
 
 db.exec(`
@@ -1621,6 +1636,12 @@ const statements = {
     WHERE organization_generated_files.organization_id = excluded.organization_id
       AND organization_generated_files.router_id = excluded.router_id
       AND excluded.updated_at >= organization_generated_files.updated_at
+  `),
+  updateOrganizationGeneratedFilePrintArchive: db.prepare(`
+    UPDATE organization_generated_files
+    SET print_archive_ciphertext = ?, print_archive_iv = ?, print_archive_tag = ?,
+      print_archive_version = ?, print_archive_updated_at = ?
+    WHERE organization_id = ? AND router_id = ? AND id = ?
   `),
   findOrganizationActivityLogById: db.prepare(`
     SELECT * FROM organization_activity_logs
@@ -3035,6 +3056,85 @@ function decodeRouterVaultKey(value) {
   return decoded;
 }
 
+function decodeOptionalTicketArchiveKey(value) {
+  if (!String(value).trim()) return null;
+  let decoded;
+  try {
+    decoded = Buffer.from(String(value), "base64");
+  } catch {
+    decoded = Buffer.alloc(0);
+  }
+  if (decoded.length !== 32) {
+    throw new Error("TICKET_ARCHIVE_KEY doit être une clé aléatoire de 32 octets encodée en base64.");
+  }
+  return decoded;
+}
+
+function requireTicketArchiveKey() {
+  if (!ticketArchiveKey) {
+    throw new HttpError(503, "L'archive sécurisée des vouchers n'est pas encore configurée.", {
+      code: "TICKET_ARCHIVE_UNAVAILABLE"
+    });
+  }
+  return ticketArchiveKey;
+}
+
+function encryptTicketPrintArchive(organizationId, routerId, fileId, archive) {
+  const key = requireTicketArchiveKey();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  cipher.setAAD(Buffer.from(
+    `ticketpro-print-archive-v1:${organizationId}:${routerId}:${fileId}`,
+    "utf8"
+  ));
+  const ciphertext = Buffer.concat([
+    cipher.update(JSON.stringify(archive), "utf8"),
+    cipher.final()
+  ]);
+  return {
+    ciphertext: ciphertext.toString("base64"),
+    iv: iv.toString("base64"),
+    tag: cipher.getAuthTag().toString("base64"),
+    version: 1
+  };
+}
+
+function decryptTicketPrintArchive(record) {
+  const key = requireTicketArchiveKey();
+  if (
+    Number(record.print_archive_version) !== 1
+    || !record.print_archive_ciphertext
+    || !record.print_archive_iv
+    || !record.print_archive_tag
+  ) {
+    throw new HttpError(404, "Aucune archive d'impression sécurisée n'est disponible pour ce lot.", {
+      code: "TICKET_ARCHIVE_NOT_FOUND"
+    });
+  }
+  try {
+    const decipher = crypto.createDecipheriv(
+      "aes-256-gcm",
+      key,
+      Buffer.from(record.print_archive_iv, "base64")
+    );
+    decipher.setAAD(Buffer.from(
+      `ticketpro-print-archive-v1:${record.organization_id}:${record.router_id}:${record.id}`,
+      "utf8"
+    ));
+    decipher.setAuthTag(Buffer.from(record.print_archive_tag, "base64"));
+    const plaintext = Buffer.concat([
+      decipher.update(Buffer.from(record.print_archive_ciphertext, "base64")),
+      decipher.final()
+    ]).toString("utf8");
+    return normalizeTicketPrintArchive(JSON.parse(plaintext));
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    throw new HttpError(500, "L'archive d'impression sécurisée est illisible.", {
+      code: "TICKET_ARCHIVE_CORRUPTED"
+    });
+  }
+}
+
 function encryptRouterCredential(organizationId, routerId, credential) {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv("aes-256-gcm", routerVaultKey, iv);
@@ -3493,6 +3593,78 @@ function normalizeOrganizationGeneratedFile(file) {
   };
 }
 
+function normalizeTicketPrintArchive(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || Number(value.version) !== 1) {
+    throw new HttpError(400, "Archive d'impression invalide.");
+  }
+  if (!Array.isArray(value.tickets) || value.tickets.length < 1 || value.tickets.length > 500) {
+    throw new HttpError(400, "L'archive doit contenir entre 1 et 500 vouchers.");
+  }
+  const seenUsernames = new Set();
+  const tickets = value.tickets.map((rawTicket) => {
+    if (!rawTicket || typeof rawTicket !== "object" || Array.isArray(rawTicket)) {
+      throw new HttpError(400, "Voucher archivé invalide.");
+    }
+    const username = requireArchiveString(rawTicket.username, "username", 128);
+    const password = requireArchiveString(rawTicket.password, "password", 256, false);
+    if (seenUsernames.has(username)) {
+      throw new HttpError(400, "L'archive contient plusieurs fois le même voucher.");
+    }
+    seenUsernames.add(username);
+    return { password, username };
+  });
+  const format = requireArchiveString(value.format, "format", 20);
+  if (!new Set(["a4", "a5", "thermal58", "thermal80"]).has(format)) {
+    throw new HttpError(400, "Format d'archive invalide.");
+  }
+  const template = requireArchiveString(value.template, "template", 20);
+  if (!new Set(["economy", "premium", "qr", "simple"]).has(template)) {
+    throw new HttpError(400, "Modèle d'archive invalide.");
+  }
+  const displaySettings = value.displaySettings && typeof value.displaySettings === "object"
+    && !Array.isArray(value.displaySettings)
+    ? JSON.parse(JSON.stringify(value.displaySettings))
+    : undefined;
+  if (displaySettings && Buffer.byteLength(JSON.stringify(displaySettings), "utf8") > 8_000) {
+    throw new HttpError(400, "Paramètres d'affichage de l'archive trop volumineux.");
+  }
+  return {
+    batchId: requireArchiveString(value.batchId, "batchId", 240),
+    currency: optionalArchiveString(value.currency, 12),
+    dataLimitLabel: optionalArchiveString(value.dataLimitLabel, 80),
+    displaySettings,
+    durationLabel: requireArchiveString(value.durationLabel, "durationLabel", 80),
+    format,
+    hotspotAddress: requireArchiveString(value.hotspotAddress, "hotspotAddress", 255),
+    ownerPhone: optionalArchiveString(value.ownerPhone, 40) ?? "",
+    planName: requireArchiveString(value.planName, "planName", 200),
+    priceLabel: optionalArchiveString(value.priceLabel, 100),
+    qrCodeEnabled: value.qrCodeEnabled === true,
+    template,
+    tickets,
+    titleLabel: requireArchiveString(value.titleLabel, "titleLabel", 200),
+    validityLabel: requireArchiveString(value.validityLabel, "validityLabel", 80),
+    version: 1,
+    zoneName: requireArchiveString(value.zoneName, "zoneName", 200)
+  };
+}
+
+function requireArchiveString(value, field, maxLength, trim = true) {
+  const raw = String(value ?? "");
+  const result = trim ? raw.trim() : raw;
+  if (!result || result.length > maxLength) {
+    throw new HttpError(400, `Champ d'archive ${field} invalide.`);
+  }
+  return result;
+}
+
+function optionalArchiveString(value, maxLength) {
+  if (value === null || value === undefined || String(value).trim() === "") return null;
+  const result = String(value).trim();
+  if (result.length > maxLength) throw new HttpError(400, "Champ d'archive trop long.");
+  return result;
+}
+
 function organizationGeneratedFileResponse(record) {
   return {
     batch_id: record.batch_id,
@@ -3506,6 +3678,7 @@ function organizationGeneratedFileResponse(record) {
     format: record.format,
     id: record.id,
     metadata_json: record.metadata_json,
+    print_archive_available: Boolean(record.print_archive_ciphertext),
     router_id: record.router_id,
     sync_status: record.sync_status,
     type: record.type,
@@ -5838,6 +6011,90 @@ const handlers = [
       .all(context.organization.id, routerId)
       .filter((file) => canReadAll || file.created_by_user_id === context.user.id);
     return { files: visibleFiles.map(organizationGeneratedFileResponse), router_id: routerId };
+  }),
+
+  route("POST", "/v1/saas/router-file-print-archive", async (request, body) => {
+    const routerId = requireText(body, "router_id", 200);
+    const fileId = requireText(body, "file_id", 240);
+    const context = requireOrganizationRouterAnyPermission(
+      request,
+      ["router.tickets.generate", "router.tickets.reprint"],
+      routerId
+    );
+    const file = statements.findOrganizationGeneratedFileById.get(
+      context.organization.id,
+      routerId,
+      fileId
+    );
+    if (!file || file.deleted_at) {
+      throw new HttpError(404, "Fichier organisationnel introuvable.");
+    }
+    const canManageAll = organizationContextHasPermission(context, "router.tickets.delete");
+    if (file.created_by_user_id !== context.user.id && !canManageAll) {
+      throw new HttpError(403, "Seul le créateur du lot ou un administrateur peut publier son archive.");
+    }
+    const archive = normalizeTicketPrintArchive(body.archive);
+    if (!file.batch_id || archive.batchId !== file.batch_id) {
+      throw new HttpError(400, "L'archive ne correspond pas au lot de ce fichier.");
+    }
+    const encrypted = encryptTicketPrintArchive(
+      context.organization.id,
+      routerId,
+      fileId,
+      archive
+    );
+    const updatedAt = nowIso();
+    statements.updateOrganizationGeneratedFilePrintArchive.run(
+      encrypted.ciphertext,
+      encrypted.iv,
+      encrypted.tag,
+      encrypted.version,
+      updatedAt,
+      context.organization.id,
+      routerId,
+      fileId
+    );
+    logEvent(request, null, "ticket_print_archive_saved", context.organization.id, null, {
+      file_id: fileId,
+      router_id: routerId,
+      ticket_count: archive.tickets.length,
+      version: encrypted.version
+    });
+    return { available: true, updated_at: updatedAt, version: encrypted.version };
+  }),
+
+  route("GET", "/v1/saas/router-file-print-archive", async (request) => {
+    const url = new URL(request.url, "http://ticketpro.local");
+    const routerId = String(url.searchParams.get("router_id") ?? "").trim();
+    const fileId = String(url.searchParams.get("file_id") ?? "").trim();
+    if (!routerId || routerId.length > 200 || !fileId || fileId.length > 240) {
+      throw new HttpError(400, "Identifiant de routeur ou de fichier invalide.");
+    }
+    const context = requireOrganizationRouterAnyPermission(
+      request,
+      ["router.tickets.reprint", "router.files.read", "router.files.own"],
+      routerId
+    );
+    const file = statements.findOrganizationGeneratedFileById.get(
+      context.organization.id,
+      routerId,
+      fileId
+    );
+    if (!file || file.deleted_at) {
+      throw new HttpError(404, "Fichier organisationnel introuvable.");
+    }
+    const canReadAll = organizationContextHasPermission(context, "router.files.read");
+    if (!canReadAll && file.created_by_user_id !== context.user.id) {
+      throw new HttpError(403, "Ce fichier n'appartient pas au profil actif.");
+    }
+    const archive = decryptTicketPrintArchive(file);
+    logEvent(request, null, "ticket_print_archive_opened", context.organization.id, null, {
+      file_id: fileId,
+      router_id: routerId,
+      ticket_count: archive.tickets.length,
+      version: archive.version
+    });
+    return { archive };
   }),
 
   route("GET", "/v1/saas/router-activity-logs", async (request) => {

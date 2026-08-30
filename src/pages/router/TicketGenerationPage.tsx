@@ -38,6 +38,7 @@ import {
 } from "../../services/sync";
 import {
   buildGeneratedTicketPdfRecord,
+  createTicketPrintArchivePayload,
   generateTicketPdf,
   resolveTicketPdfPassword,
   type TicketPdfFormat,
@@ -63,6 +64,7 @@ import {
   createBatchId,
   createInitialTicketGenerationState,
   defaultTicketGenerationOptions,
+  findConfirmedVoucherBatchUsers,
   getSelectedQuantity,
   getTicketSummary,
   normalizeCurrency,
@@ -128,6 +130,7 @@ export function TicketGenerationPage() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [catalogStatus, setCatalogStatus] = useState<RouterCatalogStatus>("loading");
   const catalogRequestIdRef = useRef(0);
+  const generationLockRef = useRef(false);
   const [printers, setPrinters] = useState<LocalPrinter[]>([]);
   const [printSettings, setPrintSettings] = useState<PrintSettings>({
     economical: true,
@@ -644,6 +647,10 @@ export function TicketGenerationPage() {
   };
 
   const generateTickets = async () => {
+    if (generationLockRef.current) {
+      return;
+    }
+
     try {
       requireProfilePermission(session, "router.tickets.generate");
     } catch (permissionError) {
@@ -662,14 +669,15 @@ export function TicketGenerationPage() {
       setError("Renseignez et enregistrez l'adresse Hotspot dans Paramètres routeur avant de créer les tickets.");
       return;
     }
+    generationLockRef.current = true;
     setIsGenerating(true);
     setError(null);
     setMessage(null);
 
     const batchId = createBatchId();
     const requestedQuantity = getSelectedQuantity(state);
-    const succeededTickets: CreateTicketInput[] = [];
-    const failedTickets: CreateTicketInput[] = [];
+    let succeededTickets: CreateTicketInput[] = [];
+    let failedTickets: CreateTicketInput[] = [];
     let firstCreationError: string | null = null;
 
     try {
@@ -902,6 +910,66 @@ export function TicketGenerationPage() {
         }
       });
 
+      // RouterOS can apply an add command even when the API response times out.
+      // Re-read the complete batch before deciding which vouchers may be printed.
+      const confirmedByUsername = new Map(
+        succeededTickets.map((ticket) => [ticket.username, ticket] as const)
+      );
+      const pendingByUsername = new Map(
+        pendingTickets.map((ticket) => [ticket.username, ticket] as const)
+      );
+      const reconciliationDelays = [0, 500, 1_200];
+
+      for (const reconciliationDelay of reconciliationDelays) {
+        if (confirmedByUsername.size === pendingTickets.length) break;
+        if (reconciliationDelay > 0) await waitForRouterOs(reconciliationDelay);
+
+        try {
+          const routerUsers = await generationService.listHotspotUsers();
+          const confirmedUsers = findConfirmedVoucherBatchUsers({
+            batchId,
+            pendingTickets,
+            profileName: selectedPlan.profileName,
+            routerUsers
+          });
+
+          for (const confirmedUser of confirmedUsers) {
+            if (confirmedByUsername.has(confirmedUser.username)) continue;
+            const pendingTicket = pendingByUsername.get(confirmedUser.username);
+            if (!pendingTicket) continue;
+
+            const confirmedTicket = userToTicketRecord({
+              accountId: session.account_id,
+              batchId,
+              createdByProfileId: session.internal_profile_id,
+              createdByProfile: session.internal_profile_role,
+              passwordSecretRef: pendingTicket.password_encrypted,
+              planId: state.selectedPlanId,
+              planSnapshot: selectedPlan,
+              routerId: state.selectedRouterId,
+              user: confirmedUser
+            });
+            const voucherOperation = voucherOperations.get(pendingTicket.id);
+            if (voucherOutbox && voucherOperation) {
+              await voucherOutbox.complete(voucherOperation.id, confirmedTicket);
+            } else if (isPersistent) {
+              await ticketRepository.update(confirmedTicket);
+            }
+            confirmedByUsername.set(confirmedUser.username, confirmedTicket);
+          }
+        } catch (reconciliationError) {
+          firstCreationError ??= readGenerationError(
+            reconciliationError,
+            "La relecture finale du lot sur RouterOS a échoué."
+          );
+        }
+      }
+
+      succeededTickets = pendingTickets
+        .map((ticket) => confirmedByUsername.get(ticket.username))
+        .filter((ticket): ticket is CreateTicketInput => Boolean(ticket));
+      failedTickets = pendingTickets.filter((ticket) => !confirmedByUsername.has(ticket.username));
+
       const syncStatus: SyncStatus = failedTickets.length > 0 ? "pending" : "synced";
       const batch = buildTicketBatch({
         accountId: session.account_id,
@@ -945,7 +1013,7 @@ export function TicketGenerationPage() {
       let pdfError: string | null = null;
       if (fileName) {
         try {
-          if (succeededTickets.length > 0) {
+          if (succeededTickets.length === requestedQuantity) {
             createdPdf = await createAndStorePdf(batch, succeededTickets, fileName);
           }
         } catch (fileError) {
@@ -979,6 +1047,7 @@ export function TicketGenerationPage() {
     } catch (generationError) {
       setError(readGenerationError(generationError, "La génération des tickets a échoué."));
     } finally {
+      generationLockRef.current = false;
       setIsGenerating(false);
     }
   };
@@ -999,6 +1068,7 @@ export function TicketGenerationPage() {
         "Configurez d'abord l'adresse Hotspot dans Paramètres routeur afin qu'elle figure sur chaque ticket."
       );
     }
+    assertCompleteTicketBatch(batch, pdfTickets);
     const generatedAt = new Date().toISOString();
     const basePdfInput = buildTicketPdfInputFromOptions({
       batch,
@@ -1048,7 +1118,21 @@ export function TicketGenerationPage() {
     }
 
     await generatedFiles.upsert(fileRecord);
-    await organizationOperations?.publishFile(routerId, fileRecord.id).catch(() => undefined);
+    if (organizationOperations) {
+      try {
+        await organizationOperations.publishFile(routerId, fileRecord.id);
+        await organizationOperations.publishTicketPrintArchive(
+          routerId,
+          fileRecord.id,
+          createTicketPrintArchivePayload(pdfInput)
+        );
+      } catch (archiveError) {
+        const detail = archiveError instanceof Error ? archiveError.message : "service indisponible";
+        setError(
+          `Le PDF local est prêt, mais sa sauvegarde sécurisée multi-PC reste à reprendre : ${detail}`
+        );
+      }
+    }
     if (isPersistent) {
       await Promise.all(pdfTickets.map(async (ticket) => {
         ticket.exported_at = generatedAt;
@@ -1069,6 +1153,14 @@ export function TicketGenerationPage() {
       return null;
     }
 
+    const printableTickets = tickets.filter((ticket) => ticket.sync_status === "synced");
+    try {
+      assertCompleteTicketBatch(result.batch, printableTickets);
+    } catch (quantityError) {
+      setError(readGenerationError(quantityError, "Le lot n'est pas complet."));
+      return null;
+    }
+
     if (generatedFile) {
       if (isPersistent) {
         await fileService.open(generatedFile.file_path);
@@ -1077,11 +1169,6 @@ export function TicketGenerationPage() {
       return generatedFile;
     }
 
-    const printableTickets = tickets.filter((ticket) => ticket.sync_status === "synced");
-    if (printableTickets.length === 0) {
-      setMessage("Aucun voucher synchronisé n'est disponible pour le PDF.");
-      return null;
-    }
     const fileRecord = await createAndStorePdf(result.batch, printableTickets, result.fileName);
     setGeneratedFile(fileRecord);
     setMessage(`${fileRecord.file_name} généré et enregistré dans les fichiers.`);
@@ -1095,8 +1182,10 @@ export function TicketGenerationPage() {
     }
 
     const printableTickets = tickets.filter((ticket) => ticket.sync_status === "synced");
-    if (printableTickets.length === 0) {
-      setError("Aucun voucher synchronisé n'est disponible pour l'impression.");
+    try {
+      assertCompleteTicketBatch(result.batch, printableTickets);
+    } catch (quantityError) {
+      setError(readGenerationError(quantityError, "Le lot n'est pas complet."));
       return;
     }
     const printFileName = `tickets-${result.batch.id}-${printSettings.format}.pdf`;
@@ -1763,10 +1852,10 @@ function TicketPdfPreviewFrame({ input }: { input: TicketPdfInput }) {
   return (
     <div className="ticket-pdf-preview-frame">
       <div className="ticket-pdf-preview-frame__heading">
-        <strong>Aperçu fidèle du PDF A4</strong>
-        <span>Les codes définitifs remplaceront XXXXXX après confirmation.</span>
+        <strong>Aperçu fidèle d'un ticket</strong>
+        <span>Le PDF final contiendra 40 tickets par page. Le code définitif remplacera XXXXXX.</span>
       </div>
-      {url ? <iframe src={`${url}#toolbar=0&navpanes=0&view=FitH`} title="Aperçu PDF des vouchers" /> : null}
+      {url ? <iframe src={`${url}#toolbar=0&navpanes=0&view=Fit`} title="Aperçu d'un voucher" /> : null}
     </div>
   );
 }
@@ -2058,17 +2147,18 @@ function buildCreationPreviewPdfInput(input: {
     hotspotAddress: input.hotspotAddress,
     ownerPhone: input.ownerPhone,
     planName: input.plan.name,
+    previewMode: "single-ticket",
     priceLabel: input.plan.priceHint === null || !input.displaySettings.showPrice
       ? null
       : `${input.plan.priceHint.toLocaleString("fr-FR")} ${currency}`,
     qrCodeEnabled: input.displaySettings.showQrCode,
     routerId: input.router.id,
     template: input.displaySettings.showQrCode ? "qr" : "economy",
-    tickets: Array.from({ length: 40 }, () => ({
+    tickets: [{
       password,
       passwordSecretRef: `preview:///${username}/password`,
       username
-    })),
+    }],
     titleLabel: input.titleLabel,
     validityLabel: formatPlanDurationLabel(input.plan.validityMinutes ?? input.plan.durationMinutes),
     zoneName: input.router.name
@@ -2182,6 +2272,23 @@ async function mapWithConcurrency<T, R>(
     results[index] = await operation(value, index);
   });
   return results;
+}
+
+function assertCompleteTicketBatch(
+  batch: Pick<CreateTicketBatchInput, "id" | "quantity">,
+  batchTickets: Pick<CreateTicketInput, "username">[]
+): void {
+  const uniqueUsernames = new Set(batchTickets.map((ticket) => ticket.username));
+  if (batchTickets.length !== batch.quantity || uniqueUsernames.size !== batch.quantity) {
+    throw new Error(
+      `Lot incomplet : ${uniqueUsernames.size}/${batch.quantity} vouchers uniques sont confirmés sur RouterOS. `
+      + "Le PDF et l'impression restent bloqués jusqu'à une synchronisation complète."
+    );
+  }
+}
+
+function waitForRouterOs(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
 function readGenerationError(error: unknown, fallback: string): string {

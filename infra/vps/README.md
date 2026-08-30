@@ -53,14 +53,16 @@ pourrait verrouiller le VPS.
 Une migration complète exige les quatre ensembles suivants :
 
 - le snapshot SQLite de l'API de licences ;
-- `license-api/.env`, notamment `LICENSE_HASH_SECRET` et `ROUTER_VAULT_KEY` ;
+- `license-api/.env`, notamment `LICENSE_HASH_SECRET`, `ROUTER_VAULT_KEY` et `TICKET_ARCHIVE_KEY` ;
 - `wireguard-hub/.env` et `wireguard-hub/data/tenants.json` ;
 - tout `wireguard-hub/wireguard`, notamment la clé privée et `wg0.conf`.
 
 Sans la clé privée WireGuard, les routeurs déjà configurés ne reconnaîtront plus le
 serveur. Sans `LICENSE_HASH_SECRET`, les clés, sessions et jetons existants ne
 pourront plus être vérifiés. Sans `ROUTER_VAULT_KEY`, les identifiants RouterOS
-du catalogue de reprise deviennent définitivement illisibles.
+du catalogue de reprise deviennent définitivement illisibles. Sans
+`TICKET_ARCHIVE_KEY`, les archives de réimpression multi-PC des vouchers ne
+peuvent plus être déchiffrées.
 
 ## Sauvegarde chiffrée
 

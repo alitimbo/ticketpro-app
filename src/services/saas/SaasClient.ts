@@ -300,10 +300,31 @@ export type SaasGeneratedFileSnapshot = {
   format: string;
   id: string;
   metadata_json: string | null;
+  print_archive_available?: boolean;
   router_id: string;
   sync_status: string;
   type: string;
   updated_at: string;
+};
+
+export type SaasTicketPrintArchivePayload = {
+  batchId: string;
+  currency?: string | null;
+  dataLimitLabel: string | null;
+  displaySettings?: import("../tickets/TicketDisplaySettingsService").TicketDisplaySettings;
+  durationLabel: string;
+  format: "a4" | "a5" | "thermal58" | "thermal80";
+  hotspotAddress: string;
+  ownerPhone: string;
+  planName: string;
+  priceLabel?: string | null;
+  qrCodeEnabled: boolean;
+  template: "economy" | "premium" | "qr" | "simple";
+  tickets: Array<{ password: string; username: string }>;
+  titleLabel: string;
+  validityLabel: string;
+  version: 1;
+  zoneName: string;
 };
 
 export type SaasActivityLogSnapshot = {
@@ -866,6 +887,33 @@ export async function saveSaasRouterFiles(input: {
     token
   );
   return result.files;
+}
+
+export async function saveSaasTicketPrintArchive(input: {
+  archive: SaasTicketPrintArchivePayload;
+  file_id: string;
+  router_id: string;
+}): Promise<{ available: boolean; updated_at: string; version: number }> {
+  const token = await requireSessionToken();
+  return request(
+    "/v1/saas/router-file-print-archive",
+    input,
+    token
+  );
+}
+
+export async function getSaasTicketPrintArchive(
+  routerId: string,
+  fileId: string
+): Promise<SaasTicketPrintArchivePayload> {
+  const token = await requireSessionToken();
+  const result = await request<{ archive: SaasTicketPrintArchivePayload }>(
+    `/v1/saas/router-file-print-archive?router_id=${encodeURIComponent(routerId)}&file_id=${encodeURIComponent(fileId)}`,
+    undefined,
+    token,
+    "GET"
+  );
+  return result.archive;
 }
 
 export async function getSaasRouterActivityLogs(routerId: string): Promise<SaasActivityLogSnapshot[]> {

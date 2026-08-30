@@ -188,6 +188,7 @@ before(async () => {
       LICENSE_RATE_LIMIT_MAX: "500",
       LICENSE_HASH_SECRET: "integration-hash-secret-at-least-32-characters",
       ROUTER_VAULT_KEY: Buffer.alloc(32, 7).toString("base64"),
+      TICKET_ARCHIVE_KEY: Buffer.alloc(32, 11).toString("base64"),
       IPAY_BASE_URL: `http://127.0.0.1:${ipayPort}`,
       IPAY_ENV: "test",
       IPAY_PUBLIC_KEY: "ipay-public-test",
@@ -875,6 +876,90 @@ test("les vouchers générés par un opérateur deviennent visibles par l'admini
   assert.equal(ownerFiles.payload.files.length, 1);
   assert.equal(ownerFiles.payload.files[0].created_by_email, "catalogue.operator@example.com");
   assert.equal(ownerFiles.payload.files[0].file_name, "routeur-catalogue-1h-100-cfa.pdf");
+  assert.equal(ownerFiles.payload.files[0].print_archive_available, false);
+
+  const archivePassword = "Secret-Distinct-482793";
+  const archivedPrintData = await api("/v1/saas/router-file-print-archive", {
+    token: operator.payload.session.token,
+    body: {
+      archive: {
+        batchId: "batch-catalogue-1",
+        currency: "CFA",
+        dataLimitLabel: "500 Mo",
+        displaySettings: { currency: "CFA", showQrCode: false },
+        durationLabel: "1 h",
+        format: "a4",
+        hotspotAddress: "catalogue.test",
+        ownerPhone: "+22790000000",
+        planName: "1 heure",
+        priceLabel: "100 CFA",
+        qrCodeEnabled: false,
+        template: "economy",
+        tickets: [{ password: archivePassword, username: "482793" }],
+        titleLabel: "Zone Catalogue",
+        validityLabel: "3 h",
+        version: 1,
+        zoneName: "Zone Catalogue"
+      },
+      file_id: "file-catalogue-1",
+      router_id: routerId
+    }
+  });
+  assert.equal(archivedPrintData.status, 200, JSON.stringify(archivedPrintData.payload));
+  assert.equal(archivedPrintData.payload.available, true);
+
+  const ownerArchive = await api(
+    `/v1/saas/router-file-print-archive?router_id=${routerId}&file_id=file-catalogue-1`,
+    { method: "GET", token: ownerToken }
+  );
+  assert.equal(ownerArchive.status, 200, JSON.stringify(ownerArchive.payload));
+  assert.equal(ownerArchive.payload.archive.tickets[0].password, archivePassword);
+  assert.equal(ownerArchive.payload.archive.validityLabel, "3 h");
+
+  const filesAfterArchive = await api(`/v1/saas/router-files?router_id=${routerId}`, {
+    method: "GET",
+    token: ownerToken
+  });
+  assert.equal(filesAfterArchive.payload.files[0].print_archive_available, true);
+  assert.equal(JSON.stringify(filesAfterArchive.payload).includes(archivePassword), false);
+  assert.equal(Object.hasOwn(filesAfterArchive.payload.files[0], "print_archive_ciphertext"), false);
+
+  const inspectionDb = new DatabaseSync(databasePath, { readOnly: true });
+  const encryptedArchive = inspectionDb.prepare(`
+    SELECT print_archive_ciphertext, print_archive_iv, print_archive_tag
+    FROM organization_generated_files WHERE id = ?
+  `).get("file-catalogue-1");
+  inspectionDb.close();
+  assert.ok(encryptedArchive.print_archive_ciphertext);
+  assert.ok(encryptedArchive.print_archive_iv);
+  assert.ok(encryptedArchive.print_archive_tag);
+  assert.equal(JSON.stringify(encryptedArchive).includes(archivePassword), false);
+
+  const metadataResync = await api("/v1/saas/router-files", {
+    token: operator.payload.session.token,
+    body: {
+      router_id: routerId,
+      files: [{
+        batch_id: "batch-catalogue-1",
+        created_at: "2026-08-13T18:11:00.000Z",
+        deleted_at: null,
+        file_name: "routeur-catalogue-1h-100-cfa.pdf",
+        format: "a4",
+        id: "file-catalogue-1",
+        metadata_json: JSON.stringify({ format: "a4", ticket_count: 1 }),
+        sync_status: "synced",
+        type: "tickets_pdf",
+        updated_at: "2026-08-13T18:13:00.000Z"
+      }]
+    }
+  });
+  assert.equal(metadataResync.status, 200);
+  assert.equal(metadataResync.payload.files[0].print_archive_available, true);
+  const archiveAfterMetadataResync = await api(
+    `/v1/saas/router-file-print-archive?router_id=${routerId}&file_id=file-catalogue-1`,
+    { method: "GET", token: ownerToken }
+  );
+  assert.equal(archiveAfterMetadataResync.payload.archive.tickets[0].password, archivePassword);
 
   const synchronizedLogs = await api("/v1/saas/router-activity-logs", {
     token: operator.payload.session.token,

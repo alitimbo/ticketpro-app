@@ -18,6 +18,7 @@ import {
 export type RegeneratedTicketPdf = {
   bytes: Uint8Array;
   format: TicketPdfFormat;
+  input: TicketPdfInput;
   ticketCount: number;
 };
 
@@ -87,6 +88,7 @@ export async function regenerateArchivedTicketPdf(input: {
   return {
     bytes: generateTicketPdf(pdfInput),
     format: pdfInput.format,
+    input: pdfInput,
     ticketCount: tickets.length
   };
 }

@@ -11,6 +11,7 @@ export {
   getSaasRouterRecoverySnapshots,
   getSaasRouterTicketCatalog,
   getSaasRouterFiles,
+  getSaasTicketPrintArchive,
   getSaasRouterActivityLogs,
   heartbeatSaasDevice,
   inspectSaasInvitation,
@@ -37,6 +38,7 @@ export {
   saveSaasRouterRecoverySnapshot,
   saveSaasRouterTicketCatalog,
   saveSaasRouterFiles,
+  saveSaasTicketPrintArchive,
   saveSaasRouterActivityLogs,
   revokeSaasVpnPeer,
   revokeSaasDevice,
@@ -59,6 +61,7 @@ export {
   type SaasActivityLogSnapshot,
   type SaasTicketBatchSnapshot,
   type SaasTicketSnapshot,
+  type SaasTicketPrintArchivePayload,
   type SaasVpnPeer,
   SaasRequestError,
   type SaasSubscription

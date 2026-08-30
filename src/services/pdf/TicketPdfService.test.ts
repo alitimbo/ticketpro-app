@@ -32,6 +32,39 @@ describe("TicketPdfService", () => {
     expect(overflowText).toContain("/Count 2");
   });
 
+  it("imprime exactement 100 vouchers uniques sur trois pages A4", () => {
+    const text = new TextDecoder().decode(generateTicketPdf(buildPdfInput(100)));
+    const voucherCodes = text.match(/\(123\d{3}\)/g) ?? [];
+
+    expect(text).toContain("/Count 3");
+    expect(voucherCodes).toHaveLength(100);
+    expect(new Set(voucherCodes).size).toBe(100);
+    expect(text).toContain("(123001)");
+    expect(text).toContain("(123100)");
+  });
+
+  it("affiche distinctement une durée de 1 h et une validité de 3 j", () => {
+    const input = buildPdfInput(1);
+    input.durationLabel = "1 h";
+    input.validityLabel = "3 j";
+    const text = new TextDecoder().decode(generateTicketPdf(input));
+
+    expect(text).toContain("(DUREE)");
+    expect(text).toContain("(1 h)");
+    expect(text).toContain("(VALIDITE)");
+    expect(text).toContain("(3 j)");
+  });
+
+  it("génère l'aperçu sur une seule cellule fidèle plutôt que sur une page A4", () => {
+    const input = buildPdfInput(40);
+    input.previewMode = "single-ticket";
+    const text = new TextDecoder().decode(generateTicketPdf(input));
+
+    expect(text).toContain("/MediaBox [0 0 109.86 98.36]");
+    expect(text).toContain("/Count 1");
+    expect(text.match(/\(123\d{3}\)/g)).toHaveLength(1);
+  });
+
   it("prépare l'enregistrement generated_files du lot", () => {
     const input = buildPdfInput(1);
     const record = buildGeneratedTicketPdfRecord(input);

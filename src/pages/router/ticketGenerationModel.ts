@@ -2,7 +2,7 @@ import type { HotspotPlan, HotspotServer, HotspotUser, RouterSummary } from "../
 import type { CreateTicketBatchInput, CreateTicketInput, SyncStatus } from "../../domain/database";
 import type { UserRole } from "../../domain/auth";
 import type { TicketPdfFormat, TicketPdfInput, TicketPdfTemplate } from "../../services/pdf";
-import { normalizeTicketPrefix, secretRefForTicket } from "../../services/tickets";
+import { normalizeTicketPrefix, secretRefForTicket, voucherBelongsToBatch } from "../../services/tickets";
 
 export { secretRefForTicket };
 
@@ -101,6 +101,29 @@ export function createInitialTicketGenerationState(routerId: string): TicketGene
 
 export function getSelectedQuantity(state: TicketGenerationState): number {
   return state.quantity === "custom" ? Number(state.customQuantity) : state.quantity;
+}
+
+export function findConfirmedVoucherBatchUsers(input: {
+  batchId: string;
+  pendingTickets: Pick<CreateTicketInput, "username">[];
+  profileName: string;
+  routerUsers: HotspotUser[];
+}): HotspotUser[] {
+  const usersByName = new Map<string, HotspotUser>();
+
+  input.routerUsers.forEach((user) => {
+    if (
+      user.profileName === input.profileName
+      && voucherBelongsToBatch(user.comment, input.batchId)
+      && !usersByName.has(user.username)
+    ) {
+      usersByName.set(user.username, user);
+    }
+  });
+
+  return input.pendingTickets
+    .map((ticket) => usersByName.get(ticket.username))
+    .filter((user): user is HotspotUser => Boolean(user));
 }
 
 export function validateTicketGeneration(
