@@ -614,6 +614,29 @@ describe("MikroTikRouterAdapter", () => {
     ]);
   });
 
+  it("préfère les durées RouterOS réelles à un ancien commentaire TicketPro resté à 1 heure", async () => {
+    const adapter = createAdapter(new MockRouterOsTransport({
+      "/ip/hotspot/user/profile/print": [{
+        ".id": "*P3",
+        comment:
+          'hotspot-manager:{"name":"Forfait 3 heures","durationMinutes":60,"validityMinutes":60}',
+        "mac-cookie-timeout": "5h",
+        name: "forfait-3h",
+        "rate-limit": "2M/5M",
+        "session-timeout": "3h",
+        "shared-users": "1"
+      }]
+    }));
+
+    await expect(adapter.getHotspotPlans()).resolves.toEqual([
+      expect.objectContaining({
+        durationMinutes: 180,
+        profileName: "forfait-3h",
+        validityMinutes: 300
+      })
+    ]);
+  });
+
   it("crée un utilisateur réel avec les limites RouterOS sans exposer le mot de passe", async () => {
     const transport = new MockRouterOsTransport({
       "/ip/hotspot/user/add": [],

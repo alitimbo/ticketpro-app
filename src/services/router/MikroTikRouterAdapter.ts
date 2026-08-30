@@ -2006,7 +2006,18 @@ function profileRowToPlan(row: RouterOsApiRow): HotspotPlan {
   const metadata = parsePlanComment(pick(row, "comment"));
   const rateLimit = pick(row, "rate-limit");
   const [downloadLimit, uploadLimit] = splitRateLimit(rateLimit);
-  const durationMinutes = metadata.durationMinutes ?? routerOsDurationToMinutes(pick(row, "session-timeout"));
+  const routerDurationMinutes = routerOsDurationToMinutes(pick(row, "session-timeout"));
+  const routerValidityMinutes = routerOsDurationToMinutes(pick(row, "mac-cookie-timeout"));
+  // The live RouterOS fields are authoritative. Older TicketPro versions
+  // stored duration metadata in the profile comment; keeping that stale value
+  // ahead of session-timeout made a profile changed from 1h to 3h appear as 1h
+  // again during the next catalog refresh.
+  const durationMinutes = routerDurationMinutes > 0
+    ? routerDurationMinutes
+    : metadata.durationMinutes ?? 0;
+  const validityMinutes = routerValidityMinutes > 0
+    ? routerValidityMinutes
+    : metadata.validityMinutes ?? durationMinutes;
 
   return {
     dataLimitMb: metadata.dataLimitMb ?? null,
@@ -2019,7 +2030,7 @@ function profileRowToPlan(row: RouterOsApiRow): HotspotPlan {
     sharedUsers: parseInteger(pick(row, "shared-users")) || 1,
     status: metadata.status === "disabled" || isTruthy(pick(row, "disabled")) ? "disabled" : "active",
     uploadLimit,
-    validityMinutes: metadata.validityMinutes ?? durationMinutes
+    validityMinutes
   };
 }
 
