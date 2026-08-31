@@ -34,6 +34,7 @@ import {
 } from "../../services/pdf";
 import {
   ActionMenu,
+  AsyncStateCard,
   Badge,
   Button,
   Card,
@@ -67,8 +68,13 @@ export function FilesPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [busyFileId, setBusyFileId] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isLoading, setIsLoading] = useState(isPersistent);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [syncWarning, setSyncWarning] = useState<string | null>(null);
   const [fileToDelete, setFileToDelete] = useState<ArchivedGeneratedFile | null>(null);
   const migratedRouterIdsRef = useRef(new Set<string>());
+  const filesLoadRunningRef = useRef(false);
+  const loadedFilesScopeRef = useRef<string | null>(null);
   const generatedFileRepository = useMemo(() => new GeneratedFileRepository(database), [database]);
   const accountRepository = useMemo(() => new AccountRepository(database), [database]);
   const auditLogService = useMemo(() => new AuditLogService(database), [database]);
@@ -101,50 +107,95 @@ export function FilesPage() {
     [database, session]
   );
 
-  const loadFiles = useCallback(async () => {
+  const loadFiles = useCallback(async (options: { silent?: boolean } = {}) => {
     if (!isPersistent || !isInitialized || !session) {
       return;
     }
+    if (filesLoadRunningRef.current) return;
+    filesLoadRunningRef.current = true;
 
+    if (!options.silent) {
+      setIsLoading(true);
+      setLoadError(null);
+      setSyncWarning(null);
+    }
+
+    try {
       const routers = await (saasAccount?.organization.id
           ? routerRepository.listByOrganization(session.account_id, saasAccount.organization.id)
           : routerRepository.listByAccount(session.account_id));
+
+      const readFiles = async (checkLocalAvailability: boolean) => {
+        const [records, batches] = await Promise.all([
+          generatedFileRepository.listByAccount(session.account_id),
+          batchRepository.listByAccount(session.account_id)
+        ]);
+        const routerIds = new Set(routers.map((router) => router.id));
+        const scopedRecords = records.filter((record) => routerIds.has(record.router_id));
+        const scopedBatches = batches.filter((batch) => routerIds.has(batch.router_id));
+        const plans = await Promise.all(routers.map((router) => planRepository.listByRouter(router.id)));
+        const routerById = new Map(routers.map((router) => [router.id, router]));
+        const batchById = new Map(scopedBatches.map((batch) => [batch.id, batch]));
+        const planById = new Map(plans.flat().map((plan) => [plan.id, plan]));
+        const archived = await Promise.all(
+          scopedRecords.map(async (record) => {
+            const metadata = checkLocalAvailability
+              ? await fileService.metadata(record.file_path).catch(() => null)
+              : null;
+            const batch = record.batch_id ? batchById.get(record.batch_id) : null;
+            const plan = batch ? planById.get(batch.plan_id) : null;
+
+            return archivedFileFromRecord(record, {
+              fileExists: metadata?.exists ?? null,
+              planId: plan?.id,
+              planName: plan?.name,
+              routerName: routerById.get(record.router_id)?.name ?? record.router_id,
+              ticketQuantity: batch?.quantity
+            });
+          })
+        );
+
+        setFiles(archived);
+      };
+
+      const filesScope = `${session.account_id}:${saasAccount?.organization.id ?? "account"}`;
+      if (loadedFilesScopeRef.current !== filesScope) {
+        setFiles([]);
+        // Render SQLite archives first. Network and filesystem checks continue afterwards.
+        await readFiles(false);
+        loadedFilesScopeRef.current = filesScope;
+      }
+
+      let organizationSyncFailed = false;
       await Promise.all(routers.map(async (router) => {
-        await organizationTicketCatalog?.pullRouter(router.id).catch(() => undefined);
+        await organizationTicketCatalog?.pullRouter(router.id).catch(() => {
+          organizationSyncFailed = true;
+        });
         if (!migratedRouterIdsRef.current.has(router.id)) {
-          await organizationOperations?.publishFiles(router.id).catch(() => undefined);
-          migratedRouterIdsRef.current.add(router.id);
+          try {
+            await organizationOperations?.publishFiles(router.id);
+            migratedRouterIdsRef.current.add(router.id);
+          } catch {
+            organizationSyncFailed = true;
+          }
         }
-        await organizationOperations?.pullFiles(router.id).catch(() => undefined);
+        await organizationOperations?.pullFiles(router.id).catch(() => {
+          organizationSyncFailed = true;
+        });
       }));
-      const [records, batches] = await Promise.all([
-        generatedFileRepository.listByAccount(session.account_id),
-        batchRepository.listByAccount(session.account_id)
-      ]);
-      const routerIds = new Set(routers.map((router) => router.id));
-      const scopedRecords = records.filter((record) => routerIds.has(record.router_id));
-      const scopedBatches = batches.filter((batch) => routerIds.has(batch.router_id));
-      const plans = await Promise.all(routers.map((router) => planRepository.listByRouter(router.id)));
-      const routerById = new Map(routers.map((router) => [router.id, router]));
-      const batchById = new Map(scopedBatches.map((batch) => [batch.id, batch]));
-      const planById = new Map(plans.flat().map((plan) => [plan.id, plan]));
-      const archived = await Promise.all(
-        scopedRecords.map(async (record) => {
-          const metadata = await fileService.metadata(record.file_path).catch(() => null);
-          const batch = record.batch_id ? batchById.get(record.batch_id) : null;
-          const plan = batch ? planById.get(batch.plan_id) : null;
-
-          return archivedFileFromRecord(record, {
-            fileExists: metadata?.exists ?? null,
-            planId: plan?.id,
-            planName: plan?.name,
-            routerName: routerById.get(record.router_id)?.name ?? record.router_id,
-            ticketQuantity: batch?.quantity
-          });
-        })
-      );
-
-      setFiles(archived);
+      await readFiles(true);
+      setLoadError(null);
+      setSyncWarning(organizationSyncFailed
+        ? "Les fichiers locaux sont affichés, mais la récupération des archives de l'organisation a échoué. TicketPro réessaiera automatiquement."
+        : null);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Impossible de récupérer les fichiers.";
+      setLoadError(detail);
+      throw error;
+    } finally {
+      filesLoadRunningRef.current = false;
+      if (!options.silent) setIsLoading(false);
+    }
   }, [
     batchRepository,
     fileService,
@@ -177,7 +228,7 @@ export function FilesPage() {
     if (!isPersistent) return undefined;
     const synchronize = () => {
       if (document.visibilityState === "hidden") return;
-      void loadFiles().catch(() => undefined);
+      void loadFiles({ silent: true }).catch(() => undefined);
     };
     const interval = window.setInterval(synchronize, 15_000);
     window.addEventListener("focus", synchronize);
@@ -490,6 +541,28 @@ export function FilesPage() {
     setMessage(null);
   };
 
+  if (isPersistent && files.length === 0 && (isLoading || loadError)) {
+    return (
+      <div className="page-stack">
+        <PageHeader
+          description="Archive locale et organisationnelle des PDF de tickets, rapports PDF et exports CSV."
+          eyebrow="Routeur"
+          title="Fichiers"
+        />
+        <AsyncStateCard
+          description="TicketPro vérifie les archives locales et récupère les fichiers partagés par l'organisation."
+          errorDescription={loadError ?? "Vérifiez la connexion puis relancez la récupération."}
+          errorTitle="Impossible de charger les fichiers"
+          loadingDescription="Lecture des lots, plans, archives PDF et disponibilité des fichiers sur ce poste."
+          loadingTitle="Récupération des fichiers…"
+          onRetry={() => void loadFiles()}
+          status={loadError ? "error" : "loading"}
+          title="Préparation de l'archive"
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="page-stack">
       <PageHeader
@@ -557,6 +630,7 @@ export function FilesPage() {
         ) : null}
       </Card>
 
+      {syncWarning ? <p className="form-error">{syncWarning}</p> : null}
       {message ? <p className="form-error form-error--success">{message}</p> : null}
 
       <Card className="files-list-card">

@@ -2598,6 +2598,44 @@ a {
   gap: 12px;
 }
 
+.router-sync-diagnostic-card {
+  border-color: var(--color-primary-border-strong);
+  background: linear-gradient(
+    135deg,
+    var(--color-surface) 0%,
+    var(--color-primary-soft) 180%
+  );
+}
+
+.router-sync-diagnostic-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.router-sync-diagnostic-grid .data-list-item {
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.router-sync-diagnostic-grid .data-list-item__meta {
+  flex: 0 0 auto;
+}
+
+.router-sync-diagnostic-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border);
+}
+
+.router-sync-diagnostic-actions .muted-inline {
+  max-width: 760px;
+}
+
 .router-info-item {
   display: grid;
   gap: 5px;
@@ -4823,6 +4861,24 @@ a {
   gap: 8px;
 }
 
+.report-activity-card {
+  align-self: start;
+}
+
+.report-activity-scroll {
+  max-height: 340px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
+}
+
+.report-activity-scroll:focus-within {
+  outline: 2px solid var(--color-primary-soft);
+  outline-offset: 3px;
+}
+
 .report-group-row {
   background: #ffffff;
   border: 1px solid var(--color-border);
@@ -5516,6 +5572,19 @@ a {
 
   .router-info-grid {
     grid-template-columns: 1fr;
+  }
+
+  .router-sync-diagnostic-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .router-sync-diagnostic-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .router-sync-diagnostic-actions .button {
+    width: 100%;
   }
 
   .files-toolbar,
@@ -6894,8 +6963,23 @@ a {
   }
 }
 .ticket-server-selection {
-  align-items: end;
+  align-items: start;
   margin-bottom: 1rem;
+}
+
+.ticket-server-selection .form-field {
+  margin-bottom: 0;
+}
+
+.ticket-server-selection__status-column {
+  display: grid;
+  gap: 5px;
+}
+
+.ticket-server-selection__status-label {
+  color: #334155;
+  font-size: 0.86rem;
+  font-weight: 760;
 }
 
 .ticket-server-selection__status {
@@ -6905,8 +6989,8 @@ a {
   border-radius: 12px;
   display: flex;
   gap: 0.65rem;
-  min-height: 48px;
-  padding: 0.75rem 0.9rem;
+  min-height: 38px;
+  padding: 0.55rem 0.9rem;
 }
 
 .async-state-card {

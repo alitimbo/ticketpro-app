@@ -395,14 +395,20 @@ export function ReportPage() {
       </Card>
 
       <div className="page-grid">
-        <Card className="span-4" title="Activité par plan">
-          <ReportGroupList groups={summary.byPlan} onOpen={openGroup} />
+        <Card className="span-4 report-activity-card" title="Activité par plan">
+          <div className="report-activity-scroll">
+            <ReportGroupList groups={summary.byPlan} onOpen={openGroup} />
+          </div>
         </Card>
-        <Card className="span-4" title="Activité par profil">
-          <ReportGroupList groups={summary.byOperator} onOpen={openGroup} />
+        <Card className="span-4 report-activity-card" title="Activité par profil">
+          <div className="report-activity-scroll">
+            <ReportGroupList groups={summary.byOperator} onOpen={openGroup} />
+          </div>
         </Card>
-        <Card className="span-4" title="Activité par jour">
-          <ReportGroupList groups={summary.byDay} onOpen={openGroup} />
+        <Card className="span-4 report-activity-card" title="Activité par jour">
+          <div className="report-activity-scroll">
+            <ReportGroupList groups={summary.byDay} onOpen={openGroup} />
+          </div>
         </Card>
       </div>
 

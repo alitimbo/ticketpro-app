@@ -27,6 +27,7 @@ import {
 import { OrganizationOperationsSyncService } from "../../services/sync";
 import {
   ActionMenu,
+  AsyncStateCard,
   Badge,
   Button,
   Card,
@@ -77,13 +78,15 @@ export function LogsPage() {
   const [cleanDialogOpen, setCleanDialogOpen] = useState(false);
   const [isCleaning, setIsCleaning] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(isPersistent);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [retentionDays, setRetentionDays] = useState(defaultLogRetentionDays);
   const [eligibleForCleanup, setEligibleForCleanup] = useState(0);
   const [lastCleanupAt, setLastCleanupAt] = useState<string | null>(null);
   const migratedRouterIdsRef = useRef(new Set<string>());
+  const logsLoadRunningRef = useRef(false);
 
   const appLogRepository = useMemo(() => new AppLogRepository(database), [database]);
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
@@ -108,44 +111,105 @@ export function LogsPage() {
     if (!isPersistent || !isInitialized || !session) {
       return;
     }
+    if (logsLoadRunningRef.current) return;
+    logsLoadRunningRef.current = true;
 
-    if (!options.silent) setIsLoading(true);
+    if (!options.silent) {
+      setIsLoading(true);
+      setLoadError(null);
+    }
     try {
       const policy = await logRetentionService.getPolicy(session.account_id);
-      await logRetentionService.runAutomatic(session.account_id);
-      const routers = await (saasAccount?.organization.id
-          ? routerRepository.listByOrganization(session.account_id, saasAccount.organization.id)
-          : routerRepository.listByAccount(session.account_id));
+      const router = await routerRepository.findById(routerId);
+      if (
+        !router
+        || router.account_id !== session.account_id
+        || (saasAccount?.organization.id && router.organization_id !== saasAccount.organization.id)
+      ) {
+        throw new Error("Routeur introuvable dans l'organisation active.");
+      }
       const retentionCutoff = new Date();
       retentionCutoff.setDate(retentionCutoff.getDate() - policy.days);
-      await Promise.all(routers.map(async (router) => {
-        await organizationOperations?.cleanLogs(router.id, retentionCutoff.toISOString()).catch(() => undefined);
-        if (!migratedRouterIdsRef.current.has(router.id)) {
-          await organizationOperations?.publishLogs(router.id).catch(() => undefined);
-          migratedRouterIdsRef.current.add(router.id);
+      let organizationSyncFailed = false;
+
+      const routerNames = new Map([[router.id, router.name]]);
+      const readLocalLogs = async (includeRetentionMetrics = false) => {
+        const records = await appLogRepository.listByAccount(session.account_id);
+        const currentLogs = records
+          .filter((record) => record.router_id === router.id)
+          .map((record) => appLogFromRecord(record, routerNames));
+        setLogs(currentLogs);
+        setRetentionDays(policy.days);
+        setLastCleanupAt(policy.lastCleanupAt);
+        setLastRefreshedAt(new Date().toISOString());
+        if (includeRetentionMetrics) {
+          setEligibleForCleanup(await logRetentionService.countEligible(session.account_id, policy.days));
         }
-        await organizationOperations?.pullLogs(router.id).catch(() => undefined);
-      }));
-      const records = await appLogRepository.listByAccount(session.account_id);
-      const eligible = await logRetentionService.countEligible(
-        session.account_id,
-        policy.days
-      );
-      const routerNames = new Map(routers.map((router) => [router.id, router.name]));
-      const routerIds = new Set(routers.map((router) => router.id));
-      setLogs(records
-        .filter((record) => record.router_id !== null && routerIds.has(record.router_id))
-        .map((record) => appLogFromRecord(record, routerNames)));
-      setRetentionDays(policy.days);
-      setEligibleForCleanup(eligible);
-      setLastCleanupAt(policy.lastCleanupAt);
-      setLastRefreshedAt(new Date().toISOString());
-    } catch {
+        return currentLogs.length;
+      };
+
+      // Local logs must never wait for cloud publication.
+      await readLocalLogs();
+
+      // Pull first: another PC may already have published the organization logs.
+      if (organizationOperations) {
+        await withUiTimeout(
+          organizationOperations.pullLogs(router.id),
+          25_000,
+          "La récupération des journaux de l'organisation prend trop de temps."
+        ).catch(() => {
+          organizationSyncFailed = true;
+        });
+      }
+      await readLocalLogs();
+      if (!options.silent) setIsLoading(false);
+
+      // Local and cloud retention are secondary tasks and no longer block the UI.
+      const automaticCleanup = await logRetentionService.runAutomatic(session.account_id);
+      if (automaticCleanup.ran) {
+        await readLocalLogs(true);
+        setLastCleanupAt(automaticCleanup.runAt);
+        setEligibleForCleanup(0);
+      } else {
+        setEligibleForCleanup(
+          await logRetentionService.countEligible(session.account_id, policy.days)
+        );
+      }
+
+      if (!migratedRouterIdsRef.current.has(router.id)) {
+        try {
+          await organizationOperations?.publishLogs(router.id);
+          migratedRouterIdsRef.current.add(router.id);
+        } catch {
+          organizationSyncFailed = true;
+        }
+      }
+      if (session.permissions.includes("router.logs.clean")) {
+        await organizationOperations
+          ?.cleanLogs(router.id, retentionCutoff.toISOString())
+          .catch(() => {
+            organizationSyncFailed = true;
+          });
+      }
+
+      setLoadError(null);
+      if (organizationSyncFailed) {
+        setNotice({
+          status: "error",
+          text: "Les journaux locaux sont affichés, mais la synchronisation avec l'organisation a échoué. TicketPro réessaiera automatiquement."
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error
+        ? error.message
+        : "Impossible de charger les journaux locaux.";
+      setLoadError(message);
       setNotice({
         status: "error",
-        text: "Impossible de charger les journaux locaux. Réessayez dans un instant."
+        text: `${message} Réessayez dans un instant.`
       });
     } finally {
+      logsLoadRunningRef.current = false;
       if (!options.silent) setIsLoading(false);
     }
   }, [
@@ -155,6 +219,7 @@ export function LogsPage() {
     logRetentionService,
     organizationOperations,
     routerRepository,
+    routerId,
     saasAccount?.organization.id,
     session
   ]);
@@ -365,6 +430,28 @@ export function LogsPage() {
     }
   };
 
+  if (isPersistent && logs.length === 0 && (isLoading || loadError)) {
+    return (
+      <div className="page-stack">
+        <PageHeader
+          description="Trace persistante des actions importantes, sans mots de passe ni secrets."
+          eyebrow="Routeur"
+          title="Logs"
+        />
+        <AsyncStateCard
+          description="TicketPro rassemble les actions locales et celles partagées par les membres de l'organisation pour ce routeur."
+          errorDescription={loadError ?? "Vérifiez la connexion puis relancez la récupération."}
+          errorTitle="Impossible de charger les journaux"
+          loadingDescription="Lecture de la base locale et synchronisation des journaux de l'organisation."
+          loadingTitle="Récupération des journaux…"
+          onRetry={() => void loadPersistedLogs()}
+          status={loadError ? "error" : "loading"}
+          title="Préparation des logs WiFi"
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="page-stack">
       <PageHeader
@@ -514,13 +601,7 @@ export function LogsPage() {
       ) : null}
 
       <Card className="logs-list-card">
-        {isLoading && logs.length === 0 ? (
-          <EmptyState
-            description="Lecture des journaux persistés en cours."
-            icon={RefreshCw}
-            title="Chargement…"
-          />
-        ) : visibleLogs.length > 0 ? (
+        {visibleLogs.length > 0 ? (
           <div className="logs-list">
             {visibleLogs.map((log) => (
               <LogRow
@@ -558,7 +639,11 @@ export function LogsPage() {
                 Réinitialiser filtres
               </Button>
             }
-            description="Aucun journal ne correspond aux filtres."
+            description={
+              scopedLogs.length === 0
+                ? "Aucune action n'a encore été enregistrée pour ce routeur. Les prochaines opérations apparaîtront automatiquement ici."
+                : "Aucun journal ne correspond aux filtres."
+            }
             icon={ScrollText}
             title="Aucun journal"
           />
@@ -772,4 +857,17 @@ function downloadCsv(csv: string, fileName: string): void {
   anchor.download = fileName;
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+async function withUiTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
 }

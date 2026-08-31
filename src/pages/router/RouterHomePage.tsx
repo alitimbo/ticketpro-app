@@ -595,6 +595,15 @@ export function RouterHomePage () {
       </section>
 
       <div className='page-grid'>
+        <SyncDiagnosticCard
+          canRepair={canRepairVoucherLifecycle}
+          hasManifestDrift={hasManifestDrift}
+          onRepair={() => void repairVoucherLifecycle()}
+          repairMessage={repairMessage}
+          repairStatus={repairStatus}
+          report={syncReport}
+        />
+
         <Card className='span-8' title='Informations routeur'>
           <div className='router-info-grid'>
             <InfoItem label='Nom enregistré' value={dashboard.routerName} />
@@ -749,89 +758,109 @@ export function RouterHomePage () {
           </div>
         </Card>
 
-        <Card className='span-4' title='Synchronisation et diagnostic'>
-          <div className='data-list'>
-            <DataListItem
-              description={
-                syncReport
-                  ? `${syncReport.queue.pending + syncReport.queue.processing + syncReport.queue.retry} en attente, ${syncReport.queue.failed + syncReport.queue.conflict} à vérifier.${syncReport.incidents[0] ? ` Dernière trace : ${syncReport.incidents[0].correlationId}.` : ''}`
-                  : 'Diagnostic local en cours de préparation.'
-              }
-              icon={RefreshCw}
-              meta={
-                <Badge status={syncReport?.status ?? 'warning'}>
-                  {syncReport?.statusLabel ?? 'Lecture…'}
-                </Badge>
-              }
-              title='File durable'
-            />
-            <DataListItem
-              description={
-                syncReport?.freshness.find(item => item.id === 'router')?.message ??
-                "Aucune mesure de fraîcheur n'est encore disponible."
-              }
-              icon={Gauge}
-              meta={
-                <Badge
-                  status={
-                    syncReport?.freshness.find(item => item.id === 'router')
-                      ?.status ?? 'warning'
-                  }
-                >
-                  {syncReport?.freshness.find(item => item.id === 'router')
-                    ?.status === 'success'
-                    ? 'Récent'
-                    : 'À vérifier'}
-                </Badge>
-              }
-              title='Fraîcheur RouterOS'
-            />
-            {syncReport?.alerts.length ? (
-              syncReport.alerts.slice(0, 5).map(alert => (
-                <DataListItem
-                  description={alert.message}
-                  icon={AlertTriangle}
-                  key={alert.code}
-                  meta={
-                    <Badge status={alert.status}>
-                      {alert.status === 'error' ? 'Action requise' : 'À vérifier'}
-                    </Badge>
-                  }
-                  title={alert.title}
-                />
-              ))
-            ) : (
-              <DataListItem
-                description='Aucun conflit ni échec de synchronisation détecté.'
-                icon={AlertTriangle}
-                meta={<Badge status='success'>Aucune alerte</Badge>}
-                title='Contrôle de cohérence'
-              />
-            )}
-            <div className='button-row'>
-              <span className='muted-inline'>
-                {!canRepairVoucherLifecycle
-                  ? "Réparation réservée au propriétaire ou à un Admin de l'organisation."
-                  : repairMessage ??
-                    (hasManifestDrift
-                      ? 'TicketPro peut réparer ses extensions sans modifier les scripts externes.'
-                      : 'Le cycle des vouchers est conforme au dernier contrôle. Vous pouvez le revérifier à tout moment.')}
-              </span>
-              <Button
-                disabled={!canRepairVoucherLifecycle || repairStatus === 'loading'}
-                icon={RefreshCw}
-                onClick={() => void repairVoucherLifecycle()}
-                variant={repairStatus === 'error' ? 'danger' : 'secondary'}
-              >
-                {repairStatus === 'loading'
-                  ? 'Réparation…'
-                  : 'Réparer le cycle des vouchers'}
-              </Button>
-            </div>
-          </div>
-        </Card>
       </div>
     </div>
+  )
+}
+
+type SyncDiagnosticCardProps = {
+  canRepair: boolean
+  hasManifestDrift: boolean
+  onRepair: () => void
+  repairMessage: string | null
+  repairStatus: 'idle' | 'loading' | 'success' | 'error'
+  report: SyncObservabilityReport | null
+}
+
+function SyncDiagnosticCard ({
+  canRepair,
+  hasManifestDrift,
+  onRepair,
+  repairMessage,
+  repairStatus,
+  report
+}: SyncDiagnosticCardProps) {
+  const routerFreshness = report?.freshness.find(item => item.id === 'router')
+
+  return (
+    <Card
+      className='span-12 router-sync-diagnostic-card'
+      description='Suivi de la file durable, des données RouterOS et du cycle des vouchers.'
+      title='Synchronisation et diagnostic'
+    >
+      <div className='router-sync-diagnostic-grid'>
+        <DataListItem
+          description={
+            report
+              ? `${report.queue.pending + report.queue.processing + report.queue.retry} en attente, ${report.queue.failed + report.queue.conflict} à vérifier.${report.incidents[0] ? ` Dernière trace : ${report.incidents[0].correlationId}.` : ''}`
+              : 'Diagnostic local en cours de préparation.'
+          }
+          icon={RefreshCw}
+          meta={
+            <Badge status={report?.status ?? 'warning'}>
+              {report?.statusLabel ?? 'Lecture…'}
+            </Badge>
+          }
+          title='File durable'
+        />
+        <DataListItem
+          description={
+            routerFreshness?.message ??
+            "Aucune mesure de fraîcheur n'est encore disponible."
+          }
+          icon={Gauge}
+          meta={
+            <Badge status={routerFreshness?.status ?? 'warning'}>
+              {routerFreshness?.status === 'success' ? 'Récent' : 'À vérifier'}
+            </Badge>
+          }
+          title='Fraîcheur RouterOS'
+        />
+        {report?.alerts.length ? (
+          report.alerts.slice(0, 5).map(alert => (
+            <DataListItem
+              description={alert.message}
+              icon={AlertTriangle}
+              key={alert.code}
+              meta={
+                <Badge status={alert.status}>
+                  {alert.status === 'error' ? 'Action requise' : 'À vérifier'}
+                </Badge>
+              }
+              title={alert.title}
+            />
+          ))
+        ) : (
+          <DataListItem
+            description='Aucun conflit ni échec de synchronisation détecté.'
+            icon={AlertTriangle}
+            meta={<Badge status='success'>Aucune alerte</Badge>}
+            title='Contrôle de cohérence'
+          />
+        )}
+      </div>
+
+      <div className='router-sync-diagnostic-actions'>
+        <span className='muted-inline'>
+          {!canRepair
+            ? "Réparation réservée au propriétaire ou à un Admin de l'organisation."
+            : repairMessage ??
+              (hasManifestDrift
+                ? 'TicketPro peut réparer ses extensions sans modifier les scripts externes.'
+                : 'Le cycle des vouchers est conforme au dernier contrôle. Vous pouvez le revérifier à tout moment.')}
+        </span>
+        <Button
+          disabled={!canRepair || repairStatus === 'loading'}
+          icon={RefreshCw}
+          onClick={onRepair}
+          variant={repairStatus === 'error' ? 'danger' : 'secondary'}
+        >
+          {repairStatus === 'loading'
+            ? 'Réparation…'
+            : 'Réparer le cycle des vouchers'}
+        </Button>
+      </div>
+    </Card>
   )
 }
 

@@ -515,10 +515,10 @@ export function TicketGenerationPage() {
   const selectedRouter = routers.find((router) => router.id === state.selectedRouterId) ?? routers[0] ?? null;
   const selectedPlan = plans.find((plan) => plan.id === state.selectedPlanId) ?? null;
   const selectedPlanCurrency = normalizeCurrency(selectedPlan?.currency);
-  const effectiveDisplaySettings: TicketDisplaySettings = {
+  const effectiveDisplaySettings = useMemo<TicketDisplaySettings>(() => ({
     ...displaySettings,
     currency: selectedPlanCurrency
-  };
+  }), [displaySettings, selectedPlanCurrency]);
   const selectedHotspotServer = hotspotServers.find((server) => server.name === state.selectedServerName) ?? null;
   const ticketHotspotAddress = state.selectedServerName === "all"
     ? selectedRouter?.hotspotAddress?.trim() || ""
@@ -548,18 +548,29 @@ export function TicketGenerationPage() {
       ? current
       : { ...current, currency: planCurrency });
   }, [selectedPlan?.currency, selectedPlan?.id]);
-  const previewPdfInput = session && selectedRouter && selectedPlan
-    ? buildCreationPreviewPdfInput({
-        accountId: session.account_id,
-        displaySettings: effectiveDisplaySettings,
-        hotspotAddress: ticketHotspotAddress,
-        options: state.options,
-        plan: selectedPlan,
-        router: selectedRouter,
-        titleLabel: ticketTitle,
-        ownerPhone: ticketContact
-      })
-    : null;
+  const previewPdfInput = useMemo(() => (
+    session && selectedRouter && selectedPlan
+      ? buildCreationPreviewPdfInput({
+          accountId: session.account_id,
+          displaySettings: effectiveDisplaySettings,
+          hotspotAddress: ticketHotspotAddress,
+          options: state.options,
+          plan: selectedPlan,
+          router: selectedRouter,
+          titleLabel: ticketTitle,
+          ownerPhone: ticketContact
+        })
+      : null
+  ), [
+    effectiveDisplaySettings,
+    selectedPlan,
+    selectedRouter,
+    session,
+    state.options,
+    ticketContact,
+    ticketHotspotAddress,
+    ticketTitle
+  ]);
 
   const updateState = (partial: Partial<TicketGenerationState>) => {
     setError(null);
@@ -1399,11 +1410,6 @@ export function TicketGenerationPage() {
   return (
     <div className="page-stack">
       <PageHeader
-        actions={
-          <Button disabled={isGenerating || state.step !== 5} icon={FileText} onClick={openCreationPreview} size="large" variant="primary">
-            Prévisualiser et continuer
-          </Button>
-        }
         description="Assistant rapide pour créer un lot de tickets numériques à partir d'un plan."
         eyebrow="Routeur"
         title="Créer des tickets"
@@ -1462,13 +1468,11 @@ export function TicketGenerationPage() {
       ) : null}
       {state.step === 6 && result && selectedPlan && selectedRouter ? (
         <StepResult
-          displaySettings={effectiveDisplaySettings}
           generatedFile={generatedFile}
           onPdf={() => void generatePdf()}
           onPrint={() => void printBatch()}
           onTestPrinter={() => void testPrinter()}
           onUpdatePrintSettings={(partial) => setPrintSettings((current) => ({ ...current, ...partial }))}
-          ownerPhone={ownerPhone}
           plan={selectedPlan}
           printHistory={printHistory}
           printers={printers}
@@ -1616,6 +1620,7 @@ function StepPlan({
   servers: HotspotServer[];
 }) {
   const enabledServers = servers.filter((server) => server.isEnabled);
+  const serverCountUsesPlural = enabledServers.length !== 1;
   return (
     <Card
       actions={<Button icon={RefreshCw} onClick={onRefresh}>Actualiser RouterOS</Button>}
@@ -1638,9 +1643,14 @@ function StepPlan({
               : `${enabledServers.length} serveurs actifs détectés : un choix est obligatoire.`}
           </small>
         </label>
-        <div className="ticket-server-selection__status">
-          <Wifi aria-hidden="true" />
-          <span>{enabledServers.length} serveur(s) Hotspot actif(s) lu(s) sur RouterOS.</span>
+        <div className="ticket-server-selection__status-column">
+          <span className="ticket-server-selection__status-label">État RouterOS</span>
+          <div className="ticket-server-selection__status">
+            <Wifi aria-hidden="true" />
+            <span>
+              {enabledServers.length} serveur{serverCountUsesPlural ? "s" : ""} Hotspot actif{serverCountUsesPlural ? "s" : ""} lu{serverCountUsesPlural ? "s" : ""} sur RouterOS.
+            </span>
+          </div>
         </div>
       </div>
       <div className="choice-grid">
@@ -1989,13 +1999,11 @@ function TicketPdfPreviewFrame({ input }: { input: TicketPdfInput }) {
 }
 
 function StepResult({
-  displaySettings,
   generatedFile,
   onPdf,
   onPrint,
   onTestPrinter,
   onUpdatePrintSettings,
-  ownerPhone,
   plan,
   printHistory,
   printers,
@@ -2004,13 +2012,11 @@ function StepResult({
   router,
   tickets
 }: {
-  displaySettings: TicketDisplaySettings;
   generatedFile: CreateGeneratedFileInput | null;
   onPdf: () => void;
   onPrint: () => void;
   onTestPrinter: () => void;
   onUpdatePrintSettings: (settings: Partial<PrintSettings>) => void;
-  ownerPhone: string | null;
   plan: HotspotPlan;
   printHistory: PrintHistoryEntry[];
   printers: LocalPrinter[];
@@ -2019,20 +2025,6 @@ function StepResult({
   router: RouterSummary;
   tickets: CreateTicketInput[];
 }) {
-  const printTickets = tickets.map((ticket) =>
-    buildPrintTicketFromGeneratedTicket(
-      ticket,
-      plan,
-      router.name,
-      result.batch.id,
-      undefined,
-      router.hotspotAddress,
-      ownerPhone,
-      displaySettings
-    )
-  );
-  const preview = new LocalPrintService().buildPreview(printTickets, printSettings);
-
   return (
     <div className="page-grid">
       <div className="span-4">
@@ -2106,7 +2098,7 @@ function StepResult({
         }
         className="span-12"
         title="Préparation impression"
-        description="Préparez une impression thermique tout en gardant l'export PDF disponible."
+        description="Choisissez le format puis ouvrez le PDF réel pour contrôler exactement le document qui sera imprimé."
       >
         <div className="print-setup-grid">
           <label className="form-field">
@@ -2141,47 +2133,20 @@ function StepResult({
           </label>
         </div>
 
-        <div className="print-preview-layout">
-          <div className={`print-preview-ticket print-preview-ticket--${printSettings.format}`}>
-            <span>Aperçu fidèle {preview.paperWidthLabel}</span>
-            {preview.ticket ? (
-              <div className="thermal-ticket-preview">
-                <div className="thermal-ticket-preview__zone">{preview.ticket.zoneName}</div>
-                {!printSettings.economical ? <div className="thermal-ticket-preview__plan">{preview.ticket.planName}</div> : null}
-                <div className="thermal-ticket-preview__credentials">
-                  <small>LOGIN</small>
-                  <strong>{preview.ticket.code}</strong>
-                  {preview.ticket.passwordLabel !== preview.ticket.code ? (
-                    <><hr /><small>MOT DE PASSE</small><strong>{preview.ticket.passwordLabel}</strong></>
-                  ) : null}
-                </div>
-                <div className="thermal-ticket-preview__details">
-                  <span>{preview.ticket.durationLabel}{preview.ticket.dataLimitLabel ? ` - ${preview.ticket.dataLimitLabel}` : ""}</span>
-                  {preview.ticket.priceLabel ? <strong>{preview.ticket.priceLabel}</strong> : null}
-                </div>
-                <div className="thermal-ticket-preview__footer">
-                  {preview.ticket.hotspotAddress ? <strong>Portail : {preview.ticket.hotspotAddress}</strong> : null}
-                  {preview.ticket.contactLabel ? <span>Contact : {preview.ticket.contactLabel}</span> : null}
-                </div>
+        <div className="print-history-list">
+          <h3>Historique d'impression</h3>
+          {printHistory.length > 0 ? (
+            printHistory.slice(0, 4).map((entry) => (
+              <div className="print-history-row" key={entry.id}>
+                <strong>{entry.userMessage}</strong>
+                <span>
+                  {entry.printerName} · {printFormatLabel(entry.format)} · {entry.ticketCount} ticket(s)
+                </span>
               </div>
-            ) : <strong>Aucun ticket disponible.</strong>}
-            <small>Longueur estimée : {preview.estimatedLengthMm} mm par ticket</small>
-          </div>
-          <div className="print-history-list">
-            <h3>Historique d'impression</h3>
-            {printHistory.length > 0 ? (
-              printHistory.slice(0, 4).map((entry) => (
-                <div className="print-history-row" key={entry.id}>
-                  <strong>{entry.userMessage}</strong>
-                  <span>
-                    {entry.printerName} · {printFormatLabel(entry.format)} · {entry.ticketCount} ticket(s)
-                  </span>
-                </div>
-              ))
-            ) : (
-              <p>Aucune impression préparée pour ce lot.</p>
-            )}
-          </div>
+            ))
+          ) : (
+            <p>Aucune impression préparée pour ce lot.</p>
+          )}
         </div>
       </Card>
     </div>

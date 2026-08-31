@@ -60,3 +60,26 @@ autoticket-ne.com, www.autoticket-ne.com {
 		format json
 	}
 }
+
+
+vpsmonitoring.ticketpro-ne.com {
+	encode zstd gzip
+
+	basic_auth {
+		admin $2a$14$4jKXzR1gM/.B5LTrb6tluOocDPKe/SoO3Ld2wS6CJRcyVgiVjz/0i
+	}
+
+	reverse_proxy 127.0.0.1:19999
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

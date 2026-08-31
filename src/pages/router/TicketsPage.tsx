@@ -67,7 +67,7 @@ import {
   type TicketSyncReport,
   type TicketSyncSummary
 } from "../../services/sync";
-import { ActionMenu, Badge, Button, Card, EmptyState, PageHeader } from "../../shared/ui";
+import { ActionMenu, AsyncStateCard, Badge, Button, Card, EmptyState, PageHeader } from "../../shared/ui";
 import type { AppStatus, IconComponent } from "../../shared/ui";
 import { formatInternationalPhone, normalizeInternationalPhone } from "../../shared/phone";
 import { TicketDisplaySettingsForm } from "./TicketDisplaySettingsForm";
@@ -112,6 +112,9 @@ export function TicketsPage() {
   const { routerId = "routeur-demo" } = useParams();
   const { database, isInitialized, isPersistent } = useAppDatabase();
   const [tickets, setTickets] = useState<TicketListItem[]>(() => (isPersistent ? [] : createDemoTickets()));
+  const [isLoadingTickets, setIsLoadingTickets] = useState(isPersistent);
+  const [ticketLoadError, setTicketLoadError] = useState<string | null>(null);
+  const [ticketLoadToken, setTicketLoadToken] = useState(0);
   const [filters, setFilters] = useState<TicketFilters>(emptyTicketFilters);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -296,18 +299,7 @@ export function TicketsPage() {
     let mounted = true;
     const accountId = session.account_id;
 
-    async function loadTickets() {
-      try {
-        await organizationTicketCatalog?.publishRouter(routerId);
-      } catch {
-        // Les profils en lecture seule ne publient rien vers le catalogue.
-      }
-      try {
-        await organizationTicketCatalog?.pullRouter(routerId);
-      } catch {
-        // La base locale reste disponible hors ligne. Une prochaine ouverture,
-        // reprise de focus ou synchronisation récupérera le catalogue partagé.
-      }
+    async function readLocalTickets(): Promise<number> {
       const [records, plans, router, files] = await Promise.all([
         ticketRepository.listByRouter(routerId),
         planRepository.listByRouter(routerId),
@@ -320,15 +312,49 @@ export function TicketsPage() {
         .filter((record) => record.account_id === accountId)
         .map((record) => ticketFromRecord(record, planById.get(record.plan_id) ?? null, router?.name ?? routerId, fileByBatch.get(record.batch_id) ?? null));
       if (mounted) setTickets(items);
+      return items.length;
     }
 
-    void loadTickets().catch((loadError) => {
-      if (mounted) setError(loadError instanceof Error ? loadError.message : "Impossible de charger les vouchers.");
-    });
+    async function loadTickets() {
+      setIsLoadingTickets(true);
+      setTicketLoadError(null);
+
+      // Read SQLite first so vouchers created on this PC are immediately available.
+      await readLocalTickets();
+      try {
+        await organizationTicketCatalog?.publishRouter(routerId);
+      } catch {
+        // Les profils en lecture seule ne publient rien vers le catalogue.
+      }
+      let catalogPullError: unknown = null;
+      try {
+        await organizationTicketCatalog?.pullRouter(routerId);
+      } catch (pullError) {
+        catalogPullError = pullError;
+        // La base locale reste disponible hors ligne. Une prochaine ouverture,
+        // reprise de focus ou synchronisation récupérera le catalogue partagé.
+      }
+      // Read again after the organization catalog may have imported shared vouchers.
+      const finalTicketCount = await readLocalTickets();
+      if (catalogPullError && finalTicketCount === 0) {
+        throw new Error("Aucun voucher local et le catalogue de l'organisation n'a pas pu être récupéré.");
+      }
+    }
+
+    void loadTickets()
+      .catch((loadError) => {
+        if (!mounted) return;
+        const detail = loadError instanceof Error ? loadError.message : "Impossible de charger les vouchers.";
+        setTicketLoadError(detail);
+        setError(detail);
+      })
+      .finally(() => {
+        if (mounted) setIsLoadingTickets(false);
+      });
     return () => {
       mounted = false;
     };
-  }, [generatedFileRepository, isInitialized, isPersistent, organizationTicketCatalog, planRepository, routerId, routerRepository, session, ticketRepository]);
+  }, [generatedFileRepository, isInitialized, isPersistent, organizationTicketCatalog, planRepository, routerId, routerRepository, session, ticketLoadToken, ticketRepository]);
 
   useEffect(() => {
     if (!isPersistent || !isInitialized || !session || !organizationTicketCatalog) return undefined;
@@ -970,6 +996,28 @@ export function TicketsPage() {
     // Router identity/service changes intentionally restart the real-time loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveRouterService, isPersistent, routerId]);
+
+  if (isPersistent && tickets.length === 0 && (isLoadingTickets || ticketLoadError)) {
+    return (
+      <div className="page-stack">
+        <PageHeader
+          description="État réel des vouchers enregistrés dans TicketPro et présents sur le MikroTik."
+          eyebrow="Routeur"
+          title="Tickets"
+        />
+        <AsyncStateCard
+          description="TicketPro rassemble les vouchers locaux et ceux partagés dans l'organisation avant d'afficher la liste."
+          errorDescription={ticketLoadError ?? "Vérifiez la connexion puis relancez la récupération."}
+          errorTitle="Impossible de charger les vouchers"
+          loadingDescription="Lecture de SQLite, récupération du catalogue organisationnel et consolidation des tickets."
+          loadingTitle="Récupération des vouchers…"
+          onRetry={() => setTicketLoadToken((current) => current + 1)}
+          status={ticketLoadError ? "error" : "loading"}
+          title="Préparation des tickets"
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="page-stack">
