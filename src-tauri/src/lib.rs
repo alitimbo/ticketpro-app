@@ -35,6 +35,7 @@ pub fn run() {
             licensing::license_sign_device_payload,
             licensing::license_unprotect_value,
             mikrotik::mikrotik_api_call,
+            mikrotik::mikrotik_api_batch,
             printing::print_file,
             printing::print_list_printers,
             vpn::vpn_apply_config,

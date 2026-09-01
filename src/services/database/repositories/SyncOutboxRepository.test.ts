@@ -32,6 +32,34 @@ describe("SyncOutboxRepository", () => {
     expect(await repository.listByAccount("account-1")).toHaveLength(1_000);
   });
 
+  it("verrouille et confirme 500 opérations en transactions groupées", async () => {
+    const repository = new SyncOutboxRepository(new InMemoryDatabaseClient());
+    const created = await repository.enqueueMany(Array.from({ length: 500 }, (_, index) =>
+      operation({
+        aggregate_id: `ticket-state-${index}`,
+        id: `state-${index}`,
+        idempotency_key: `routeros:create:state-${index}`
+      })
+    ));
+
+    const claimed = await repository.claimMany(created.map((item) => item.id), "account-1");
+    expect(claimed.size).toBe(500);
+    expect([...claimed.values()].every((item) => item.status === "processing")).toBe(true);
+
+    await repository.markRetryMany(created.map((item) => item.id), "account-1", {
+      code: "LAB_RETRY",
+      message: "Coupure simulée",
+      nextAttemptAt: "2026-09-01T12:00:00.000Z"
+    });
+    expect((await repository.listByAccount("account-1"))
+      .every((item) => item.status === "retry" && item.locked_at === null)).toBe(true);
+    expect((await repository.claimMany(created.map((item) => item.id), "account-1")).size).toBe(500);
+
+    await repository.markSucceededMany(created.map((item) => item.id), "account-1");
+    expect((await repository.listByAccount("account-1"))
+      .every((item) => item.status === "succeeded")).toBe(true);
+  });
+
   it("refuse les secrets dans la charge durable", async () => {
     const repository = new SyncOutboxRepository(new InMemoryDatabaseClient());
     await expect(repository.enqueue(operation({

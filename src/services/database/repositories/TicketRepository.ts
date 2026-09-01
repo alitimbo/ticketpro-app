@@ -231,6 +231,76 @@ export class TicketRepository {
     return updated;
   }
 
+  async confirmRouterBatch(inputs: CreateTicketInput[]): Promise<void> {
+    if (inputs.length === 0) return;
+    inputs.forEach((input) => assertAccountProfileOwnership(input.account_id, input.created_by_profile_id));
+
+    for (let offset = 0; offset < inputs.length; offset += TICKET_UPDATE_CHUNK_SIZE) {
+      const chunk = inputs.slice(offset, offset + TICKET_UPDATE_CHUNK_SIZE);
+      await this.database.transaction(chunk.map((input) => ({
+        params: [
+          input.status,
+          input.mac_address,
+          input.ip_address,
+          input.activated_at,
+          input.completed_at,
+          input.expires_at,
+          input.deleted_at,
+          input.printed_count,
+          input.downloaded_bytes,
+          input.uploaded_bytes,
+          input.mikrotik_id,
+          input.sync_status ?? "synced",
+          input.hotspot_server_name ?? "all",
+          input.mikrotik_profile_name ?? null,
+          input.exported_at ?? null,
+          input.archived_at ?? null,
+          input.router_deleted_at ?? null,
+          input.last_router_sync_at ?? new Date().toISOString(),
+          input.uptime_seconds ?? 0,
+          input.remaining_seconds ?? null,
+          input.data_remaining_bytes ?? null,
+          input.duration_minutes_snapshot ?? null,
+          input.validity_minutes_snapshot ?? null,
+          input.data_limit_mb_snapshot ?? null,
+          input.download_limit_snapshot ?? null,
+          input.upload_limit_snapshot ?? null,
+          input.shared_users_snapshot ?? null,
+          input.updated_at ?? new Date().toISOString(),
+          input.id,
+          input.account_id
+        ],
+        sql: `UPDATE tickets SET
+          status = ?1, mac_address = ?2, ip_address = ?3, activated_at = ?4, completed_at = ?5,
+          expires_at = ?6, deleted_at = ?7, printed_count = ?8, downloaded_bytes = ?9,
+          uploaded_bytes = ?10, mikrotik_id = ?11, sync_status = ?12,
+          hotspot_server_name = ?13, mikrotik_profile_name = ?14, exported_at = ?15,
+          archived_at = ?16, router_deleted_at = ?17, last_router_sync_at = ?18,
+          uptime_seconds = ?19, remaining_seconds = ?20, data_remaining_bytes = ?21,
+          duration_minutes_snapshot = ?22, validity_minutes_snapshot = ?23,
+          data_limit_mb_snapshot = ?24, download_limit_snapshot = ?25,
+          upload_limit_snapshot = ?26, shared_users_snapshot = ?27, updated_at = ?28
+        WHERE id = ?29 AND account_id = ?30`
+      })));
+    }
+  }
+
+  async markExportedMany(
+    ids: string[],
+    accountId: string,
+    exportedAt: string
+  ): Promise<void> {
+    const uniqueIds = [...new Set(ids)];
+    for (let offset = 0; offset < uniqueIds.length; offset += TICKET_EXPORT_CHUNK_SIZE) {
+      const chunk = uniqueIds.slice(offset, offset + TICKET_EXPORT_CHUNK_SIZE);
+      await this.database.transaction(chunk.map((id) => ({
+        params: [exportedAt, id, accountId],
+        sql: `UPDATE tickets SET exported_at = ?1, updated_at = ?1
+          WHERE id = ?2 AND account_id = ?3`
+      })));
+    }
+  }
+
   async listByBatch(batchId: string): Promise<TicketRecord[]> {
     return this.database.query<TicketRecord>("SELECT * FROM tickets WHERE batch_id = ?1 ORDER BY created_at ASC", [batchId]);
   }
@@ -290,6 +360,9 @@ export class TicketRepository {
     );
   }
 }
+
+const TICKET_UPDATE_CHUNK_SIZE = 500;
+const TICKET_EXPORT_CHUNK_SIZE = 400;
 
 function commercialSnapshotValues(current: TicketRecord | null, input: CreateTicketInput) {
   const mutable = !current || canApplyPlanChangeToVoucher(current);

@@ -29,8 +29,27 @@ export type RouterOsApiRequest = RouterOsApiConfig & {
 
 export type RouterOsApiRow = Record<string, string>;
 
+export type RouterOsApiBatchCommand = Pick<
+  RouterOsApiRequest,
+  "command" | "params" | "queries"
+>;
+
+export type RouterOsApiBatchItemResult = {
+  error: string | null;
+  rows: RouterOsApiRow[];
+};
+
+export type RouterOsApiBatchResponse = {
+  completedCount: number;
+  connectionError: string | null;
+  results: RouterOsApiBatchItemResult[];
+};
+
 export interface RouterOsApiTransport {
   call(request: RouterOsApiRequest): Promise<RouterOsApiRow[]>;
+  callBatch?(
+    request: RouterOsApiConfig & { commands: RouterOsApiBatchCommand[] }
+  ): Promise<RouterOsApiBatchResponse>;
 }
 
 export class TauriRouterOsApiTransport implements RouterOsApiTransport {
@@ -55,6 +74,32 @@ export class TauriRouterOsApiTransport implements RouterOsApiTransport {
           username: request.username
         }
       }).then((rows) => rows as RouterOsApiRow[])
+    );
+  }
+
+  async callBatch(
+    request: RouterOsApiConfig & { commands: RouterOsApiBatchCommand[] }
+  ): Promise<RouterOsApiBatchResponse> {
+    const endpoint = `${request.host.trim().toLowerCase()}:${request.port}`;
+    const limiter = getEndpointLimiter(endpoint);
+
+    return limiter.run(async () =>
+      this.invokeCommand("mikrotik_api_batch", {
+        request: {
+          commands: request.commands.map((command) => ({
+            command: command.command,
+            params: normalizeActionParams(command.params ?? {}),
+            queries: command.queries ?? {}
+          })),
+          host: request.host,
+          password: request.password,
+          port: request.port,
+          retries: request.retries ?? 1,
+          timeoutMs: request.timeoutMs ?? 5000,
+          useSsl: request.useSsl ?? false,
+          username: request.username
+        }
+      }).then((response) => response as RouterOsApiBatchResponse)
     );
   }
 }

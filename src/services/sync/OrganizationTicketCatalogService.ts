@@ -22,6 +22,7 @@ import { SyncOutboxError, SyncOutboxService, type SyncOutboxDrainReport } from "
 export type OrganizationTicketCatalogSyncResult = { importedBatches: number; importedTickets: number };
 
 export const CLOUD_TICKET_CATALOG_OPERATION = "cloud.ticket_catalog.publish";
+const CLOUD_TICKET_CATALOG_CHUNK_SIZE = 250;
 
 type CloudTicketCatalogPayload = Parameters<typeof saveSaasRouterTicketCatalog>[0];
 
@@ -78,7 +79,7 @@ export class OrganizationTicketCatalogService {
     const batch = await this.batches.findById(batchId);
     if (!batch || batch.account_id !== this.accountId || batch.router_id !== routerId) throw new Error("Lot local introuvable pour la synchronisation de l’organisation.");
     const tickets = (await this.tickets.listByBatch(batchId)).map(ticketToCloud);
-    const groups = tickets.length === 0 ? [[]] : chunk(tickets, 40);
+    const groups = tickets.length === 0 ? [[]] : chunk(tickets, CLOUD_TICKET_CATALOG_CHUNK_SIZE);
     const operationIds: string[] = [];
     for (let index = 0; index < groups.length; index += 1) {
       const payload: CloudTicketCatalogPayload = {

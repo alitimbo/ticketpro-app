@@ -9,7 +9,13 @@ import {
   normalizeMikroTikError,
   reconcileVoucherLifecycleComment
 } from "./MikroTikRouterAdapter";
-import type { RouterOsApiRequest, RouterOsApiRow, RouterOsApiTransport } from "./RouterOsApiTransport";
+import type {
+  RouterOsApiBatchCommand,
+  RouterOsApiBatchResponse,
+  RouterOsApiRequest,
+  RouterOsApiRow,
+  RouterOsApiTransport
+} from "./RouterOsApiTransport";
 
 class MockRouterOsTransport implements RouterOsApiTransport {
   readonly calls: RouterOsApiRequest[] = [];
@@ -94,6 +100,43 @@ class MockRouterOsTransport implements RouterOsApiTransport {
       return [];
     }
     return this.responses[request.command] ?? [];
+  }
+}
+
+class VoucherBatchRouterOsTransport implements RouterOsApiTransport {
+  readonly batchCalls: RouterOsApiBatchCommand[][] = [];
+  readonly calls: RouterOsApiRequest[] = [];
+  readonly users: RouterOsApiRow[] = [];
+
+  constructor(private interruptNextBatchAfter: number | null = null) {}
+
+  async call(request: RouterOsApiRequest): Promise<RouterOsApiRow[]> {
+    this.calls.push(request);
+    if (request.command === "/ip/hotspot/user/profile/print") {
+      return [{ ".id": "*P1", name: "plan-3h", "session-timeout": "3h", "shared-users": "1" }];
+    }
+    if (request.command === "/ip/hotspot/user/print") return [...this.users];
+    return [];
+  }
+
+  async callBatch(request: Parameters<NonNullable<RouterOsApiTransport["callBatch"]>>[0]): Promise<RouterOsApiBatchResponse> {
+    this.batchCalls.push(request.commands);
+    const completedCount = this.interruptNextBatchAfter === null
+      ? request.commands.length
+      : Math.min(this.interruptNextBatchAfter, request.commands.length);
+    const connectionError = this.interruptNextBatchAfter === null
+      ? null
+      : "router offline: injected connection reset";
+    this.interruptNextBatchAfter = null;
+    request.commands.slice(0, completedCount).forEach((command) => {
+      const params = stringParams(command.params);
+      this.users.push({ ".id": `*U${this.users.length + 1}`, ...params });
+    });
+    return {
+      completedCount,
+      connectionError,
+      results: request.commands.slice(0, completedCount).map(() => ({ error: null, rows: [] }))
+    };
   }
 }
 
@@ -797,6 +840,63 @@ describe("MikroTikRouterAdapter", () => {
     await expect(adapter.listHotspotUsers()).resolves.toEqual([
       expect.objectContaining({ status: "expired", username: "999999" })
     ]);
+  });
+
+  it("crée et confirme 500 vouchers avec cinq sessions RouterOS batch au lieu de 1500 sessions", async () => {
+    const transport = new VoucherBatchRouterOsTransport();
+    const drafts = Array.from({ length: 500 }, (_, index) => {
+      const username = String(700000 + index);
+      return {
+        comment: "TicketPro:batch:test-batch",
+        limitUptime: "3h",
+        passwordSecretRef: `secret://router-demo/${username}/password`,
+        planId: "plan-3h",
+        serverName: "hotspot1",
+        username,
+        validityMinutes: 180
+      };
+    });
+
+    const results = await createAdapter(transport).createHotspotUsersExactBatch(drafts);
+
+    expect(results).toHaveLength(500);
+    expect(results.every((result) => result.status === "confirmed")).toBe(true);
+    expect(transport.batchCalls).toHaveLength(5);
+    expect(transport.batchCalls.every((commands) => commands.length === 100)).toBe(true);
+    expect(transport.calls.filter((call) => call.command === "/ip/hotspot/user/profile/print")).toHaveLength(1);
+    expect(new Set(transport.users.map((user) => user.name)).size).toBe(500);
+    expect(transport.calls
+      .filter((call) => call.command === "/ip/hotspot/user/print")
+      .every((call) => !String(call.params?.[".proplist"] ?? "").includes("password")))
+      .toBe(true);
+  });
+
+  it("ne demande que les noms RouterOS lors du contrôle de collision avant génération", async () => {
+    const transport = new VoucherBatchRouterOsTransport();
+    transport.users.push({ name: "123456", password: "secret-inutile" });
+
+    await expect(createAdapter(transport).listHotspotUsernames()).resolves.toEqual([
+      { username: "123456" }
+    ]);
+    expect(transport.calls[transport.calls.length - 1]?.params).toEqual({ ".proplist": "name" });
+  });
+
+  it("reprend seulement les vouchers absents après une coupure au milieu d'un lot", async () => {
+    const transport = new VoucherBatchRouterOsTransport(17);
+    const drafts = Array.from({ length: 120 }, (_, index) => {
+      const username = String(800000 + index);
+      return {
+        passwordSecretRef: `secret://router-demo/${username}/password`,
+        planId: "plan-3h",
+        username
+      };
+    });
+
+    const results = await createAdapter(transport).createHotspotUsersExactBatch(drafts);
+
+    expect(results.every((result) => result.status === "confirmed")).toBe(true);
+    expect(transport.batchCalls.map((commands) => commands.length)).toEqual([100, 100, 3]);
+    expect(new Set(transport.users.map((user) => user.name)).size).toBe(120);
   });
 
   it("recherche un voucher précis sans charger tout le catalogue RouterOS", async () => {

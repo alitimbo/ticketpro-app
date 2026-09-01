@@ -106,6 +106,23 @@ describe("RouterService", () => {
     expect(translateRouterError("device_mode_flagged")).toContain("flagged");
   });
 
+  it("journalise une seule action métier pour une création exacte en lot", async () => {
+    const logs: RouterActionLog[] = [];
+    const service = new RouterService({
+      adapter: new FakeRouterAdapter({ latencyMs: 0 }),
+      logger: { write: (log) => { logs.push(log); } }
+    });
+
+    await service.createHotspotUsersExactBatch([
+      { passwordSecretRef: "secret://routeur-demo/910001/password", planId: "plan-jour", username: "910001" },
+      { passwordSecretRef: "secret://routeur-demo/910002/password", planId: "plan-jour", username: "910002" }
+    ]);
+
+    expect(logs).toEqual([
+      expect.objectContaining({ action: "createHotspotUsersExactBatch", level: "info" })
+    ]);
+  });
+
   it("simule les erreurs métier attendues", async () => {
     const service = new RouterService({ adapter: new FakeRouterAdapter({ latencyMs: 0 }) });
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { CheckCircle2, ChevronLeft, ChevronRight, FileText, Hash, Printer, RefreshCw, Settings, Ticket, Wifi } from "lucide-react";
-import type { HotspotPlan, HotspotServer, HotspotUser, RouterSummary } from "../../domain/router";
+import type { HotspotPlan, HotspotServer, RouterSummary } from "../../domain/router";
 import type {
   CreateGeneratedFileInput,
   CreateTicketBatchInput,
@@ -16,7 +16,6 @@ import {
   createPersistedRouterService,
   FakeRouterAdapter,
   RouterService,
-  RouterServiceError,
   type RouterActionLog
 } from "../../services/router";
 import {
@@ -713,7 +712,7 @@ export function TicketGenerationPage() {
         managedProfileNames: [selectedPlan.profileName]
       });
       const [existingUsers, existingLocalTickets, remotePlans, remoteServers] = await Promise.all([
-        generationService.listHotspotUsers(),
+        generationService.listHotspotUsernames(),
         isPersistent
           ? ticketRepository.listExistingUsernamesByRouter(state.selectedRouterId)
           : Promise.resolve([]),
@@ -833,216 +832,135 @@ export function TicketGenerationPage() {
         ? await voucherOutbox.enqueueTickets(pendingTickets)
         : new Map();
 
-      let processedTickets = 0;
       setGenerationProgress({
         completed: 0,
         label: `Création des ${requestedQuantity} vouchers sur RouterOS…`,
         phase: "creating",
         total: requestedQuantity
       });
-      await forEachWithConcurrency(generatedCredentials, 3, async (credential, credentialIndex) => {
-        const pendingTicket = pendingTickets[credentialIndex];
-        const voucherOperation = voucherOperations.get(pendingTicket.id);
-        let operationClaimed = false;
-        try {
-          if (voucherOutbox && voucherOperation) {
-            const claimed = await voucherOutbox.begin(voucherOperation.id);
-            if (!claimed) {
-              throw new Error(`La commande durable du voucher ${credential.username} est déjà en cours.`);
-            }
-            operationClaimed = true;
-          }
-          const createdUser = await generationService.createHotspotUser({
-            comment: buildVoucherBatchOwnershipComment(batchId),
-            limitBytesTotal: selectedPlan.dataLimitMb === null
-              ? null
-              : Math.round(selectedPlan.dataLimitMb * 1024 * 1024),
-            limitUptime: minutesToRouterOsDuration(selectedPlan.durationMinutes),
-            passwordSecretRef: credential.passwordSecretRef,
-            planId: state.selectedPlanId,
-            serverName: selectedRemoteServer,
-            username: credential.username,
-            validityMinutes: selectedPlan.validityMinutes ?? selectedPlan.durationMinutes
-          });
-
-          const succeededTicket = userToTicketRecord({
-            accountId: session.account_id,
-            batchId,
-            createdByProfileId: session.internal_profile_id,
-            createdByProfile: session.internal_profile_role,
-            routerId: state.selectedRouterId,
-            passwordSecretRef: credential.passwordSecretRef,
-            planId: state.selectedPlanId,
-            planSnapshot: selectedPlan,
-            user: createdUser
-          });
-          succeededTickets.push(succeededTicket);
-          if (isPersistent) {
-            if (voucherOutbox && voucherOperation) {
-              await voucherOutbox.complete(voucherOperation.id, succeededTicket);
-            } else {
-              await ticketRepository.update(succeededTicket);
-            }
-          }
-        } catch (creationError) {
-          const creationErrorMessage = readGenerationError(
-            creationError,
-            "RouterOS a refusé la création du voucher."
+      const operationEntries = pendingTickets
+        .map((ticket) => {
+          const operation = voucherOperations.get(ticket.id);
+          return operation ? { operation, ticket } : null;
+        })
+        .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+      if (voucherOutbox) {
+        const claimed = await voucherOutbox.beginMany(
+          operationEntries.map(({ operation }) => operation.id)
+        );
+        if (claimed.size !== pendingTickets.length) {
+          await voucherOutbox.deferMany(
+            [...claimed.keys()],
+            new Error("Le verrouillage groupé de la file durable est incomplet.")
           );
-          firstCreationError ??= creationErrorMessage;
-          let recoveredUser: HotspotUser | null = null;
-
-          if (isPersistent) {
-            try {
-              recoveredUser = await generationService.findHotspotUser(credential.username);
-            } catch {
-              recoveredUser = null;
-            }
-          }
-
-          if (
-            recoveredUser
-            && recoveredUser.profileName === selectedPlan.profileName
-            && voucherBelongsToBatch(recoveredUser.comment, batchId)
-          ) {
-            const succeededTicket = userToTicketRecord({
-              accountId: session.account_id,
-              batchId,
-              createdByProfileId: session.internal_profile_id,
-              createdByProfile: session.internal_profile_role,
-              passwordSecretRef: credential.passwordSecretRef,
-              planId: state.selectedPlanId,
-              planSnapshot: selectedPlan,
-              routerId: state.selectedRouterId,
-              user: recoveredUser
-            });
-            succeededTickets.push(succeededTicket);
-            if (voucherOutbox && voucherOperation) {
-              await voucherOutbox.complete(voucherOperation.id, succeededTicket);
-            } else if (isPersistent) {
-              await ticketRepository.update(succeededTicket);
-            }
-            return;
-          }
-
-          if (voucherOutbox && voucherOperation && operationClaimed) {
-            await voucherOutbox.defer(voucherOperation.id, creationError);
-          }
-          failedTickets.push(pendingTicket);
-          setLogs((current) => [
-            ...current,
-            {
-              action: "createHotspotUser",
-              level: "error",
-              technicalCode: creationError instanceof RouterServiceError ? creationError.code : undefined,
-              technicalMessage: creationError instanceof RouterServiceError
-                ? creationError.technicalMessage
-                : creationErrorMessage,
-              userMessage: `Le voucher ${credential.username} reste en attente : ${creationErrorMessage}`
-            }
-          ]);
-        } finally {
-          processedTickets += 1;
-          setGenerationProgress({
-            completed: processedTickets,
-            label: `${processedTickets}/${requestedQuantity} vouchers traités sur RouterOS`,
-            phase: "creating",
-            total: requestedQuantity
-          });
-        }
-      });
-
-      // RouterOS can apply an add command even when the API response times out.
-      // Re-read the complete batch before deciding which vouchers may be printed.
-      setGenerationProgress({
-        completed: requestedQuantity,
-        label: "Vérification exacte du lot sur RouterOS…",
-        phase: "verifying",
-        total: requestedQuantity
-      });
-      const confirmedByUsername = new Map(
-        succeededTickets.map((ticket) => [ticket.username, ticket] as const)
-      );
-      const pendingByUsername = new Map(
-        pendingTickets.map((ticket) => [ticket.username, ticket] as const)
-      );
-      const reconciliationDelays = [0, 500, 1_200];
-
-      for (const reconciliationDelay of reconciliationDelays) {
-        if (confirmedByUsername.size === pendingTickets.length) break;
-        if (reconciliationDelay > 0) await waitForRouterOs(reconciliationDelay);
-
-        try {
-          const routerUsers = await generationService.listHotspotUsers();
-          const confirmedUsers = findConfirmedVoucherBatchUsers({
-            batchId,
-            pendingTickets,
-            profileName: selectedPlan.profileName,
-            routerUsers
-          });
-
-          for (const confirmedUser of confirmedUsers) {
-            if (confirmedByUsername.has(confirmedUser.username)) continue;
-            const pendingTicket = pendingByUsername.get(confirmedUser.username);
-            if (!pendingTicket) continue;
-
-            const confirmedTicket = userToTicketRecord({
-              accountId: session.account_id,
-              batchId,
-              createdByProfileId: session.internal_profile_id,
-              createdByProfile: session.internal_profile_role,
-              passwordSecretRef: pendingTicket.password_encrypted,
-              planId: state.selectedPlanId,
-              planSnapshot: selectedPlan,
-              routerId: state.selectedRouterId,
-              user: confirmedUser
-            });
-            const voucherOperation = voucherOperations.get(pendingTicket.id);
-            if (voucherOutbox && voucherOperation) {
-              await voucherOutbox.complete(voucherOperation.id, confirmedTicket);
-            } else if (isPersistent) {
-              await ticketRepository.update(confirmedTicket);
-            }
-            confirmedByUsername.set(confirmedUser.username, confirmedTicket);
-          }
-        } catch (reconciliationError) {
-          firstCreationError ??= readGenerationError(
-            reconciliationError,
-            "La relecture finale du lot sur RouterOS a échoué."
+          throw new Error(
+            `La file durable n'a verrouillé que ${claimed.size}/${pendingTickets.length} vouchers. Aucun envoi incomplet n'a été lancé.`
           );
         }
       }
 
-      const finalRouterUsers = await generationService.listHotspotUsers();
-      const finalConfirmedUsers = findConfirmedVoucherBatchUsers({
-        batchId,
-        pendingTickets,
-        profileName: selectedPlan.profileName,
-        routerUsers: finalRouterUsers
-      });
-      for (const confirmedUser of finalConfirmedUsers) {
-        if (confirmedByUsername.has(confirmedUser.username)) continue;
-        const pendingTicket = pendingByUsername.get(confirmedUser.username);
-        if (!pendingTicket) continue;
-
-        const confirmedTicket = userToTicketRecord({
-          accountId: session.account_id,
-          batchId,
-          createdByProfileId: session.internal_profile_id,
-          createdByProfile: session.internal_profile_role,
-          passwordSecretRef: pendingTicket.password_encrypted,
-          planId: state.selectedPlanId,
-          planSnapshot: selectedPlan,
-          routerId: state.selectedRouterId,
-          user: confirmedUser
-        });
-        const voucherOperation = voucherOperations.get(pendingTicket.id);
-        if (voucherOutbox && voucherOperation) {
-          await voucherOutbox.complete(voucherOperation.id, confirmedTicket);
-        } else if (isPersistent) {
-          await ticketRepository.update(confirmedTicket);
+      const voucherDrafts = generatedCredentials.map((credential) => ({
+        comment: buildVoucherBatchOwnershipComment(batchId),
+        limitBytesTotal: selectedPlan.dataLimitMb === null
+          ? null
+          : Math.round(selectedPlan.dataLimitMb * 1024 * 1024),
+        limitUptime: minutesToRouterOsDuration(selectedPlan.durationMinutes),
+        passwordSecretRef: credential.passwordSecretRef,
+        planId: state.selectedPlanId,
+        serverName: selectedRemoteServer,
+        username: credential.username,
+        validityMinutes: selectedPlan.validityMinutes ?? selectedPlan.durationMinutes
+      }));
+      let creationResults: Awaited<ReturnType<typeof generationService.createHotspotUsersExactBatch>>;
+      try {
+        creationResults = await generationService.createHotspotUsersExactBatch(
+          voucherDrafts,
+          (progress) => setGenerationProgress({
+            completed: progress.completed,
+            label: progress.phase === "verifying"
+              ? `Vérification exacte : ${progress.completed}/${requestedQuantity} vouchers confirmés`
+              : `Création groupée : ${progress.completed}/${requestedQuantity} vouchers confirmés`,
+            phase: progress.phase,
+            total: requestedQuantity
+          })
+        );
+      } catch (creationError) {
+        if (voucherOutbox) {
+          await voucherOutbox.deferMany(
+            operationEntries.map(({ operation }) => operation.id),
+            creationError
+          );
         }
-        confirmedByUsername.set(confirmedUser.username, confirmedTicket);
+        throw creationError;
+      }
+
+      const resultByUsername = new Map(
+        creationResults.map((result) => [result.username, result] as const)
+      );
+      setGenerationProgress({
+        completed: requestedQuantity,
+        label: "Vérification finale du lot complet sur RouterOS…",
+        phase: "verifying",
+        total: requestedQuantity
+      });
+      const finalRouterUsers = await generationService.listHotspotUsersForVerification();
+      const confirmedRouterByUsername = new Map(
+        findConfirmedVoucherBatchUsers({
+          batchId,
+          pendingTickets,
+          profileName: selectedPlan.profileName,
+          routerUsers: finalRouterUsers
+        }).map((user) => [user.username, user] as const)
+      );
+      const confirmedByUsername = new Map<string, CreateTicketInput>();
+      const completionEntries: Array<{ operationId: string; ticket: CreateTicketInput }> = [];
+      const failureEntries: Array<{ message: string; operationId?: string; ticket: CreateTicketInput }> = [];
+
+      pendingTickets.forEach((pendingTicket) => {
+        const result = resultByUsername.get(pendingTicket.username);
+        const confirmedUser = confirmedRouterByUsername.get(pendingTicket.username);
+        const operation = voucherOperations.get(pendingTicket.id);
+        if (
+          result?.status === "confirmed"
+          && confirmedUser
+          && confirmedUser.profileName === selectedPlan.profileName
+          && voucherBelongsToBatch(confirmedUser.comment, batchId)
+        ) {
+          const confirmedTicket = userToTicketRecord({
+            accountId: session.account_id,
+            batchId,
+            createdByProfileId: session.internal_profile_id,
+            createdByProfile: session.internal_profile_role,
+            passwordSecretRef: pendingTicket.password_encrypted,
+            planId: state.selectedPlanId,
+            planSnapshot: selectedPlan,
+            routerId: state.selectedRouterId,
+            user: confirmedUser
+          });
+          confirmedByUsername.set(confirmedUser.username, confirmedTicket);
+          if (operation) completionEntries.push({ operationId: operation.id, ticket: confirmedTicket });
+          return;
+        }
+
+        const message = result?.message
+          ?? (confirmedUser
+            ? `Le voucher existe mais n'appartient pas exactement au lot ${batchId}.`
+            : "RouterOS n'a pas confirmé ce voucher.");
+        firstCreationError ??= message;
+        failureEntries.push({ message, operationId: operation?.id, ticket: pendingTicket });
+      });
+
+      if (isPersistent) {
+        if (voucherOutbox) {
+          await voucherOutbox.completeMany(completionEntries);
+          await mapWithConcurrency(
+            failureEntries.filter((entry) => Boolean(entry.operationId)),
+            8,
+            (entry) => voucherOutbox.defer(entry.operationId!, new Error(entry.message))
+          );
+        } else {
+          await ticketRepository.confirmRouterBatch([...confirmedByUsername.values()]);
+        }
       }
 
       const routerIntegrity = inspectVoucherBatchIntegrity({
@@ -1062,6 +980,17 @@ export function TicketGenerationPage() {
         .map((ticket) => confirmedByUsername.get(ticket.username))
         .filter((ticket): ticket is CreateTicketInput => Boolean(ticket));
       failedTickets = pendingTickets.filter((ticket) => !confirmedByUsername.has(ticket.username));
+
+      if (failureEntries.length > 0) {
+        setLogs((current) => [
+          ...current,
+          {
+            action: "createHotspotUsersExactBatch",
+            level: "error",
+            userMessage: `${failureEntries.length} voucher(s) non confirmé(s). Premier détail : ${failureEntries[0].message}`
+          }
+        ]);
+      }
 
       if (isPersistent) {
         setGenerationProgress({
@@ -1251,10 +1180,12 @@ export function TicketGenerationPage() {
       }
     }
     if (isPersistent) {
-      await Promise.all(pdfTickets.map(async (ticket) => {
-        ticket.exported_at = generatedAt;
-        await ticketRepository.update(ticket);
-      }));
+      await ticketRepository.markExportedMany(
+        pdfTickets.map((ticket) => ticket.id),
+        session!.account_id,
+        generatedAt
+      );
+      pdfTickets.forEach((ticket) => { ticket.exported_at = generatedAt; });
       setTickets((current) => current.map((ticket) =>
         pdfTickets.some((exported) => exported.id === ticket.id)
           ? { ...ticket, exported_at: generatedAt }
@@ -2403,10 +2334,6 @@ function assertExactLocalTicketBatch(
       + "Le PDF reste bloqué jusqu'à une synchronisation complète."
     );
   }
-}
-
-function waitForRouterOs(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
 function readGenerationError(error: unknown, fallback: string): string {

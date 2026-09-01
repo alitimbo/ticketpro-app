@@ -1,5 +1,5 @@
 use native_tls::{TlsConnector, TlsStream};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -19,6 +19,42 @@ pub struct MikroTikApiRequest {
     command: String,
     params: Option<HashMap<String, Value>>,
     queries: Option<HashMap<String, Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MikroTikApiBatchRequest {
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    use_ssl: bool,
+    timeout_ms: Option<u64>,
+    retries: Option<u8>,
+    commands: Vec<MikroTikApiBatchCommand>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MikroTikApiBatchCommand {
+    command: String,
+    params: Option<HashMap<String, Value>>,
+    queries: Option<HashMap<String, Value>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MikroTikApiBatchItemResult {
+    rows: Vec<ApiRow>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MikroTikApiBatchResponse {
+    completed_count: usize,
+    connection_error: Option<String>,
+    results: Vec<MikroTikApiBatchItemResult>,
 }
 
 pub type ApiRow = HashMap<String, String>;
@@ -60,6 +96,86 @@ pub async fn mikrotik_api_call(request: MikroTikApiRequest) -> Result<Vec<ApiRow
         .map_err(|error| format!("router offline: tâche RouterOS interrompue: {error}"))?
 }
 
+#[tauri::command]
+pub async fn mikrotik_api_batch(
+    request: MikroTikApiBatchRequest,
+) -> Result<MikroTikApiBatchResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || mikrotik_api_batch_blocking(request))
+        .await
+        .map_err(|error| format!("router offline: batch RouterOS interrompu: {error}"))?
+}
+
+fn mikrotik_api_batch_blocking(
+    request: MikroTikApiBatchRequest,
+) -> Result<MikroTikApiBatchResponse, String> {
+    if request.commands.is_empty() || request.commands.len() > 1_000 {
+        return Err("router rejected: batch size must be between 1 and 1000".to_string());
+    }
+
+    let retries = request.retries.unwrap_or(1);
+    let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(5000));
+    let mut connected_stream = None;
+    let mut last_error = "router offline".to_string();
+
+    // Reconnecting is safe only before the first business command. Once an
+    // add has been sent, the caller reconciles by username instead of
+    // replaying an uncertain command and risking a duplicate voucher.
+    for attempt in 0..=retries {
+        match open_authenticated_stream(
+            &request.host,
+            request.port,
+            &request.username,
+            &request.password,
+            request.use_ssl,
+            timeout,
+        ) {
+            Ok(stream) => {
+                connected_stream = Some(stream);
+                break;
+            }
+            Err(error) => {
+                last_error = error;
+                if is_non_retryable(&last_error) || attempt == retries {
+                    break;
+                }
+            }
+        }
+    }
+
+    let Some(mut stream) = connected_stream else {
+        return Err(last_error);
+    };
+    let mut results = Vec::with_capacity(request.commands.len());
+    let mut connection_error = None;
+
+    for command in &request.commands {
+        let mut words = vec![command.command.clone()];
+        append_api_words(&mut words, "=", command.params.as_ref());
+        append_api_words(&mut words, "?", command.queries.as_ref());
+
+        if let Err(error) = send_sentence(&mut stream, &words) {
+            connection_error = Some(error);
+            break;
+        }
+        match read_response_outcome(&mut stream) {
+            Ok(outcome) => results.push(MikroTikApiBatchItemResult {
+                error: outcome.error,
+                rows: outcome.rows,
+            }),
+            Err(error) => {
+                connection_error = Some(error);
+                break;
+            }
+        }
+    }
+
+    Ok(MikroTikApiBatchResponse {
+        completed_count: results.len(),
+        connection_error,
+        results,
+    })
+}
+
 fn mikrotik_api_call_blocking(request: MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
     let retries = request.retries.unwrap_or(1);
     let mut last_error = "router offline".to_string();
@@ -80,9 +196,15 @@ fn mikrotik_api_call_blocking(request: MikroTikApiRequest) -> Result<Vec<ApiRow>
     Err(last_error)
 }
 
-fn execute_once(request: &MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
-    let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(5000));
-    let address = (request.host.as_str(), request.port)
+fn open_authenticated_stream(
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    use_ssl: bool,
+    timeout: Duration,
+) -> Result<ApiStream, String> {
+    let address = (host, port)
         .to_socket_addrs()
         .map_err(|error| format!("router offline: address unavailable: {error}"))?
         .next()
@@ -96,41 +218,45 @@ fn execute_once(request: &MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
         .set_write_timeout(Some(timeout))
         .map_err(|error| format!("timeout: write timeout unavailable: {error}"))?;
 
-    if request.use_ssl {
+    let mut stream = if use_ssl {
         let connector =
-            TlsConnector::new().map_err(|error| format!("api ssl: TLS indisponible: {error}"))?;
-        let mut stream = ApiStream::Tls(
+            TlsConnector::new().map_err(|error| format!("api ssl: TLS unavailable: {error}"))?;
+        ApiStream::Tls(
             connector
-                .connect(&request.host, stream)
-                .map_err(|error| format!("api ssl: négociation TLS échouée: {error}"))?,
-        );
-        execute_session(&mut stream, request)
+                .connect(host, stream)
+                .map_err(|error| format!("api ssl: TLS negotiation failed: {error}"))?,
+        )
     } else {
-        let mut stream = ApiStream::Tcp(stream);
-        execute_session(&mut stream, request)
-    }
-}
+        ApiStream::Tcp(stream)
+    };
 
-fn execute_session<S: Read + Write>(
-    stream: &mut S,
-    request: &MikroTikApiRequest,
-) -> Result<Vec<ApiRow>, String> {
     send_sentence(
-        stream,
+        &mut stream,
         &[
             "/login".to_string(),
-            format!("=name={}", request.username),
-            format!("=password={}", request.password),
+            format!("=name={username}"),
+            format!("=password={password}"),
         ],
     )?;
-    read_response(stream)?;
+    read_response(&mut stream)?;
+    Ok(stream)
+}
 
+fn execute_once(request: &MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
+    let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(5000));
+    let mut stream = open_authenticated_stream(
+        &request.host,
+        request.port,
+        &request.username,
+        &request.password,
+        request.use_ssl,
+        timeout,
+    )?;
     let mut words = vec![request.command.clone()];
     append_api_words(&mut words, "=", request.params.as_ref());
     append_api_words(&mut words, "?", request.queries.as_ref());
-
-    send_sentence(stream, &words)?;
-    read_response(stream)
+    send_sentence(&mut stream, &words)?;
+    read_response(&mut stream)
 }
 
 fn append_api_words(
@@ -169,7 +295,21 @@ fn send_sentence<S: Read + Write>(stream: &mut S, words: &[String]) -> Result<()
 }
 
 fn read_response<S: Read + Write>(stream: &mut S) -> Result<Vec<ApiRow>, String> {
+    let outcome = read_response_outcome(stream)?;
+    match outcome.error {
+        Some(error) => Err(error),
+        None => Ok(outcome.rows),
+    }
+}
+
+struct ApiCommandOutcome {
+    rows: Vec<ApiRow>,
+    error: Option<String>,
+}
+
+fn read_response_outcome<S: Read + Write>(stream: &mut S) -> Result<ApiCommandOutcome, String> {
     let mut rows = Vec::new();
+    let mut command_error = None;
 
     loop {
         let words = read_sentence(stream)?;
@@ -179,9 +319,17 @@ fn read_response<S: Read + Write>(stream: &mut S) -> Result<Vec<ApiRow>, String>
         }
 
         match words[0].as_str() {
-            "!done" => return Ok(rows),
+            "!done" => {
+                return Ok(ApiCommandOutcome {
+                    rows,
+                    error: command_error,
+                })
+            }
             "!re" => rows.push(words_to_row(&words[1..])),
-            "!trap" => return Err(map_trap(words_to_row(&words[1..]))),
+            // A trapped command is terminated by a separate !done sentence.
+            // Consume it before the next command so batch responses cannot
+            // become shifted from one voucher to another.
+            "!trap" => command_error = Some(map_trap(words_to_row(&words[1..]))),
             "!fatal" => return Err("router offline: fatal API response".to_string()),
             _ => {}
         }
@@ -365,6 +513,7 @@ fn is_non_retryable(error: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::{Cursor, Seek, SeekFrom};
 
     #[test]
     fn encodes_attributes_and_queries_with_distinct_routeros_prefixes() {
@@ -387,5 +536,36 @@ mod tests {
     fn omits_null_values_but_preserves_empty_strings() {
         assert_eq!(serialize_api_value(&Value::Null), None);
         assert_eq!(serialize_api_value(&json!("")), Some(String::new()));
+    }
+
+    #[test]
+    fn consumes_trap_terminator_before_reading_the_next_batch_response() {
+        let mut stream = Cursor::new(Vec::<u8>::new());
+        send_sentence(
+            &mut stream,
+            &[
+                "!trap".to_string(),
+                "=message=user already exists".to_string(),
+            ],
+        )
+        .unwrap();
+        send_sentence(&mut stream, &["!done".to_string()]).unwrap();
+        send_sentence(
+            &mut stream,
+            &["!re".to_string(), "=name=654321".to_string()],
+        )
+        .unwrap();
+        send_sentence(&mut stream, &["!done".to_string()]).unwrap();
+        stream.seek(SeekFrom::Start(0)).unwrap();
+
+        let trapped = read_response_outcome(&mut stream).unwrap();
+        assert_eq!(trapped.error.as_deref(), Some("duplicate user"));
+
+        let following = read_response_outcome(&mut stream).unwrap();
+        assert_eq!(following.error, None);
+        assert_eq!(
+            following.rows[0].get("name").map(String::as_str),
+            Some("654321")
+        );
     }
 }

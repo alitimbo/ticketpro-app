@@ -6,7 +6,10 @@ import type {
   RouterWireGuardConfig,
   RouterWireGuardPeerReference
 } from "../../domain/router";
-import type { RouterAdapter } from "./RouterAdapter";
+import {
+  runExactHotspotUserCreationFallback,
+  type RouterAdapter
+} from "./RouterAdapter";
 
 /**
  * Keeps SQLite identifiers local while every RouterOS write uses the real
@@ -71,6 +74,20 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
     return this.delegate.listHotspotUsers();
   }
 
+  listHotspotUsersForVerification() {
+    return this.delegate.listHotspotUsersForVerification
+      ? this.delegate.listHotspotUsersForVerification()
+      : this.delegate.listHotspotUsers();
+  }
+
+  listHotspotUsernames() {
+    return this.delegate.listHotspotUsernames
+      ? this.delegate.listHotspotUsernames()
+      : this.delegate.listHotspotUsers().then((users) =>
+          users.map((user) => ({ username: user.username }))
+        );
+  }
+
   findHotspotUser(username: string) {
     return this.delegate.findHotspotUser(username);
   }
@@ -93,6 +110,18 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
 
   createHotspotUser(user: HotspotUserDraft) {
     return this.delegate.createHotspotUser(this.mapUserDraft(user));
+  }
+
+  createHotspotUsersExactBatch(
+    users: HotspotUserDraft[],
+    onProgress?: Parameters<NonNullable<RouterAdapter["createHotspotUsersExactBatch"]>>[1]
+  ) {
+    const mappedUsers = users.map((user) => this.mapUserDraft(user));
+    if (this.delegate.createHotspotUsersExactBatch) {
+      return this.delegate.createHotspotUsersExactBatch(mappedUsers, onProgress);
+    }
+
+    return runExactHotspotUserCreationFallback(this.delegate, mappedUsers, onProgress);
   }
 
   createHotspotUsersBatch(batch: HotspotUsersBatchDraft) {

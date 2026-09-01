@@ -208,6 +208,48 @@ export class SyncOutboxRepository {
     return this.findById(id);
   }
 
+  async claimMany(
+    ids: string[],
+    accountId: string,
+    now = new Date().toISOString()
+  ): Promise<Map<string, SyncOutboxRecord>> {
+    const requested = new Set(ids);
+    const eligible = (await this.listByAccount(accountId)).filter(
+      (record) =>
+        requested.has(record.id)
+        && nonTerminalStatuses.has(record.status)
+        && record.status !== "processing"
+    );
+    const claimed = new Map<string, SyncOutboxRecord>();
+
+    for (let offset = 0; offset < eligible.length; offset += OUTBOX_STATE_CHUNK_SIZE) {
+      const chunk = eligible.slice(offset, offset + OUTBOX_STATE_CHUNK_SIZE);
+      const results = await this.database.transaction(chunk.map((record) => ({
+        params: [record.attempt_count + 1, now, record.id, accountId],
+        sql: `UPDATE sync_outbox SET
+          status = 'processing', attempt_count = ?1, locked_at = ?2, last_attempt_at = ?2,
+          last_error_code = NULL, last_error_message = NULL, updated_at = ?2
+        WHERE id = ?3 AND account_id = ?4 AND status IN ('pending', 'retry')`
+      })));
+      results.forEach((result, index) => {
+        const record = chunk[index];
+        if (!record || result.rowsAffected < 1) return;
+        claimed.set(record.id, {
+          ...record,
+          attempt_count: record.attempt_count + 1,
+          last_attempt_at: now,
+          last_error_code: null,
+          last_error_message: null,
+          locked_at: now,
+          status: "processing",
+          updated_at: now
+        });
+      });
+    }
+
+    return claimed;
+  }
+
   async markSucceeded(id: string, accountId: string, now = new Date().toISOString()): Promise<void> {
     await this.updateState(id, accountId, {
       completedAt: now,
@@ -218,6 +260,24 @@ export class SyncOutboxRepository {
       status: "succeeded",
       updatedAt: now
     });
+  }
+
+  async markSucceededMany(
+    ids: string[],
+    accountId: string,
+    now = new Date().toISOString()
+  ): Promise<void> {
+    const uniqueIds = [...new Set(ids)];
+    for (let offset = 0; offset < uniqueIds.length; offset += OUTBOX_STATE_CHUNK_SIZE) {
+      const chunk = uniqueIds.slice(offset, offset + OUTBOX_STATE_CHUNK_SIZE);
+      await this.database.transaction(chunk.map((id) => ({
+        params: [now, id, accountId],
+        sql: `UPDATE sync_outbox SET
+          status = 'succeeded', next_attempt_at = ?1, locked_at = NULL,
+          completed_at = ?1, last_error_code = NULL, last_error_message = NULL, updated_at = ?1
+        WHERE id = ?2 AND account_id = ?3`
+      })));
+    }
   }
 
   async markConflict(
@@ -238,6 +298,16 @@ export class SyncOutboxRepository {
     });
   }
 
+  async markConflictMany(
+    ids: string[],
+    accountId: string,
+    code: string,
+    message: string,
+    now = new Date().toISOString()
+  ): Promise<void> {
+    await this.markTerminalMany(ids, accountId, "conflict", code, message, now);
+  }
+
   async markFailed(
     id: string,
     accountId: string,
@@ -254,6 +324,16 @@ export class SyncOutboxRepository {
       status: "failed",
       updatedAt: now
     });
+  }
+
+  async markFailedMany(
+    ids: string[],
+    accountId: string,
+    code: string,
+    message: string,
+    now = new Date().toISOString()
+  ): Promise<void> {
+    await this.markTerminalMany(ids, accountId, "failed", code, message, now);
   }
 
   async markRetry(
@@ -276,6 +356,41 @@ export class SyncOutboxRepository {
       updatedAt: now
     });
     return status;
+  }
+
+  async markRetryMany(
+    ids: string[],
+    accountId: string,
+    input: { code: string; message: string; nextAttemptAt: string },
+    now = new Date().toISOString()
+  ): Promise<void> {
+    const requested = new Set(ids);
+    const records = (await this.listByAccount(accountId)).filter(
+      (record) => requested.has(record.id) && nonTerminalStatuses.has(record.status)
+    );
+    const message = sanitizeOutboxError(input.message);
+    for (let offset = 0; offset < records.length; offset += OUTBOX_STATE_CHUNK_SIZE) {
+      const chunk = records.slice(offset, offset + OUTBOX_STATE_CHUNK_SIZE);
+      await this.database.transaction(chunk.map((record) => {
+        const failed = record.attempt_count >= record.max_attempts;
+        return {
+          params: [
+            failed ? "failed" : "retry",
+            failed ? now : input.nextAttemptAt,
+            failed ? now : null,
+            input.code,
+            message,
+            now,
+            record.id,
+            accountId
+          ],
+          sql: `UPDATE sync_outbox SET
+            status = ?1, next_attempt_at = ?2, locked_at = NULL, completed_at = ?3,
+            last_error_code = ?4, last_error_message = ?5, updated_at = ?6
+          WHERE id = ?7 AND account_id = ?8`
+        };
+      }));
+    }
   }
 
   async recoverStale(
@@ -351,9 +466,32 @@ export class SyncOutboxRepository {
       ]
     );
   }
+
+  private async markTerminalMany(
+    ids: string[],
+    accountId: string,
+    status: "conflict" | "failed",
+    code: string,
+    message: string,
+    now: string
+  ): Promise<void> {
+    const uniqueIds = [...new Set(ids)];
+    const sanitizedMessage = sanitizeOutboxError(message);
+    for (let offset = 0; offset < uniqueIds.length; offset += OUTBOX_STATE_CHUNK_SIZE) {
+      const chunk = uniqueIds.slice(offset, offset + OUTBOX_STATE_CHUNK_SIZE);
+      await this.database.transaction(chunk.map((id) => ({
+        params: [status, now, code, sanitizedMessage, id, accountId],
+        sql: `UPDATE sync_outbox SET
+          status = ?1, next_attempt_at = ?2, locked_at = NULL, completed_at = ?2,
+          last_error_code = ?3, last_error_message = ?4, updated_at = ?2
+        WHERE id = ?5 AND account_id = ?6`
+      })));
+    }
+  }
 }
 
 const OUTBOX_ENQUEUE_CHUNK_SIZE = 500;
+const OUTBOX_STATE_CHUNK_SIZE = 500;
 
 function buildEnqueueStatement(input: EnqueueSyncOperationInput): DatabaseStatement {
   const now = input.created_at ?? new Date().toISOString();

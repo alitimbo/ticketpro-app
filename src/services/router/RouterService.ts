@@ -32,10 +32,13 @@ import {
   type RemoteConnectionRequest
 } from "./RemoteConnectionProvider";
 import type {
+  HotspotUserBatchCreationProgress,
+  HotspotUserBatchCreationResult,
   HotspotUserBatchRemovalProgress,
   HotspotUserBatchRemovalResult,
   RouterAdapter
 } from "./RouterAdapter";
+import { runExactHotspotUserCreationFallback } from "./RouterAdapter";
 import { isRouterAdapterError } from "./RouterAdapterError";
 
 export type RouterAdapterMode = "fake" | "mikrotik";
@@ -181,6 +184,22 @@ export class RouterService {
     return this.run("listHotspotUsers", () => this.adapter.listHotspotUsers());
   }
 
+  listHotspotUsersForVerification() {
+    return this.run("listHotspotUsersForVerification", () =>
+      this.adapter.listHotspotUsersForVerification
+        ? this.adapter.listHotspotUsersForVerification()
+        : this.adapter.listHotspotUsers()
+    );
+  }
+
+  listHotspotUsernames() {
+    return this.run("listHotspotUsernames", async () =>
+      this.adapter.listHotspotUsernames
+        ? this.adapter.listHotspotUsernames()
+        : (await this.adapter.listHotspotUsers()).map((user) => ({ username: user.username }))
+    );
+  }
+
   findHotspotUser(username: string) {
     return this.run("findHotspotUser", () => this.adapter.findHotspotUser(username));
   }
@@ -199,6 +218,19 @@ export class RouterService {
 
   createHotspotUser(user: HotspotUserDraft) {
     return this.run("createHotspotUser", () => this.adapter.createHotspotUser(user), "router.tickets.generate");
+  }
+
+  createHotspotUsersExactBatch(
+    users: HotspotUserDraft[],
+    onProgress?: (progress: HotspotUserBatchCreationProgress) => void
+  ): Promise<HotspotUserBatchCreationResult[]> {
+    return this.run("createHotspotUsersExactBatch", async () => {
+      if (this.adapter.createHotspotUsersExactBatch) {
+        return this.adapter.createHotspotUsersExactBatch(users, onProgress);
+      }
+
+      return runExactHotspotUserCreationFallback(this.adapter, users, onProgress);
+    }, "router.tickets.generate");
   }
 
   createHotspotUsersBatch(batch: HotspotUsersBatchDraft) {

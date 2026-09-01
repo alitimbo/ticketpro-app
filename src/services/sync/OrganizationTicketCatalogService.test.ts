@@ -30,7 +30,7 @@ describe("OrganizationTicketCatalogService outbox", () => {
   });
 
   it("reprend uniquement le fragment cloud échoué d'un grand lot", async () => {
-    const database = await setupCatalog(81);
+    const database = await setupCatalog(501);
     mocks.saveCatalog
       .mockResolvedValueOnce({ batches: [], router_id: "cloud-router-1", tickets: [] })
       .mockRejectedValueOnce(new Error("Coupure réseau injectée"))
@@ -60,10 +60,10 @@ describe("OrganizationTicketCatalogService outbox", () => {
 
     expect(await service.resumePending("router-1")).toMatchObject({ succeeded: 1 });
     expect(mocks.saveCatalog.mock.calls.map(([payload]) => payload.tickets.length)).toEqual([
-      40,
-      40,
+      250,
+      250,
       1,
-      40
+      250
     ]);
     expect((await outbox.listByAccount("account-1"))
       .every((operation) => operation.status === "succeeded")).toBe(true);

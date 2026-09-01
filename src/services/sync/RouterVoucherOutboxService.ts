@@ -57,6 +57,10 @@ export class RouterVoucherOutboxService {
     return this.outbox.claim(operationId, this.accountId);
   }
 
+  async beginMany(operationIds: string[]): Promise<Map<string, SyncOutboxRecord>> {
+    return this.outbox.claimMany(operationIds, this.accountId);
+  }
+
   async complete(operationId: string, ticket: CreateTicketInput): Promise<void> {
     await this.tickets.update({
       ...ticket,
@@ -64,6 +68,17 @@ export class RouterVoucherOutboxService {
       sync_status: "synced"
     });
     await this.outbox.markSucceeded(operationId, this.accountId);
+  }
+
+  async completeMany(entries: Array<{ operationId: string; ticket: CreateTicketInput }>): Promise<void> {
+    if (entries.length === 0) return;
+    const now = new Date().toISOString();
+    await this.tickets.confirmRouterBatch(entries.map(({ ticket }) => ({
+      ...ticket,
+      last_router_sync_at: ticket.last_router_sync_at ?? now,
+      sync_status: "synced"
+    })));
+    await this.outbox.markSucceededMany(entries.map(({ operationId }) => operationId), this.accountId, now);
   }
 
   async defer(operationId: string, error: unknown): Promise<void> {
@@ -87,6 +102,34 @@ export class RouterVoucherOutboxService {
       return;
     }
     await this.outbox.markRetry(operationId, this.accountId, {
+      code: classified.code,
+      message: classified.message,
+      nextAttemptAt: new Date(Date.now() + 2_000).toISOString()
+    });
+  }
+
+  async deferMany(operationIds: string[], error: unknown): Promise<void> {
+    if (operationIds.length === 0) return;
+    const classified = classifyRouterWriteError(error);
+    if (classified.kind === "conflict") {
+      await this.outbox.markConflictMany(
+        operationIds,
+        this.accountId,
+        classified.code,
+        classified.message
+      );
+      return;
+    }
+    if (classified.kind === "permanent") {
+      await this.outbox.markFailedMany(
+        operationIds,
+        this.accountId,
+        classified.code,
+        classified.message
+      );
+      return;
+    }
+    await this.outbox.markRetryMany(operationIds, this.accountId, {
       code: classified.code,
       message: classified.message,
       nextAttemptAt: new Date(Date.now() + 2_000).toISOString()

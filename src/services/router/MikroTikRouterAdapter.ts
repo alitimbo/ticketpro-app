@@ -34,11 +34,18 @@ import {
   protectTicketPassword,
   resolveTicketPasswordValue
 } from "../tickets/TicketPasswordService";
-import type { HotspotUserBatchRemovalResult, RouterAdapter } from "./RouterAdapter";
+import type {
+  HotspotUserBatchCreationProgress,
+  HotspotUserBatchCreationResult,
+  HotspotUserBatchRemovalResult,
+  RouterAdapter
+} from "./RouterAdapter";
 import { RouterAdapterError } from "./RouterAdapterError";
 import {
   TauriRouterOsApiTransport,
   type RouterOsApiConfig,
+  type RouterOsApiBatchCommand,
+  type RouterOsApiBatchResponse,
   type RouterOsApiRequest,
   type RouterOsApiRow,
   type RouterOsApiTransport
@@ -61,6 +68,22 @@ const WIREGUARD_PEER_COMMENT = "TicketPro managed:wireguard-gateway-peer:v1";
 const WIREGUARD_ROUTE_COMMENT = "TicketPro managed:wireguard-route:v1";
 const ROUTER_MANAGEMENT_GROUP = "ticketpro-api";
 const ROUTER_MANAGEMENT_POLICIES = ["api", "policy", "read", "sensitive", "test", "write"] as const;
+const HOTSPOT_USER_CREATE_BATCH_SIZE = 100;
+const PASSWORD_RESOLUTION_CONCURRENCY = 16;
+const HOTSPOT_USER_VERIFICATION_PROPERTIES = [
+  ".id",
+  "name",
+  "disabled",
+  "profile",
+  "comment",
+  "server",
+  "uptime",
+  "limit-uptime",
+  "bytes-in",
+  "bytes-out",
+  "limit-bytes-total",
+  "mac-address"
+].join(",");
 
 export class MikroTikRouterAdapter implements RouterAdapter {
   private readonly config: RouterOsApiConfig;
@@ -845,6 +868,21 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     return Promise.all(rows.map((row) => userRowToHotspotUser(row)));
   }
 
+  async listHotspotUsersForVerification(): Promise<HotspotUser[]> {
+    const rows = await this.call("/ip/hotspot/user/print", {
+      ".proplist": HOTSPOT_USER_VERIFICATION_PROPERTIES
+    });
+    return Promise.all(rows.map((row) => userRowToHotspotUser(row)));
+  }
+
+  async listHotspotUsernames(): Promise<Array<{ username: string }>> {
+    const rows = await this.call("/ip/hotspot/user/print", { ".proplist": "name" });
+    return rows
+      .map((row) => pick(row, "name", "user")?.trim())
+      .filter((username): username is string => Boolean(username))
+      .map((username) => ({ username }));
+  }
+
   async findHotspotUser(username: string): Promise<HotspotUser | null> {
     const rows = await this.query("/ip/hotspot/user/print", { name: username });
     const row = rows.find((item) => pick(item, "name") === username);
@@ -866,6 +904,101 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     });
 
     return this.findUserByName(user.username);
+  }
+
+  async createHotspotUsersExactBatch(
+    users: HotspotUserDraft[],
+    onProgress?: (progress: HotspotUserBatchCreationProgress) => void
+  ): Promise<HotspotUserBatchCreationResult[]> {
+    if (users.length === 0) return [];
+
+    const usernames = users.map((user) => user.username.trim());
+    if (usernames.some((username) => !username)) {
+      throw new RouterAdapterError("router_rejected", "A voucher username is empty");
+    }
+    if (new Set(usernames).size !== usernames.length) {
+      throw new RouterAdapterError("duplicate_user", "The voucher batch contains duplicate usernames");
+    }
+
+    // Read the live profile catalog once for the whole commercial batch.
+    const plans = await this.getHotspotPlans();
+    const prepared = await mapWithConcurrency(
+      users,
+      PASSWORD_RESOLUTION_CONCURRENCY,
+      async (user) => {
+        const plan = plans.find(
+          (candidate) => candidate.id === user.planId || candidate.profileName === user.planId
+        );
+        if (!plan) {
+          throw new RouterAdapterError("hotspot_not_found", "Hotspot profile not found");
+        }
+        return {
+          command: hotspotUserAddCommand(user, plan.profileName, await resolveTicketPassword(user)),
+          user,
+          username: user.username.trim()
+        };
+      }
+    );
+    const errors = new Map<string, string>();
+    const confirmed = new Map<string, HotspotUser>();
+    let remaining = prepared;
+    let processedCommands = 0;
+
+    onProgress?.({ completed: 0, phase: "creating", total: users.length });
+
+    // One recovery pass is enough: after a transport interruption we first
+    // read RouterOS, then replay only usernames that are authoritatively absent.
+    for (let pass = 0; pass < 2 && remaining.length > 0; pass += 1) {
+      let connectionInterrupted = false;
+      for (const commandGroup of chunkArray(remaining, HOTSPOT_USER_CREATE_BATCH_SIZE)) {
+        const response = await this.callBatch(commandGroup.map((entry) => entry.command));
+        response.results.forEach((result, index) => {
+          const entry = commandGroup[index];
+          if (entry && result.error) errors.set(entry.username, result.error);
+        });
+        if (response.connectionError) {
+          const uncertainIndex = Math.min(response.completedCount, commandGroup.length - 1);
+          for (let index = uncertainIndex; index < commandGroup.length; index += 1) {
+            errors.set(commandGroup[index].username, response.connectionError);
+          }
+          connectionInterrupted = true;
+        }
+        processedCommands += response.completedCount;
+        if (connectionInterrupted) {
+          const observed = await this.readRequestedUsers(usernames);
+          observed.forEach((user, username) => confirmed.set(username, user));
+        }
+        onProgress?.({
+          completed: Math.min(users.length, Math.max(confirmed.size, processedCommands)),
+          phase: "creating",
+          total: users.length
+        });
+        if (connectionInterrupted) break;
+      }
+
+      remaining = prepared.filter((entry) => !confirmed.has(entry.username));
+      if (!connectionInterrupted) break;
+    }
+
+    onProgress?.({
+      completed: Math.min(users.length, Math.max(confirmed.size, processedCommands)),
+      phase: "verifying",
+      total: users.length
+    });
+    const finalUsers = await this.readRequestedUsers(usernames);
+    finalUsers.forEach((user, username) => confirmed.set(username, user));
+    onProgress?.({ completed: confirmed.size, phase: "verifying", total: users.length });
+
+    return prepared.map(({ username }) => {
+      const user = confirmed.get(username);
+      return user
+        ? { status: "confirmed", user, username }
+        : {
+            message: errors.get(username) ?? "RouterOS did not confirm the voucher creation",
+            status: "error",
+            username
+          };
+    });
   }
 
   async getWireGuardInstallation(
@@ -1970,6 +2103,41 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       throw normalizeMikroTikError(error);
     }
   }
+
+  private async callBatch(commands: RouterOsApiBatchCommand[]): Promise<RouterOsApiBatchResponse> {
+    if (!this.transport.callBatch) {
+      const results = [];
+      for (const command of commands) {
+        try {
+          const rows = await this.transport.call({ ...this.config, ...command });
+          results.push({ error: null, rows });
+        } catch (error) {
+          results.push({
+            error: error instanceof Error ? error.message : String(error),
+            rows: []
+          });
+        }
+      }
+      return { completedCount: results.length, connectionError: null, results };
+    }
+
+    try {
+      return await this.transport.callBatch({ ...this.config, commands });
+    } catch (error) {
+      throw normalizeMikroTikError(error);
+    }
+  }
+
+  private async readRequestedUsers(usernames: string[]): Promise<Map<string, HotspotUser>> {
+    const requested = new Set(usernames);
+    const rows = (await this.call("/ip/hotspot/user/print", {
+      ".proplist": HOTSPOT_USER_VERIFICATION_PROPERTIES
+    })).filter((row) =>
+      requested.has(pick(row, "name", "user") ?? "")
+    );
+    const users = await Promise.all(rows.map((row) => userRowToHotspotUser(row)));
+    return new Map(users.map((user) => [user.username, user]));
+  }
 }
 
 export function normalizeMikroTikError(error: unknown): RouterAdapterError {
@@ -2268,6 +2436,52 @@ function parseInteger(value: string | undefined): number {
 
 function isTruthy(value: string | undefined): boolean {
   return value === "true" || value === "yes";
+}
+
+function hotspotUserAddCommand(
+  user: HotspotUserDraft,
+  profileName: string,
+  password: string
+): RouterOsApiBatchCommand {
+  return {
+    command: "/ip/hotspot/user/add",
+    params: {
+      comment: buildVoucherLifecycleComment(user.validityMinutes, user.comment),
+      "limit-bytes-total": user.limitBytesTotal ?? null,
+      "limit-uptime": user.limitUptime ?? null,
+      name: user.username.trim(),
+      password,
+      profile: profileName,
+      server: user.serverName?.trim() || "all"
+    }
+  };
+}
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const groups: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    groups.push(items.slice(index, index + size));
+  }
+  return groups;
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+      while (nextIndex < items.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        results[index] = await mapper(items[index], index);
+      }
+    })
+  );
+  return results;
 }
 
 function isExplicitlyDisabled(value: string | undefined): boolean {

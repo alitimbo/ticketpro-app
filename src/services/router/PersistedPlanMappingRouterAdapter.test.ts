@@ -50,12 +50,21 @@ function createDelegate() {
     status: "available" as const,
     username
   }));
+  const createHotspotUsersExactBatch = vi.fn(async (users: HotspotUserDraft[]) =>
+    Promise.all(users.map(async (user) => ({
+      status: "confirmed" as const,
+      user: await createHotspotUser(user),
+      username: user.username
+    })))
+  );
 
   return {
     adapter: {
       createHotspotUser,
+      createHotspotUsersExactBatch,
       updateHotspotUser
     } as unknown as RouterAdapter,
+    createHotspotUsersExactBatch,
     createHotspotUser,
     updateHotspotUser
   };
@@ -100,6 +109,22 @@ describe("PersistedPlanMappingRouterAdapter", () => {
         planId: "plan-3h-2go"
       })
     );
+  });
+
+  it("traduit tout un lot avant de le déléguer à l'écriture groupée RouterOS", async () => {
+    const delegate = createDelegate();
+    const adapter = new PersistedPlanMappingRouterAdapter(delegate.adapter, [plan]);
+
+    await adapter.createHotspotUsersExactBatch([
+      { passwordSecretRef: "secret://router-1/111111/password", planId: plan.id, username: "111111" },
+      { passwordSecretRef: "secret://router-1/222222/password", planId: plan.id, username: "222222" }
+    ]);
+
+    expect(delegate.createHotspotUsersExactBatch).toHaveBeenCalledTimes(1);
+    expect(delegate.createHotspotUsersExactBatch.mock.calls[0][0]).toEqual([
+      expect.objectContaining({ limitBytesTotal: 2147483648, limitUptime: "3h", planId: "plan-3h-2go" }),
+      expect.objectContaining({ limitBytesTotal: 2147483648, limitUptime: "3h", planId: "plan-3h-2go" })
+    ]);
   });
 
   it("réapplique les limites du plan lors de la résolution d'un conflit", async () => {
