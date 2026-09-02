@@ -1,6 +1,10 @@
 import type { CreateTicketBatchInput, CreateTicketInput, TicketBatchRecord } from "../../../domain/database";
 import type { DatabaseClient, DatabaseStatement } from "../DatabaseClient";
 import { assertAccountProfileOwnership } from "../ownership";
+import {
+  buildSyncOutboxInsertStatement,
+  type EnqueueSyncOperationInput
+} from "./SyncOutboxRepository";
 
 export class TicketBatchRepository {
   constructor(private readonly database: DatabaseClient) {}
@@ -42,12 +46,18 @@ export class TicketBatchRepository {
     return created;
   }
 
-  async createWithTickets(input: CreateTicketBatchInput, tickets: CreateTicketInput[]): Promise<TicketBatchRecord> {
+  async createWithTickets(
+    input: CreateTicketBatchInput,
+    tickets: CreateTicketInput[],
+    outboxOperations: EnqueueSyncOperationInput[] = []
+  ): Promise<TicketBatchRecord> {
     assertAccountProfileOwnership(input.account_id, input.created_by_profile_id);
+    assertBatchIntentConsistency(input, tickets, outboxOperations);
 
     await this.database.transaction([
       this.buildBatchInsertStatement(input),
-      ...tickets.map((ticket) => this.buildTicketInsertStatement(ticket))
+      ...tickets.map((ticket) => this.buildTicketInsertStatement(ticket)),
+      ...outboxOperations.map(buildSyncOutboxInsertStatement)
     ]);
 
     const created = await this.findById(input.id);
@@ -235,4 +245,36 @@ export class TicketBatchRepository {
 
 function normalizeBatchCurrency(value: string | null | undefined): string {
   return value?.trim().slice(0, 12) || "CFA";
+}
+
+function assertBatchIntentConsistency(
+  batch: CreateTicketBatchInput,
+  tickets: CreateTicketInput[],
+  operations: EnqueueSyncOperationInput[]
+): void {
+  const ticketIds = new Set(tickets.map((ticket) => ticket.id));
+  if (ticketIds.size !== tickets.length || tickets.some((ticket) =>
+    ticket.account_id !== batch.account_id
+    || ticket.batch_id !== batch.id
+    || ticket.router_id !== batch.router_id
+  )) {
+    throw new Error("Le lot, ses vouchers et leur propriétaire ne sont pas cohérents.");
+  }
+  const operationTicketIds = new Set(operations.map((operation) => operation.aggregate_id));
+  if (
+    (operations.length > 0 && (
+      operations.length !== tickets.length
+      || operationTicketIds.size !== ticketIds.size
+      || [...ticketIds].some((ticketId) => !operationTicketIds.has(ticketId))
+    ))
+    || operations.some((operation) =>
+      operation.account_id !== batch.account_id
+      || operation.router_id !== batch.router_id
+      || operation.correlation_id !== batch.id
+      || operation.aggregate_type !== "ticket"
+      || !ticketIds.has(operation.aggregate_id)
+    )
+  ) {
+    throw new Error("La file durable ne correspond pas exactement au lot de vouchers.");
+  }
 }

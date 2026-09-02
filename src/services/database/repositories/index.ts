@@ -16,6 +16,7 @@ export { SubscriptionPlanRepository } from "./SubscriptionPlanRepository";
 export {
   SyncOutboxRepository,
   assertSecretFreePayload,
+  buildSyncOutboxInsertStatement,
   parseOutboxPayload,
   stableHash
 } from "./SyncOutboxRepository";

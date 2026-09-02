@@ -4,6 +4,7 @@ import {
   parseOutboxPayload,
   type SyncOutboxHealth
 } from "../database";
+import { recordActiveOutboxRetry } from "../performance/VoucherGenerationPerformance";
 
 export type SyncOutboxHandler = (
   operation: SyncOutboxRecord,
@@ -40,6 +41,7 @@ export class SyncOutboxService {
       maxRetryMs?: number;
       now?: () => Date;
       staleLockMs?: number;
+      stopOnRetry?: boolean;
     } = {}
   ) {}
 
@@ -126,7 +128,11 @@ export class SyncOutboxService {
           nextAttemptAt
         }, this.now().toISOString());
         if (status === "failed") report.failed += 1;
-        else report.retried += 1;
+        else {
+          report.retried += 1;
+          recordActiveOutboxRetry();
+        }
+        if (this.options.stopOnRetry) break;
       }
     }
 

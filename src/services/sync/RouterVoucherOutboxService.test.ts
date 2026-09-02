@@ -9,7 +9,11 @@ import {
   TicketRepository
 } from "../database";
 import { RouterServiceError } from "../router";
-import { RouterVoucherOutboxService } from "./RouterVoucherOutboxService";
+import {
+  ROUTER_VOUCHER_MAX_ATTEMPTS,
+  RouterVoucherOutboxService,
+  buildRouterVoucherCreateOperations
+} from "./RouterVoucherOutboxService";
 
 describe("RouterVoucherOutboxService", () => {
   it("crée chaque voucher une seule fois puis confirme la base locale", async () => {
@@ -111,7 +115,7 @@ describe("RouterVoucherOutboxService", () => {
     });
   });
 
-  it("reprend uniquement le voucher échoué d'un lot partiel", async () => {
+  it("interrompt au premier échec puis reprend uniquement les vouchers non confirmés", async () => {
     const context = await setup([
       ticket("ticket-a", "200001"),
       ticket("ticket-b", "200002"),
@@ -133,7 +137,7 @@ describe("RouterVoucherOutboxService", () => {
     });
     const operations = await service.enqueueTickets(context.inputs);
 
-    expect(await service.resume("router-1")).toMatchObject({ succeeded: 2, retried: 1 });
+    expect(await service.resume("router-1")).toMatchObject({ succeeded: 1, retried: 1 });
     failSecond = false;
     const secondOperation = operations.get("ticket-b")!;
     await new SyncOutboxRepository(context.database).markRetry(secondOperation.id, "account-1", {
@@ -141,15 +145,110 @@ describe("RouterVoucherOutboxService", () => {
       message: "Relance laboratoire",
       nextAttemptAt: "2026-01-01T00:00:00.000Z"
     });
-    expect(await service.resume("router-1")).toMatchObject({ succeeded: 1 });
+    expect(await service.resume("router-1")).toMatchObject({ succeeded: 2 });
 
     expect(createHotspotUser.mock.calls.map(([draft]) => draft.username)).toEqual([
       "200001",
       "200002",
-      "200003",
-      "200002"
+      "200002",
+      "200003"
     ]);
     expect(users.map((user) => user.username).sort()).toEqual(["200001", "200002", "200003"]);
+  });
+
+  it.each([
+    { existingCount: 50, outageAt: "25 %" },
+    { existingCount: 100, outageAt: "50 %" },
+    { existingCount: 180, outageAt: "90 %" }
+  ])("reprend exactement 200 vouchers après une coupure à $outageAt", async ({ existingCount }) => {
+    const inputs = Array.from({ length: 200 }, (_, index) =>
+      ticket(`power-ticket-${index}`, String(300000 + index))
+    );
+    const context = await setup(inputs);
+    const users = inputs.slice(0, existingCount).map((input, index) => routerUser({
+      comment: "TicketProBatch:batch-1",
+      passwordSecretRef: input.password_encrypted,
+      planId: input.plan_id,
+      serverName: input.hotspot_server_name,
+      username: input.username
+    }, `*existing-${index}`));
+    const createHotspotUser = vi.fn(async (draft: HotspotUserDraft) => {
+      const user = routerUser(draft, `*created-${draft.username}`);
+      users.push(user);
+      return user;
+    });
+    const service = new RouterVoucherOutboxService(context.database, "account-1", {
+      createHotspotUser,
+      findHotspotUser: async (username) => users.find((user) => user.username === username) ?? null
+    });
+    const operations = await service.enqueueTickets(context.inputs);
+    const outbox = new SyncOutboxRepository(context.database);
+    await outbox.claimMany(
+      [...operations.values()].map((operation) => operation.id),
+      "account-1",
+      new Date(Date.now() - 5 * 60_000).toISOString()
+    );
+
+    await expect(service.resume("router-1")).resolves.toMatchObject({
+      completedBatchIds: ["batch-1"],
+      processed: 200,
+      recovered: 200,
+      succeeded: 200
+    });
+
+    expect(createHotspotUser).toHaveBeenCalledTimes(200 - existingCount);
+    expect(new Set(users.map((user) => user.username))).toHaveLength(200);
+    const resumedOperations = await outbox.listByAccount("account-1");
+    expect(resumedOperations).toHaveLength(200);
+    expect(resumedOperations.every((record) => record.status === "succeeded")).toBe(true);
+    await expect(new TicketBatchRepository(context.database).findById("batch-1")).resolves.toMatchObject({
+      status: "terminé",
+      sync_status: "synced"
+    });
+  });
+
+  it("prépare des reprises longue durée sans placer de secret dans l'outbox", () => {
+    const input = ticket("ticket-durable", "400001");
+    const operations = buildRouterVoucherCreateOperations("account-1", [input]);
+
+    expect(operations).toEqual([
+      expect.objectContaining({
+        aggregate_id: input.id,
+        correlation_id: input.batch_id,
+        max_attempts: ROUTER_VOUCHER_MAX_ATTEMPTS,
+        payload: { ticketId: input.id }
+      })
+    ]);
+    expect(JSON.stringify(operations)).not.toContain(input.password_encrypted);
+  });
+
+  it("ouvre le coupe-circuit au premier échec réseau sans consommer tout le lot", async () => {
+    const context = await setup([
+      ticket("offline-a", "500001"),
+      ticket("offline-b", "500002"),
+      ticket("offline-c", "500003")
+    ]);
+    const createHotspotUser = vi.fn();
+    const findHotspotUser = vi.fn(async () => {
+      throw new RouterServiceError("router_offline", "Routeur éteint.");
+    });
+    const service = new RouterVoucherOutboxService(context.database, "account-1", {
+      createHotspotUser,
+      findHotspotUser
+    });
+    await service.enqueueTickets(context.inputs);
+
+    await expect(service.resume("router-1")).resolves.toMatchObject({
+      processed: 1,
+      retried: 1,
+      succeeded: 0
+    });
+
+    const operations = await new SyncOutboxRepository(context.database).listByAccount("account-1");
+    expect(operations.filter((operation) => operation.status === "retry")).toHaveLength(1);
+    expect(operations.filter((operation) => operation.status === "pending")).toHaveLength(2);
+    expect(findHotspotUser).toHaveBeenCalledTimes(1);
+    expect(createHotspotUser).not.toHaveBeenCalled();
   });
 });
 

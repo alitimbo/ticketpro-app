@@ -9,6 +9,7 @@ import {
 import type { InitiatedPaymentOrder, IpayPaymentType } from "../payments";
 import type { Permission, UserRole } from "../../domain/auth";
 import type { RouterAccessPolicy } from "../access/RouterAccessPolicyService";
+import { recordActiveVpsRequest } from "../performance/VoucherGenerationPerformance";
 
 const apiUrl = String(import.meta.env.VITE_LICENSE_API_URL ?? "").replace(/\/$/, "");
 const sessionStorageKey = "ticketpro:saas_session";
@@ -1010,6 +1011,7 @@ async function request<T>(
   method: "GET" | "POST" = "POST"
 ): Promise<T> {
   if (!apiUrl) throw new Error("L'API TicketPro n'est pas configurée.");
+  recordActiveVpsRequest();
   const response = await fetch(`${apiUrl}${pathname}`, {
     method,
     headers: {

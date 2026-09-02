@@ -82,7 +82,21 @@ describe("ticketGenerationModel", () => {
     expect(validateTicketGeneration(state, routers, plans)).toBeNull();
     expect(
       validateTicketGeneration({ ...state, quantity: "custom", customQuantity: "0" }, routers, plans)
-    ).toBe("Choisissez une quantité entre 1 et 500.");
+    ).toBe("Choisissez une quantité entre 1 et 200.");
+    expect(
+      validateTicketGeneration(
+        { ...state, quantity: "custom", customQuantity: "200" },
+        routers,
+        plans
+      )
+    ).toBeNull();
+    expect(
+      validateTicketGeneration(
+        { ...state, quantity: "custom", customQuantity: "201" },
+        routers,
+        plans
+      )
+    ).toBe("Choisissez une quantité entre 1 et 200.");
   });
 
   it("interdit le profil RouterOS default pour protéger son ownership externe", () => {

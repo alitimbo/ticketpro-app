@@ -2,6 +2,7 @@ import type { HotspotPlan, HotspotServer, HotspotUser, RouterSummary } from "../
 import type { CreateTicketBatchInput, CreateTicketInput, SyncStatus } from "../../domain/database";
 import type { UserRole } from "../../domain/auth";
 import {
+  buildTicketPdfFileName,
   formatTicketValidityLabel,
   type TicketPdfFormat,
   type TicketPdfInput,
@@ -55,6 +56,7 @@ export type TicketGenerationResult = {
 };
 
 export const quickQuantities = [5, 10, 20, 50, 100] as const;
+export const MAX_TICKET_GENERATION_QUANTITY = 200;
 
 export const defaultTicketGenerationOptions: TicketGenerationOptions = {
   codeLength: 6,
@@ -218,8 +220,8 @@ export function validateTicketGeneration(
 
   const quantity = getSelectedQuantity(state);
 
-  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 500) {
-    return "Choisissez une quantité entre 1 et 500.";
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > MAX_TICKET_GENERATION_QUANTITY) {
+    return `Choisissez une quantité entre 1 et ${MAX_TICKET_GENERATION_QUANTITY}.`;
   }
 
   if (!Number.isInteger(state.options.codeLength) || state.options.codeLength < 3 || state.options.codeLength > 12) {
@@ -379,41 +381,11 @@ export function buildFileName(input: {
   quantity: number;
   routerName: string;
 }): string {
-  const generatedAt = input.generatedAt ?? new Date();
-  const timestamp = generatedAt
-    .toISOString()
-    .replace(/[-:]/g, "")
-    .replace("T", "-")
-    .slice(0, 15);
-  const batchSuffix = sanitizeFileSegment(input.batchId.replace(/^batch-/, "")).slice(0, 8) || "lot";
-  const currency = sanitizeFileSegment(normalizeCurrency(input.currency)) || "CFA";
-  const price = input.price === null
-    ? `prix-non-defini-${currency}`
-    : `${Math.max(0, Math.round(input.price))}${currency}`;
-
-  return [
-    sanitizeFileSegment(input.routerName) || "Routeur",
-    sanitizeFileSegment(input.planName) || "Plan",
-    price,
-    `${Math.max(1, Math.round(input.quantity))}tickets`,
-    timestamp,
-    batchSuffix
-  ].join("-") + ".pdf";
+  return buildTicketPdfFileName(input);
 }
 
 export function normalizeCurrency(value: string | null | undefined): string {
   return value?.trim().slice(0, 12) || "CFA";
-}
-
-function sanitizeFileSegment(value: string): string {
-  return value
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-")
-    .replace(/[^a-zA-Z0-9._-]+/g, "-")
-    .replace(/[-_.]{2,}/g, "-")
-    .replace(/^[-_.]+|[-_.]+$/g, "")
-    .slice(0, 48);
 }
 
 export function buildTicketPdfInput(input: {

@@ -3,18 +3,28 @@ import type { HotspotUser } from "../../domain/router";
 import {
   HotspotPlanRepository,
   SyncOutboxRepository,
+  TicketBatchRepository,
   TicketRepository,
+  type EnqueueSyncOperationInput,
   type DatabaseClient
 } from "../database";
 import { RouterServiceError, type RouterService } from "../router";
+import { recordActiveOutboxRetry } from "../performance/VoucherGenerationPerformance";
 import { buildVoucherBatchOwnershipComment, voucherBelongsToBatch } from "../tickets";
 import { SyncOutboxError, SyncOutboxService, type SyncOutboxDrainReport } from "./SyncOutboxService";
 
 export const ROUTER_VOUCHER_CREATE_OPERATION = "routeros.voucher.create";
+export const ROUTER_VOUCHER_MAX_ATTEMPTS = 10_000;
+const ROUTER_VOUCHER_RESUME_LIMIT = 200;
 
 type VoucherCreatePayload = { ticketId: string };
 
+export type RouterVoucherResumeReport = SyncOutboxDrainReport & {
+  completedBatchIds: string[];
+};
+
 export class RouterVoucherOutboxService {
+  private readonly batches: TicketBatchRepository;
   private readonly outbox: SyncOutboxRepository;
   private readonly plans: HotspotPlanRepository;
   private readonly processor: SyncOutboxService;
@@ -25,10 +35,11 @@ export class RouterVoucherOutboxService {
     private readonly accountId: string,
     private readonly routerService: Pick<RouterService, "createHotspotUser" | "findHotspotUser">
   ) {
+    this.batches = new TicketBatchRepository(database);
     this.outbox = new SyncOutboxRepository(database);
     this.plans = new HotspotPlanRepository(database);
     this.tickets = new TicketRepository(database);
-    this.processor = new SyncOutboxService(this.outbox).register(
+    this.processor = new SyncOutboxService(this.outbox, { stopOnRetry: true }).register(
       ROUTER_VOUCHER_CREATE_OPERATION,
       (operation, payload) => this.processCreate(operation, requireCreatePayload(payload))
     );
@@ -36,20 +47,10 @@ export class RouterVoucherOutboxService {
 
   async enqueueTickets(tickets: CreateTicketInput[]): Promise<Map<string, SyncOutboxRecord>> {
     const operations = new Map<string, SyncOutboxRecord>();
-    const eligibleTickets = tickets.filter((ticket) => ticket.account_id === this.accountId);
-    const queued = await this.outbox.enqueueMany(eligibleTickets.map((ticket) => ({
-        account_id: this.accountId,
-        aggregate_id: ticket.id,
-        aggregate_type: "ticket",
-        correlation_id: ticket.batch_id,
-        idempotency_key: `routeros:voucher:create:${ticket.router_id}:${ticket.id}`,
-        max_attempts: 8,
-        operation_type: ROUTER_VOUCHER_CREATE_OPERATION,
-        payload: { ticketId: ticket.id } satisfies VoucherCreatePayload,
-        priority: 20,
-        router_id: ticket.router_id
-      })));
-    eligibleTickets.forEach((ticket, index) => operations.set(ticket.id, queued[index]));
+    const queued = await this.outbox.enqueueMany(
+      buildRouterVoucherCreateOperations(this.accountId, tickets)
+    );
+    queued.forEach((operation) => operations.set(operation.aggregate_id, operation));
     return operations;
   }
 
@@ -101,11 +102,12 @@ export class RouterVoucherOutboxService {
       );
       return;
     }
-    await this.outbox.markRetry(operationId, this.accountId, {
+    const status = await this.outbox.markRetry(operationId, this.accountId, {
       code: classified.code,
       message: classified.message,
       nextAttemptAt: new Date(Date.now() + 2_000).toISOString()
     });
+    if (status === "retry") recordActiveOutboxRetry();
   }
 
   async deferMany(operationIds: string[], error: unknown): Promise<void> {
@@ -134,15 +136,71 @@ export class RouterVoucherOutboxService {
       message: classified.message,
       nextAttemptAt: new Date(Date.now() + 2_000).toISOString()
     });
+    recordActiveOutboxRetry(operationIds.length);
   }
 
-  async resume(routerId: string): Promise<SyncOutboxDrainReport> {
-    return this.processor.drain({
+  async resume(routerId: string): Promise<RouterVoucherResumeReport> {
+    const [routerOperations, pendingBatches] = await Promise.all([
+      this.outbox.listByAccount(this.accountId).then((operations) => operations.filter(
+        (operation) => operation.router_id === routerId
+          && operation.operation_type === ROUTER_VOUCHER_CREATE_OPERATION
+      )),
+      this.batches.listByRouter(routerId).then((batches) => batches.filter(
+        (batch) => batch.account_id === this.accountId && batch.sync_status !== "synced"
+      ))
+    ]);
+    const pendingBatchIds = new Set(pendingBatches.map((batch) => batch.id));
+    const affectedBatchIds = new Set(
+      routerOperations
+        .filter((operation) =>
+          ["pending", "processing", "retry"].includes(operation.status)
+          || pendingBatchIds.has(operation.correlation_id)
+        )
+        .map((operation) => operation.correlation_id)
+    );
+    const report = await this.processor.drain({
       accountId: this.accountId,
-      limit: 100,
+      limit: ROUTER_VOUCHER_RESUME_LIMIT,
       operationTypes: [ROUTER_VOUCHER_CREATE_OPERATION],
       routerId
     });
+    const completedBatchIds: string[] = [];
+    for (const batchId of affectedBatchIds) {
+      if (await this.reconcileBatchState(batchId)) completedBatchIds.push(batchId);
+    }
+    return { ...report, completedBatchIds };
+  }
+
+  private async reconcileBatchState(batchId: string): Promise<boolean> {
+    const [batch, tickets, currentOperations] = await Promise.all([
+      this.batches.findById(batchId),
+      this.tickets.listByBatch(batchId),
+      this.outbox.listByAccount(this.accountId)
+    ]);
+    if (!batch || batch.account_id !== this.accountId) return false;
+
+    const operations = currentOperations.filter((operation) =>
+      operation.router_id === batch.router_id
+      && operation.operation_type === ROUTER_VOUCHER_CREATE_OPERATION
+      && operation.correlation_id === batchId
+    );
+    const expectedTicketIds = new Set(tickets.map((ticket) => ticket.id));
+    const exactTicketSet = tickets.length === batch.quantity
+      && expectedTicketIds.size === batch.quantity
+      && operations.length === batch.quantity
+      && operations.every((operation) => expectedTicketIds.has(operation.aggregate_id));
+    const allConfirmed = exactTicketSet
+      && tickets.every((ticket) => ticket.sync_status === "synced" && Boolean(ticket.last_router_sync_at))
+      && operations.every((operation) => operation.status === "succeeded");
+    const hasTerminalError = operations.some((operation) =>
+      operation.status === "conflict" || operation.status === "failed"
+    ) || tickets.some((ticket) => ticket.sync_status === "conflict");
+    const nextStatus = allConfirmed ? "terminé" : "partiel";
+    const nextSyncStatus = allConfirmed ? "synced" : hasTerminalError ? "conflict" : "pending";
+    if (batch.status !== nextStatus || batch.sync_status !== nextSyncStatus) {
+      await this.batches.updateState(batch.id, this.accountId, nextStatus, nextSyncStatus);
+    }
+    return allConfirmed;
   }
 
   private async processCreate(operation: SyncOutboxRecord, payload: VoucherCreatePayload): Promise<void> {
@@ -235,6 +293,26 @@ export class RouterVoucherOutboxService {
       throw new SyncOutboxError("L'opération RouterOS n'est pas verrouillée.", "OUTBOX_NOT_CLAIMED", "conflict");
     }
   }
+}
+
+export function buildRouterVoucherCreateOperations(
+  accountId: string,
+  tickets: CreateTicketInput[]
+): EnqueueSyncOperationInput[] {
+  return tickets
+    .filter((ticket) => ticket.account_id === accountId)
+    .map((ticket) => ({
+      account_id: accountId,
+      aggregate_id: ticket.id,
+      aggregate_type: "ticket",
+      correlation_id: ticket.batch_id,
+      idempotency_key: `routeros:voucher:create:${ticket.router_id}:${ticket.id}`,
+      max_attempts: ROUTER_VOUCHER_MAX_ATTEMPTS,
+      operation_type: ROUTER_VOUCHER_CREATE_OPERATION,
+      payload: { ticketId: ticket.id } satisfies VoucherCreatePayload,
+      priority: 20,
+      router_id: ticket.router_id
+    }));
 }
 
 function requireCreatePayload(value: unknown): VoucherCreatePayload {

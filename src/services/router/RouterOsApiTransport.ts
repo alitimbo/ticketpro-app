@@ -1,4 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
+import {
+  recordActiveRouterOsPerformance,
+  type RouterOsNativePerformance
+} from "../performance/VoucherGenerationPerformance";
 
 type TauriInvoke = (
   command: string,
@@ -42,7 +46,15 @@ export type RouterOsApiBatchItemResult = {
 export type RouterOsApiBatchResponse = {
   completedCount: number;
   connectionError: string | null;
+  error?: string | null;
+  metrics?: RouterOsNativePerformance;
   results: RouterOsApiBatchItemResult[];
+};
+
+type RouterOsApiCallResponse = {
+  error: string | null;
+  metrics: RouterOsNativePerformance;
+  rows: RouterOsApiRow[];
 };
 
 export interface RouterOsApiTransport {
@@ -59,8 +71,8 @@ export class TauriRouterOsApiTransport implements RouterOsApiTransport {
     const endpoint = `${request.host.trim().toLowerCase()}:${request.port}`;
     const limiter = getEndpointLimiter(endpoint);
 
-    return limiter.run(async () =>
-      this.invokeCommand("mikrotik_api_call", {
+    return limiter.run(async () => {
+      const response = await this.invokeCommand("mikrotik_api_call", {
         request: {
           command: request.command,
           host: request.host,
@@ -73,8 +85,15 @@ export class TauriRouterOsApiTransport implements RouterOsApiTransport {
           useSsl: request.useSsl ?? false,
           username: request.username
         }
-      }).then((rows) => rows as RouterOsApiRow[])
-    );
+      });
+      // Keep compatibility with test doubles and older native development
+      // binaries while the current Rust command returns the measured shape.
+      if (Array.isArray(response)) return response as RouterOsApiRow[];
+      const measured = response as RouterOsApiCallResponse;
+      recordActiveRouterOsPerformance(measured.metrics);
+      if (measured.error) throw new Error(measured.error);
+      return measured.rows;
+    });
   }
 
   async callBatch(
@@ -83,8 +102,8 @@ export class TauriRouterOsApiTransport implements RouterOsApiTransport {
     const endpoint = `${request.host.trim().toLowerCase()}:${request.port}`;
     const limiter = getEndpointLimiter(endpoint);
 
-    return limiter.run(async () =>
-      this.invokeCommand("mikrotik_api_batch", {
+    return limiter.run(async () => {
+      const response = await this.invokeCommand("mikrotik_api_batch", {
         request: {
           commands: request.commands.map((command) => ({
             command: command.command,
@@ -99,8 +118,11 @@ export class TauriRouterOsApiTransport implements RouterOsApiTransport {
           useSsl: request.useSsl ?? false,
           username: request.username
         }
-      }).then((response) => response as RouterOsApiBatchResponse)
-    );
+      }) as RouterOsApiBatchResponse;
+      recordActiveRouterOsPerformance(response.metrics);
+      if (response.error) throw new Error(response.error);
+      return response;
+    });
   }
 }
 

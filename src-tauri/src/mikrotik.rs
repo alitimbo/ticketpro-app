@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,9 +51,40 @@ pub struct MikroTikApiBatchItemResult {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RouterOsCommandPerformance {
+    command: String,
+    duration_ms: f64,
+    outcome: &'static str,
+}
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouterOsNativePerformance {
+    auth_duration_ms: f64,
+    command_count: usize,
+    command_timings: Vec<RouterOsCommandPerformance>,
+    connect_duration_ms: f64,
+    connection_count: usize,
+    fatal_count: usize,
+    retry_count: usize,
+    trap_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MikroTikApiCallResponse {
+    error: Option<String>,
+    metrics: RouterOsNativePerformance,
+    rows: Vec<ApiRow>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MikroTikApiBatchResponse {
     completed_count: usize,
     connection_error: Option<String>,
+    error: Option<String>,
+    metrics: RouterOsNativePerformance,
     results: Vec<MikroTikApiBatchItemResult>,
 }
 
@@ -90,7 +121,9 @@ impl Write for ApiStream {
 }
 
 #[tauri::command]
-pub async fn mikrotik_api_call(request: MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
+pub async fn mikrotik_api_call(
+    request: MikroTikApiRequest,
+) -> Result<MikroTikApiCallResponse, String> {
     tauri::async_runtime::spawn_blocking(move || mikrotik_api_call_blocking(request))
         .await
         .map_err(|error| format!("router offline: tâche RouterOS interrompue: {error}"))?
@@ -116,11 +149,15 @@ fn mikrotik_api_batch_blocking(
     let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(5000));
     let mut connected_stream = None;
     let mut last_error = "router offline".to_string();
+    let mut metrics = RouterOsNativePerformance::default();
 
     // Reconnecting is safe only before the first business command. Once an
     // add has been sent, the caller reconciles by username instead of
     // replaying an uncertain command and risking a duplicate voucher.
     for attempt in 0..=retries {
+        if attempt > 0 {
+            metrics.retry_count += 1;
+        }
         match open_authenticated_stream(
             &request.host,
             request.port,
@@ -128,6 +165,7 @@ fn mikrotik_api_batch_blocking(
             &request.password,
             request.use_ssl,
             timeout,
+            &mut metrics,
         ) {
             Ok(stream) => {
                 connected_stream = Some(stream);
@@ -143,7 +181,13 @@ fn mikrotik_api_batch_blocking(
     }
 
     let Some(mut stream) = connected_stream else {
-        return Err(last_error);
+        return Ok(MikroTikApiBatchResponse {
+            completed_count: 0,
+            connection_error: None,
+            error: Some(last_error),
+            metrics,
+            results: Vec::new(),
+        });
     };
     let mut results = Vec::with_capacity(request.commands.len());
     let mut connection_error = None;
@@ -152,17 +196,47 @@ fn mikrotik_api_batch_blocking(
         let mut words = vec![command.command.clone()];
         append_api_words(&mut words, "=", command.params.as_ref());
         append_api_words(&mut words, "?", command.queries.as_ref());
+        let command_started_at = Instant::now();
+        metrics.command_count += 1;
 
         if let Err(error) = send_sentence(&mut stream, &words) {
+            metrics.command_timings.push(RouterOsCommandPerformance {
+                command: command.command.clone(),
+                duration_ms: elapsed_ms(command_started_at),
+                outcome: "connection",
+            });
             connection_error = Some(error);
             break;
         }
         match read_response_outcome(&mut stream) {
-            Ok(outcome) => results.push(MikroTikApiBatchItemResult {
-                error: outcome.error,
-                rows: outcome.rows,
-            }),
+            Ok(outcome) => {
+                metrics.trap_count += outcome.trap_count;
+                metrics.command_timings.push(RouterOsCommandPerformance {
+                    command: command.command.clone(),
+                    duration_ms: elapsed_ms(command_started_at),
+                    outcome: if outcome.error.is_some() {
+                        "trap"
+                    } else {
+                        "success"
+                    },
+                });
+                results.push(MikroTikApiBatchItemResult {
+                    error: outcome.error,
+                    rows: outcome.rows,
+                });
+            }
             Err(error) => {
+                let outcome = if is_fatal_response(&error) {
+                    metrics.fatal_count += 1;
+                    "fatal"
+                } else {
+                    "connection"
+                };
+                metrics.command_timings.push(RouterOsCommandPerformance {
+                    command: command.command.clone(),
+                    duration_ms: elapsed_ms(command_started_at),
+                    outcome,
+                });
                 connection_error = Some(error);
                 break;
             }
@@ -172,17 +246,31 @@ fn mikrotik_api_batch_blocking(
     Ok(MikroTikApiBatchResponse {
         completed_count: results.len(),
         connection_error,
+        error: None,
+        metrics,
         results,
     })
 }
 
-fn mikrotik_api_call_blocking(request: MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
+fn mikrotik_api_call_blocking(
+    request: MikroTikApiRequest,
+) -> Result<MikroTikApiCallResponse, String> {
     let retries = request.retries.unwrap_or(1);
     let mut last_error = "router offline".to_string();
+    let mut metrics = RouterOsNativePerformance::default();
 
     for attempt in 0..=retries {
-        match execute_once(&request) {
-            Ok(rows) => return Ok(rows),
+        if attempt > 0 {
+            metrics.retry_count += 1;
+        }
+        match execute_once(&request, &mut metrics) {
+            Ok(rows) => {
+                return Ok(MikroTikApiCallResponse {
+                    error: None,
+                    metrics,
+                    rows,
+                })
+            }
             Err(error) => {
                 last_error = error;
 
@@ -193,7 +281,11 @@ fn mikrotik_api_call_blocking(request: MikroTikApiRequest) -> Result<Vec<ApiRow>
         }
     }
 
-    Err(last_error)
+    Ok(MikroTikApiCallResponse {
+        error: Some(last_error),
+        metrics,
+        rows: Vec::new(),
+    })
 }
 
 fn open_authenticated_stream(
@@ -203,46 +295,69 @@ fn open_authenticated_stream(
     password: &str,
     use_ssl: bool,
     timeout: Duration,
+    metrics: &mut RouterOsNativePerformance,
 ) -> Result<ApiStream, String> {
-    let address = (host, port)
-        .to_socket_addrs()
-        .map_err(|error| format!("router offline: address unavailable: {error}"))?
-        .next()
-        .ok_or_else(|| "router offline: address unavailable".to_string())?;
-    let stream = TcpStream::connect_timeout(&address, timeout).map_err(map_io_error)?;
+    metrics.connection_count += 1;
+    let connect_started_at = Instant::now();
+    let connection = (|| -> Result<ApiStream, String> {
+        let address = (host, port)
+            .to_socket_addrs()
+            .map_err(|error| format!("router offline: address unavailable: {error}"))?
+            .next()
+            .ok_or_else(|| "router offline: address unavailable".to_string())?;
+        let stream = TcpStream::connect_timeout(&address, timeout).map_err(map_io_error)?;
 
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(|error| format!("timeout: read timeout unavailable: {error}"))?;
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(|error| format!("timeout: write timeout unavailable: {error}"))?;
+        stream
+            .set_read_timeout(Some(timeout))
+            .map_err(|error| format!("timeout: read timeout unavailable: {error}"))?;
+        stream
+            .set_write_timeout(Some(timeout))
+            .map_err(|error| format!("timeout: write timeout unavailable: {error}"))?;
 
-    let mut stream = if use_ssl {
-        let connector =
-            TlsConnector::new().map_err(|error| format!("api ssl: TLS unavailable: {error}"))?;
-        ApiStream::Tls(
-            connector
-                .connect(host, stream)
-                .map_err(|error| format!("api ssl: TLS negotiation failed: {error}"))?,
-        )
-    } else {
-        ApiStream::Tcp(stream)
-    };
+        if use_ssl {
+            let connector = TlsConnector::new()
+                .map_err(|error| format!("api ssl: TLS unavailable: {error}"))?;
+            Ok(ApiStream::Tls(connector.connect(host, stream).map_err(
+                |error| format!("api ssl: TLS negotiation failed: {error}"),
+            )?))
+        } else {
+            Ok(ApiStream::Tcp(stream))
+        }
+    })();
+    metrics.connect_duration_ms += elapsed_ms(connect_started_at);
+    let mut stream = connection?;
 
-    send_sentence(
-        &mut stream,
-        &[
-            "/login".to_string(),
-            format!("=name={username}"),
-            format!("=password={password}"),
-        ],
-    )?;
-    read_response(&mut stream)?;
+    let auth_started_at = Instant::now();
+    let authentication = (|| -> Result<(), String> {
+        send_sentence(
+            &mut stream,
+            &[
+                "/login".to_string(),
+                format!("=name={username}"),
+                format!("=password={password}"),
+            ],
+        )?;
+        let outcome = read_response_outcome(&mut stream)?;
+        metrics.trap_count += outcome.trap_count;
+        match outcome.error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    })();
+    metrics.auth_duration_ms += elapsed_ms(auth_started_at);
+    if let Err(error) = authentication {
+        if is_fatal_response(&error) {
+            metrics.fatal_count += 1;
+        }
+        return Err(error);
+    }
     Ok(stream)
 }
 
-fn execute_once(request: &MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
+fn execute_once(
+    request: &MikroTikApiRequest,
+    metrics: &mut RouterOsNativePerformance,
+) -> Result<Vec<ApiRow>, String> {
     let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(5000));
     let mut stream = open_authenticated_stream(
         &request.host,
@@ -251,12 +366,53 @@ fn execute_once(request: &MikroTikApiRequest) -> Result<Vec<ApiRow>, String> {
         &request.password,
         request.use_ssl,
         timeout,
+        metrics,
     )?;
     let mut words = vec![request.command.clone()];
     append_api_words(&mut words, "=", request.params.as_ref());
     append_api_words(&mut words, "?", request.queries.as_ref());
-    send_sentence(&mut stream, &words)?;
-    read_response(&mut stream)
+    let command_started_at = Instant::now();
+    metrics.command_count += 1;
+    if let Err(error) = send_sentence(&mut stream, &words) {
+        metrics.command_timings.push(RouterOsCommandPerformance {
+            command: request.command.clone(),
+            duration_ms: elapsed_ms(command_started_at),
+            outcome: "connection",
+        });
+        return Err(error);
+    }
+    match read_response_outcome(&mut stream) {
+        Ok(outcome) => {
+            metrics.trap_count += outcome.trap_count;
+            metrics.command_timings.push(RouterOsCommandPerformance {
+                command: request.command.clone(),
+                duration_ms: elapsed_ms(command_started_at),
+                outcome: if outcome.error.is_some() {
+                    "trap"
+                } else {
+                    "success"
+                },
+            });
+            match outcome.error {
+                Some(error) => Err(error),
+                None => Ok(outcome.rows),
+            }
+        }
+        Err(error) => {
+            let outcome = if is_fatal_response(&error) {
+                metrics.fatal_count += 1;
+                "fatal"
+            } else {
+                "connection"
+            };
+            metrics.command_timings.push(RouterOsCommandPerformance {
+                command: request.command.clone(),
+                duration_ms: elapsed_ms(command_started_at),
+                outcome,
+            });
+            Err(error)
+        }
+    }
 }
 
 fn append_api_words(
@@ -294,22 +450,16 @@ fn send_sentence<S: Read + Write>(stream: &mut S, words: &[String]) -> Result<()
     stream.flush().map_err(map_io_error)
 }
 
-fn read_response<S: Read + Write>(stream: &mut S) -> Result<Vec<ApiRow>, String> {
-    let outcome = read_response_outcome(stream)?;
-    match outcome.error {
-        Some(error) => Err(error),
-        None => Ok(outcome.rows),
-    }
-}
-
 struct ApiCommandOutcome {
     rows: Vec<ApiRow>,
     error: Option<String>,
+    trap_count: usize,
 }
 
 fn read_response_outcome<S: Read + Write>(stream: &mut S) -> Result<ApiCommandOutcome, String> {
     let mut rows = Vec::new();
     let mut command_error = None;
+    let mut trap_count = 0;
 
     loop {
         let words = read_sentence(stream)?;
@@ -323,17 +473,29 @@ fn read_response_outcome<S: Read + Write>(stream: &mut S) -> Result<ApiCommandOu
                 return Ok(ApiCommandOutcome {
                     rows,
                     error: command_error,
+                    trap_count,
                 })
             }
             "!re" => rows.push(words_to_row(&words[1..])),
             // A trapped command is terminated by a separate !done sentence.
             // Consume it before the next command so batch responses cannot
             // become shifted from one voucher to another.
-            "!trap" => command_error = Some(map_trap(words_to_row(&words[1..]))),
+            "!trap" => {
+                trap_count += 1;
+                command_error = Some(map_trap(words_to_row(&words[1..])));
+            }
             "!fatal" => return Err("router offline: fatal API response".to_string()),
             _ => {}
         }
     }
+}
+
+fn elapsed_ms(started_at: Instant) -> f64 {
+    started_at.elapsed().as_secs_f64() * 1_000.0
+}
+
+fn is_fatal_response(error: &str) -> bool {
+    error.to_lowercase().contains("fatal api response")
 }
 
 fn read_sentence<S: Read + Write>(stream: &mut S) -> Result<Vec<String>, String> {
@@ -560,9 +722,11 @@ mod tests {
 
         let trapped = read_response_outcome(&mut stream).unwrap();
         assert_eq!(trapped.error.as_deref(), Some("duplicate user"));
+        assert_eq!(trapped.trap_count, 1);
 
         let following = read_response_outcome(&mut stream).unwrap();
         assert_eq!(following.error, None);
+        assert_eq!(following.trap_count, 0);
         assert_eq!(
             following.rows[0].get("name").map(String::as_str),
             Some("654321")

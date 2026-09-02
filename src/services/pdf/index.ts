@@ -1,5 +1,6 @@
 export {
   buildGeneratedTicketPdfRecord,
+  buildTicketPdfFileName,
   formatTicketValidityLabel,
   generateTicketPdf,
   normalizeTicketValidityLabel,
@@ -16,6 +17,14 @@ export {
   regenerateArchivedTicketPdf,
   type RegeneratedTicketPdf
 } from "./ArchivedTicketPdfService";
+export {
+  RecoveredVoucherBatchPdfService,
+  type RecoveredVoucherBatchCloudPublisher,
+  type RecoveredVoucherBatchFileStore,
+  type RecoveredVoucherBatchPdfResult,
+  type RecoveredVoucherBatchPdfSweepResult,
+  type RecoveredVoucherBatchPdfStatus
+} from "./RecoveredVoucherBatchPdfService";
 export {
   createTicketPrintArchivePayload,
   normalizeTicketPrintArchivePayload,

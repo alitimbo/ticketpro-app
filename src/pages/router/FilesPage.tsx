@@ -29,6 +29,7 @@ import {
   applyArchivedTicketTimingSnapshots,
   createTicketPrintArchivePayload,
   generateTicketPdf,
+  RecoveredVoucherBatchPdfService,
   regenerateArchivedTicketPdf,
   ticketPdfInputFromPrintArchive
 } from "../../services/pdf";
@@ -106,6 +107,14 @@ export function FilesPage() {
       : null,
     [database, session]
   );
+  const recoveredBatchPdfs = useMemo(
+    () => session
+      ? new RecoveredVoucherBatchPdfService(database, fileService, {
+          cloudPublisher: organizationOperations ?? undefined
+        })
+      : null,
+    [database, fileService, organizationOperations, session]
+  );
 
   const loadFiles = useCallback(async (options: { silent?: boolean } = {}) => {
     if (!isPersistent || !isInitialized || !session) {
@@ -124,6 +133,20 @@ export function FilesPage() {
       const routers = await (saasAccount?.organization.id
           ? routerRepository.listByOrganization(session.account_id, saasAccount.organization.id)
           : routerRepository.listByAccount(session.account_id));
+
+      let pdfRecoveryFailed = false;
+      let recoveredPdfCount = 0;
+      await Promise.all(routers.map(async (router) => {
+        const recovery = await recoveredBatchPdfs?.recoverMissingForRouter(
+          session.account_id,
+          router.id
+        );
+        recoveredPdfCount += recovery?.results.filter((result) => result.status === "created").length ?? 0;
+        if ((recovery?.failedBatchCount ?? 0) > 0) pdfRecoveryFailed = true;
+      }));
+      if (recoveredPdfCount > 0) {
+        setMessage(`${recoveredPdfCount} PDF interrompu(s) récupéré(s) automatiquement.`);
+      }
 
       const readFiles = async (checkLocalAvailability: boolean) => {
         const [records, batches] = await Promise.all([
@@ -185,7 +208,9 @@ export function FilesPage() {
       }));
       await readFiles(true);
       setLoadError(null);
-      setSyncWarning(organizationSyncFailed
+      setSyncWarning(pdfRecoveryFailed
+        ? "Un lot confirmé reste sans PDF local. TicketPro réessaiera automatiquement."
+        : organizationSyncFailed
         ? "Les fichiers locaux sont affichés, mais la récupération des archives de l'organisation a échoué. TicketPro réessaiera automatiquement."
         : null);
     } catch (error) {
@@ -205,6 +230,7 @@ export function FilesPage() {
     organizationOperations,
     organizationTicketCatalog,
     planRepository,
+    recoveredBatchPdfs,
     routerRepository,
     saasAccount?.organization.id,
     session

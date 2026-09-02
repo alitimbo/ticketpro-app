@@ -31,7 +31,7 @@ import {
 import { useAuth } from "../../app/auth/AuthProvider";
 import type { TicketStateHistoryRecord } from "../../domain/database";
 import type { UserRole } from "../../domain/auth";
-import { resolveTicketPdfPassword } from "../../services/pdf";
+import { RecoveredVoucherBatchPdfService, resolveTicketPdfPassword } from "../../services/pdf";
 import {
   LocalPrintService,
   printFormatLabel,
@@ -58,6 +58,7 @@ import {
   useAppDatabase
 } from "../../services/database";
 import {
+  OrganizationOperationsSyncService,
   OrganizationTicketCatalogService,
   RouterVoucherOutboxService,
   RouterTicketSyncService,
@@ -67,6 +68,7 @@ import {
   type TicketSyncReport,
   type TicketSyncSummary
 } from "../../services/sync";
+import { TauriFileService } from "../../services/files";
 import { ActionMenu, AsyncStateCard, Badge, Button, Card, EmptyState, PageHeader } from "../../shared/ui";
 import type { AppStatus, IconComponent } from "../../shared/ui";
 import { formatInternationalPhone, normalizeInternationalPhone } from "../../shared/phone";
@@ -152,6 +154,7 @@ export function TicketsPage() {
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
   const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
   const generatedFileRepository = useMemo(() => new GeneratedFileRepository(database), [database]);
+  const fileService = useMemo(() => new TauriFileService(), []);
   const printService = useMemo(() => new LocalPrintService(), []);
   const fakeRouterService = useMemo(
     () => new RouterService({ adapter: new FakeRouterAdapter({ latencyMs: 0 }), authSession: session }),
@@ -175,6 +178,25 @@ export function TicketsPage() {
         )
       : null,
     [database, session]
+  );
+  const organizationOperations = useMemo(
+    () => session
+      ? new OrganizationOperationsSyncService(
+          database,
+          session.account_id,
+          session.internal_profile_id,
+          session.internal_profile_role
+        )
+      : null,
+    [database, session]
+  );
+  const recoveredBatchPdfs = useMemo(
+    () => session
+      ? new RecoveredVoucherBatchPdfService(database, fileService, {
+          cloudPublisher: organizationOperations ?? undefined
+        })
+      : null,
+    [database, fileService, organizationOperations, session]
   );
 
   const loadPersistedRouterService = async (): Promise<RouterService> => {
@@ -266,11 +288,27 @@ export function TicketsPage() {
           session.account_id,
           persistedRouterService
         ).resume(routerId);
-        if (!disposed && report.processed > 0) {
+        const pdfRecovery = await recoveredBatchPdfs?.recoverMissingForRouter(
+          session.account_id,
+          routerId
+        );
+        const recoveredPdfCount = pdfRecovery?.results.filter(
+          (recovery) => recovery.status === "created"
+        ).length ?? 0;
+        const recoveredPdfCloudPending = pdfRecovery?.results.some(
+          (recovery) => recovery.cloudSyncPending
+        ) ?? false;
+        if (!disposed && (pdfRecovery?.failedBatchCount ?? 0) > 0) {
+          setError("Lot confirmé, mais un PDF reste à reprendre depuis la page Fichiers.");
+        }
+        if (!disposed && (report.processed > 0 || recoveredPdfCount > 0)) {
           setMessage(
             `${report.succeeded} commande(s) voucher reprise(s)`
             + (report.retried > 0 ? `, ${report.retried} encore en attente.` : ".")
+            + (recoveredPdfCount > 0 ? ` ${recoveredPdfCount} PDF récupéré(s).` : "")
+            + (recoveredPdfCloudPending ? " Sauvegarde multi-PC du PDF en attente." : "")
           );
+          if (recoveredPdfCount > 0) setTicketLoadToken((current) => current + 1);
           await organizationTicketCatalog?.publishRouter(routerId).catch(() => undefined);
         }
       } catch (resumeError) {
@@ -292,7 +330,16 @@ export function TicketsPage() {
       window.clearInterval(interval);
       window.removeEventListener("focus", onFocus);
     };
-  }, [database, isInitialized, isPersistent, organizationTicketCatalog, persistedRouterService, routerId, session]);
+  }, [
+    database,
+    isInitialized,
+    isPersistent,
+    organizationTicketCatalog,
+    persistedRouterService,
+    recoveredBatchPdfs,
+    routerId,
+    session
+  ]);
 
   useEffect(() => {
     if (!isPersistent || !isInitialized || !session) return undefined;

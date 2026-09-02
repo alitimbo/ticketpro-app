@@ -56,6 +56,37 @@ export type TicketPdfArchiveMetadata = Pick<
   | "displaySettings"
 >;
 
+export function buildTicketPdfFileName(input: {
+  batchId: string;
+  currency?: string;
+  generatedAt?: Date;
+  planName: string;
+  price: number | null;
+  quantity: number;
+  routerName: string;
+}): string {
+  const generatedAt = input.generatedAt ?? new Date();
+  const timestamp = generatedAt
+    .toISOString()
+    .replace(/[-:]/g, "")
+    .replace("T", "-")
+    .slice(0, 15);
+  const batchSuffix = sanitizeFileSegment(input.batchId.replace(/^batch-/, "")).slice(0, 8) || "lot";
+  const currency = sanitizeFileSegment(input.currency?.trim().slice(0, 12) || "CFA") || "CFA";
+  const price = input.price === null
+    ? `prix-non-defini-${currency}`
+    : `${Math.max(0, Math.round(input.price))}${currency}`;
+
+  return [
+    sanitizeFileSegment(input.routerName) || "Routeur",
+    sanitizeFileSegment(input.planName) || "Plan",
+    price,
+    `${Math.max(1, Math.round(input.quantity))}tickets`,
+    timestamp,
+    batchSuffix
+  ].join("-") + ".pdf";
+}
+
 export function formatTicketValidityLabel(minutes: number): string {
   const normalizedMinutes = Math.max(0, Math.round(minutes));
   if (normalizedMinutes >= 1440 && normalizedMinutes % 1440 === 0) {
@@ -77,6 +108,17 @@ export function normalizeTicketValidityLabel(value: string): string {
   if (unit.startsWith("j")) return `${amount}${amount === 1 ? "Jr" : "Jrs"}`;
   if (unit === "h" || unit === "hr" || unit.startsWith("heure")) return `${amount}H`;
   return `${amount}Min`;
+}
+
+function sanitizeFileSegment(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/[-_.]{2,}/g, "-")
+    .replace(/^[-_.]+|[-_.]+$/g, "")
+    .slice(0, 48);
 }
 
 type PageSize = {

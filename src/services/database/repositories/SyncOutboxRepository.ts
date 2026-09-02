@@ -119,7 +119,7 @@ export class SyncOutboxRepository {
     for (let offset = 0; offset < missing.length; offset += OUTBOX_ENQUEUE_CHUNK_SIZE) {
       const chunk = missing.slice(offset, offset + OUTBOX_ENQUEUE_CHUNK_SIZE);
       try {
-        await this.database.transaction(chunk.map(buildEnqueueStatement));
+        await this.database.transaction(chunk.map(buildSyncOutboxInsertStatement));
       } catch {
         // Une autre fenêtre peut gagner la course sur une clé UNIQUE. Le
         // chemin unitaire conserve alors la garantie d'idempotence finale.
@@ -493,7 +493,10 @@ export class SyncOutboxRepository {
 const OUTBOX_ENQUEUE_CHUNK_SIZE = 500;
 const OUTBOX_STATE_CHUNK_SIZE = 500;
 
-function buildEnqueueStatement(input: EnqueueSyncOperationInput): DatabaseStatement {
+export function buildSyncOutboxInsertStatement(
+  input: EnqueueSyncOperationInput
+): DatabaseStatement {
+  assertSecretFreePayload(input.payload);
   const now = input.created_at ?? new Date().toISOString();
   const id = input.id ?? createOutboxId(input.idempotency_key);
   return {

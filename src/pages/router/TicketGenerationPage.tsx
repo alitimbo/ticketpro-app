@@ -33,6 +33,7 @@ import { reconcileRouterPlanCatalog } from "../../services/recovery";
 import {
   OrganizationOperationsSyncService,
   OrganizationTicketCatalogService,
+  buildRouterVoucherCreateOperations,
   RouterVoucherOutboxService
 } from "../../services/sync";
 import {
@@ -40,6 +41,7 @@ import {
   createTicketPrintArchivePayload,
   formatTicketValidityLabel,
   generateTicketPdf,
+  RecoveredVoucherBatchPdfService,
   resolveTicketPdfPassword,
   type TicketPdfFormat,
   type TicketPdfInput
@@ -68,6 +70,7 @@ import {
   getSelectedQuantity,
   getTicketSummary,
   inspectVoucherBatchIntegrity,
+  MAX_TICKET_GENERATION_QUANTITY,
   normalizeCurrency,
   normalizePrefix,
   quickQuantities,
@@ -96,6 +99,11 @@ import {
   voucherBelongsToBatch
 } from "../../services/tickets";
 import { TauriFileService } from "../../services/files";
+import {
+  beginVoucherGenerationPerformance,
+  endVoucherGenerationPerformance,
+  type VoucherGenerationPerformanceMetrics
+} from "../../services/performance/VoucherGenerationPerformance";
 import { TicketDisplaySettingsForm } from "./TicketDisplaySettingsForm";
 
 const stepLabels = [
@@ -198,6 +206,14 @@ export function TicketGenerationPage() {
         )
       : null,
     [database, session]
+  );
+  const recoveredBatchPdfs = useMemo(
+    () => session
+      ? new RecoveredVoucherBatchPdfService(database, fileService, {
+          cloudPublisher: organizationOperations ?? undefined
+        })
+      : null,
+    [database, fileService, organizationOperations, session]
   );
 
   const loadPersistedRouterService = async (): Promise<RouterService> => {
@@ -313,7 +329,7 @@ export function TicketGenerationPage() {
     let disposed = false;
     let running = false;
     const resumeVoucherCommands = async () => {
-      if (running || disposed) return;
+      if (running || disposed || generationLockRef.current) return;
       running = true;
       try {
         const report = await new RouterVoucherOutboxService(
@@ -321,10 +337,25 @@ export function TicketGenerationPage() {
           session.account_id,
           persistedRouterService
         ).resume(routerId);
-        if (!disposed && report.processed > 0) {
+        const pdfRecovery = await recoveredBatchPdfs?.recoverMissingForRouter(
+          session.account_id,
+          routerId
+        );
+        const recoveredPdfCount = pdfRecovery?.results.filter(
+          (recovery) => recovery.status === "created"
+        ).length ?? 0;
+        const recoveredPdfCloudPending = pdfRecovery?.results.some(
+          (recovery) => recovery.cloudSyncPending
+        ) ?? false;
+        if (!disposed && (pdfRecovery?.failedBatchCount ?? 0) > 0) {
+          setError("Lot confirmé, mais un PDF reste à reprendre depuis la page Fichiers.");
+        }
+        if (!disposed && (report.processed > 0 || recoveredPdfCount > 0)) {
           setMessage(
             `${report.succeeded} commande(s) voucher reprise(s)`
             + (report.retried > 0 ? `, ${report.retried} encore en attente.` : ".")
+            + (recoveredPdfCount > 0 ? ` ${recoveredPdfCount} PDF récupéré(s).` : "")
+            + (recoveredPdfCloudPending ? " Sauvegarde multi-PC du PDF en attente." : "")
           );
           await organizationTicketCatalog?.publishRouter(routerId).catch(() => undefined);
         }
@@ -347,7 +378,16 @@ export function TicketGenerationPage() {
       window.clearInterval(interval);
       window.removeEventListener("focus", onFocus);
     };
-  }, [database, isInitialized, isPersistent, organizationTicketCatalog, persistedRouterService, routerId, session]);
+  }, [
+    database,
+    isInitialized,
+    isPersistent,
+    organizationTicketCatalog,
+    persistedRouterService,
+    recoveredBatchPdfs,
+    routerId,
+    session
+  ]);
 
   const refreshRouterCatalog = async () => {
     const requestId = ++catalogRequestIdRef.current;
@@ -696,6 +736,7 @@ export function TicketGenerationPage() {
 
     const batchId = createBatchId();
     const requestedQuantity = getSelectedQuantity(state);
+    const performanceMetrics = beginVoucherGenerationPerformance(requestedQuantity);
     setGenerationProgress({
       completed: 0,
       label: "Préparation et contrôle du routeur…",
@@ -708,9 +749,11 @@ export function TicketGenerationPage() {
 
     try {
       const generationService = await getRouterServiceForAction();
-      await generationService.ensureVoucherLifecycleEngine({
-        managedProfileNames: [selectedPlan.profileName]
-      });
+      await performanceMetrics.measure("LIFECYCLE_PREFLIGHT", () =>
+        generationService.ensureVoucherLifecycleEngine({
+          managedProfileNames: [selectedPlan.profileName]
+        })
+      );
       const [existingUsers, existingLocalTickets, remotePlans, remoteServers] = await Promise.all([
         generationService.listHotspotUsernames(),
         isPersistent
@@ -752,40 +795,42 @@ export function TicketGenerationPage() {
         setHotspotServers(remoteServers);
         throw new Error("Le serveur Hotspot sélectionné n'existe plus ou est désactivé. La liste a été actualisée.");
       }
-      const generatedUsernames = codeGenerator.generate({
-        alphabet: "numeric",
-        codeLength: state.options.codeLength,
-        excludeAmbiguous: state.options.excludeAmbiguous,
-        existingTickets: [...existingUsers, ...existingLocalTickets],
-        prefix: state.options.prefix,
-        quantity: requestedQuantity,
-        routerId: state.selectedRouterId,
-        usernameEqualsPassword: true
-      }).codes;
-      const generatedCredentials = await mapWithConcurrency(
-        generatedUsernames,
-        8,
-        async (credential) => {
-          if (state.options.usernameEqualsPassword) {
-            return credential;
+      const generatedCredentials = await performanceMetrics.measure("GENERATE_IDENTIFIERS", async () => {
+        const generatedUsernames = codeGenerator.generate({
+          alphabet: "numeric",
+          codeLength: state.options.codeLength,
+          excludeAmbiguous: state.options.excludeAmbiguous,
+          existingTickets: [...existingUsers, ...existingLocalTickets],
+          prefix: state.options.prefix,
+          quantity: requestedQuantity,
+          routerId: state.selectedRouterId,
+          usernameEqualsPassword: true
+        }).codes;
+        return mapWithConcurrency(
+          generatedUsernames,
+          8,
+          async (credential) => {
+            if (state.options.usernameEqualsPassword) {
+              return credential;
+            }
+
+            const password = codeGenerator.generate({
+              alphabet: "numeric",
+              codeLength: state.options.codeLength,
+              excludeAmbiguous: state.options.excludeAmbiguous,
+              existingTickets: [credential.username],
+              quantity: 1,
+              routerId: state.selectedRouterId,
+              usernameEqualsPassword: true
+            }).codes[0].username;
+
+            return {
+              ...credential,
+              passwordSecretRef: await protectTicketPassword(password)
+            };
           }
-
-          const password = codeGenerator.generate({
-            alphabet: "numeric",
-            codeLength: state.options.codeLength,
-            excludeAmbiguous: state.options.excludeAmbiguous,
-            existingTickets: [credential.username],
-            quantity: 1,
-            routerId: state.selectedRouterId,
-            usernameEqualsPassword: true
-          }).codes[0].username;
-
-          return {
-            ...credential,
-            passwordSecretRef: await protectTicketPassword(password)
-          };
-        }
-      );
+        );
+      });
       const pendingTickets = generatedCredentials.map((credential) =>
         buildTicketRecord({
           accountId: session.account_id,
@@ -819,17 +864,30 @@ export function TicketGenerationPage() {
         syncStatus: "pending"
       });
 
-      // Persist the complete intent before touching RouterOS. If the process is
-      // interrupted, every unconfirmed voucher remains recoverable from Tickets.
-      if (isPersistent) {
-        await batchRepository.createWithTickets(pendingBatch, pendingTickets);
-      }
-
       const voucherOutbox = isPersistent
         ? new RouterVoucherOutboxService(database, session.account_id, generationService)
         : null;
+      const voucherOperationInputs = voucherOutbox
+        ? buildRouterVoucherCreateOperations(session.account_id, pendingTickets)
+        : [];
+
+      // Persist the complete intent and its retry operations atomically before
+      // touching RouterOS. A power loss can therefore never leave vouchers
+      // without the durable instructions required to resume them.
+      if (isPersistent) {
+        await performanceMetrics.measure("SQLITE_TRANSACTION", () =>
+          batchRepository.createWithTickets(
+            pendingBatch,
+            pendingTickets,
+            voucherOperationInputs
+          )
+        );
+      }
+
       const voucherOperations = voucherOutbox
-        ? await voucherOutbox.enqueueTickets(pendingTickets)
+        ? await performanceMetrics.measure("OUTBOX_WRITE", () =>
+            voucherOutbox.enqueueTickets(pendingTickets)
+          )
         : new Map();
 
       setGenerationProgress({
@@ -845,8 +903,11 @@ export function TicketGenerationPage() {
         })
         .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
       if (voucherOutbox) {
-        const claimed = await voucherOutbox.beginMany(
-          operationEntries.map(({ operation }) => operation.id)
+        const claimed = await performanceMetrics.measure(
+          "OUTBOX_WRITE",
+          () => voucherOutbox.beginMany(
+            operationEntries.map(({ operation }) => operation.id)
+          )
         );
         if (claimed.size !== pendingTickets.length) {
           await voucherOutbox.deferMany(
@@ -872,17 +933,32 @@ export function TicketGenerationPage() {
         validityMinutes: selectedPlan.validityMinutes ?? selectedPlan.durationMinutes
       }));
       let creationResults: Awaited<ReturnType<typeof generationService.createHotspotUsersExactBatch>>;
+      let routerVerificationStarted = false;
+      performanceMetrics.setRouterCreateOutcome({
+        failed: 0,
+        requested: requestedQuantity,
+        succeeded: 0,
+        uncertain: requestedQuantity
+      });
+      performanceMetrics.startPhase("ROUTER_CREATE");
       try {
         creationResults = await generationService.createHotspotUsersExactBatch(
           voucherDrafts,
-          (progress) => setGenerationProgress({
-            completed: progress.completed,
-            label: progress.phase === "verifying"
+          (progress) => {
+            if (progress.phase === "verifying" && !routerVerificationStarted) {
+              performanceMetrics.endPhase("ROUTER_CREATE");
+              performanceMetrics.startPhase("ROUTER_VERIFY");
+              routerVerificationStarted = true;
+            }
+            setGenerationProgress({
+              completed: progress.completed,
+              label: progress.phase === "verifying"
               ? `Vérification exacte : ${progress.completed}/${requestedQuantity} vouchers confirmés`
               : `Création groupée : ${progress.completed}/${requestedQuantity} vouchers confirmés`,
-            phase: progress.phase,
-            total: requestedQuantity
-          })
+              phase: progress.phase,
+              total: requestedQuantity
+            });
+          }
         );
       } catch (creationError) {
         if (voucherOutbox) {
@@ -892,7 +968,18 @@ export function TicketGenerationPage() {
           );
         }
         throw creationError;
+      } finally {
+        performanceMetrics.endPhase("ROUTER_CREATE");
+        performanceMetrics.endPhase("ROUTER_VERIFY");
       }
+
+      const initiallyConfirmed = creationResults.filter((result) => result.status === "confirmed").length;
+      performanceMetrics.setRouterCreateOutcome({
+        failed: creationResults.length - initiallyConfirmed,
+        requested: requestedQuantity,
+        succeeded: initiallyConfirmed,
+        uncertain: 0
+      });
 
       const resultByUsername = new Map(
         creationResults.map((result) => [result.username, result] as const)
@@ -903,7 +990,10 @@ export function TicketGenerationPage() {
         phase: "verifying",
         total: requestedQuantity
       });
-      const finalRouterUsers = await generationService.listHotspotUsersForVerification();
+      const finalRouterUsers = await performanceMetrics.measure(
+        "ROUTER_VERIFY",
+        () => generationService.listHotspotUsersForVerification()
+      );
       const confirmedRouterByUsername = new Map(
         findConfirmedVoucherBatchUsers({
           batchId,
@@ -950,17 +1040,26 @@ export function TicketGenerationPage() {
         failureEntries.push({ message, operationId: operation?.id, ticket: pendingTicket });
       });
 
+      performanceMetrics.setRouterCreateOutcome({
+        failed: failureEntries.length,
+        requested: requestedQuantity,
+        succeeded: confirmedByUsername.size,
+        uncertain: 0
+      });
+
       if (isPersistent) {
-        if (voucherOutbox) {
-          await voucherOutbox.completeMany(completionEntries);
-          await mapWithConcurrency(
-            failureEntries.filter((entry) => Boolean(entry.operationId)),
-            8,
-            (entry) => voucherOutbox.defer(entry.operationId!, new Error(entry.message))
-          );
-        } else {
-          await ticketRepository.confirmRouterBatch([...confirmedByUsername.values()]);
-        }
+        await performanceMetrics.measure("SQLITE_CONFIRM", async () => {
+          if (voucherOutbox) {
+            await voucherOutbox.completeMany(completionEntries);
+            await mapWithConcurrency(
+              failureEntries.filter((entry) => Boolean(entry.operationId)),
+              8,
+              (entry) => voucherOutbox.defer(entry.operationId!, new Error(entry.message))
+            );
+          } else {
+            await ticketRepository.confirmRouterBatch([...confirmedByUsername.values()]);
+          }
+        });
       }
 
       const routerIntegrity = inspectVoucherBatchIntegrity({
@@ -999,8 +1098,10 @@ export function TicketGenerationPage() {
           phase: "saving",
           total: requestedQuantity
         });
-        const localBatchTickets = await ticketRepository.listByBatch(batchId);
-        assertExactLocalTicketBatch(pendingTickets, localBatchTickets);
+        await performanceMetrics.measure("SQLITE_CONFIRM", async () => {
+          const localBatchTickets = await ticketRepository.listByBatch(batchId);
+          assertExactLocalTicketBatch(pendingTickets, localBatchTickets);
+        });
       }
 
       const syncStatus: SyncStatus = failedTickets.length > 0 ? "pending" : "synced";
@@ -1027,7 +1128,11 @@ export function TicketGenerationPage() {
         routerName: selectedRouter.name
       });
 
-      if (isPersistent) await batchRepository.updateState(batch.id, batch.account_id, batch.status, syncStatus);
+      if (isPersistent) {
+        await performanceMetrics.measure("SQLITE_CONFIRM", () =>
+          batchRepository.updateState(batch.id, batch.account_id, batch.status, syncStatus)
+        );
+      }
 
       let organizationSyncError: string | null = null;
       if (isPersistent && organizationTicketCatalog) {
@@ -1038,7 +1143,9 @@ export function TicketGenerationPage() {
           total: requestedQuantity
         });
         try {
-          await organizationTicketCatalog.publishBatch(state.selectedRouterId, batch.id);
+          await performanceMetrics.measure("VPS_SYNC", () =>
+            organizationTicketCatalog.publishBatch(state.selectedRouterId, batch.id)
+          );
         } catch (cloudError) {
           organizationSyncError = readGenerationError(
             cloudError,
@@ -1059,7 +1166,18 @@ export function TicketGenerationPage() {
               phase: "pdf",
               total: requestedQuantity
             });
-            createdPdf = await createAndStorePdf(batch, succeededTickets, fileName);
+            performanceMetrics.startPhase("PDF_GENERATION");
+            try {
+              createdPdf = await createAndStorePdf(
+                batch,
+                succeededTickets,
+                fileName,
+                undefined,
+                performanceMetrics
+              );
+            } finally {
+              performanceMetrics.endPhase("PDF_GENERATION");
+            }
           }
         } catch (fileError) {
           pdfError = fileError instanceof Error ? fileError.message : "Le PDF n'a pas pu être généré.";
@@ -1090,8 +1208,10 @@ export function TicketGenerationPage() {
           : `${succeededTickets.length} ticket(s) créés avec succès${createdPdf ? " et PDF enregistré." : "."}`
       );
     } catch (generationError) {
+      performanceMetrics.markFailed();
       setError(readGenerationError(generationError, "La génération des tickets a échoué."));
     } finally {
+      endVoucherGenerationPerformance(performanceMetrics);
       generationLockRef.current = false;
       setIsGenerating(false);
       setGenerationProgress(null);
@@ -1104,7 +1224,8 @@ export function TicketGenerationPage() {
     batch: CreateTicketBatchInput,
     pdfTickets: CreateTicketInput[],
     fileName: string,
-    output?: { format: TicketPdfFormat; recordId: string }
+    output?: { format: TicketPdfFormat; recordId: string },
+    performanceMetrics?: VoucherGenerationPerformanceMetrics
   ): Promise<CreateGeneratedFileInput> => {
     if (!selectedPlan || !selectedRouter) {
       throw new Error("Le plan ou le routeur du PDF est introuvable.");
@@ -1164,14 +1285,22 @@ export function TicketGenerationPage() {
     }
 
     await generatedFiles.upsert(fileRecord);
+    performanceMetrics?.endPhase("PDF_GENERATION");
     if (organizationOperations) {
       try {
-        await organizationOperations.publishFile(routerId, fileRecord.id);
-        await organizationOperations.publishTicketPrintArchive(
-          routerId,
-          fileRecord.id,
-          createTicketPrintArchivePayload(pdfInput)
-        );
+        const publishFiles = async () => {
+          await organizationOperations.publishFile(routerId, fileRecord.id);
+          await organizationOperations.publishTicketPrintArchive(
+            routerId,
+            fileRecord.id,
+            createTicketPrintArchivePayload(pdfInput)
+          );
+        };
+        if (performanceMetrics) {
+          await performanceMetrics.measure("VPS_FILE_SYNC", publishFiles);
+        } else {
+          await publishFiles();
+        }
       } catch (archiveError) {
         const detail = archiveError instanceof Error ? archiveError.message : "service indisponible";
         setError(
@@ -1180,11 +1309,16 @@ export function TicketGenerationPage() {
       }
     }
     if (isPersistent) {
-      await ticketRepository.markExportedMany(
+      const markExported = () => ticketRepository.markExportedMany(
         pdfTickets.map((ticket) => ticket.id),
         session!.account_id,
         generatedAt
       );
+      if (performanceMetrics) {
+        await performanceMetrics.measure("SQLITE_CONFIRM", markExported);
+      } else {
+        await markExported();
+      }
       pdfTickets.forEach((ticket) => { ticket.exported_at = generatedAt; });
       setTickets((current) => current.map((ticket) =>
         pdfTickets.some((exported) => exported.id === ticket.id)
@@ -1658,11 +1792,11 @@ function StepQuantity({
           disabled={state.quantity !== "custom"}
           inputMode="numeric"
           min="1"
-          max="500"
+          max={MAX_TICKET_GENERATION_QUANTITY}
           value={state.customQuantity}
           onChange={(event) => onChange({ customQuantity: event.target.value, quantity: "custom" })}
         />
-        <small>Entre 1 et 500 tickets par lot.</small>
+        <small>Entre 1 et {MAX_TICKET_GENERATION_QUANTITY} tickets par lot.</small>
       </label>
     </Card>
   );
@@ -2216,8 +2350,12 @@ function validateStep(
   if (step === 3) {
     const quantity = getSelectedQuantity(state);
 
-    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 500) {
-      return "Choisissez une quantité entre 1 et 500.";
+    if (
+      !Number.isInteger(quantity)
+      || quantity < 1
+      || quantity > MAX_TICKET_GENERATION_QUANTITY
+    ) {
+      return `Choisissez une quantité entre 1 et ${MAX_TICKET_GENERATION_QUANTITY}.`;
     }
   }
 

@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import {
+  beginVoucherGenerationPerformance,
+  endVoucherGenerationPerformance
+} from "../performance/VoucherGenerationPerformance";
 import { TauriRouterOsApiTransport } from "./RouterOsApiTransport";
 
 describe("TauriRouterOsApiTransport", () => {
@@ -63,5 +67,80 @@ describe("TauriRouterOsApiTransport", () => {
     await Promise.all(requests);
 
     expect(maximumObserved).toBe(3);
+  });
+
+  it("agrege les mesures natives sans exposer les identifiants de connexion", async () => {
+    const logger = vi.fn();
+    const metrics = beginVoucherGenerationPerformance(1, { logger });
+    const invoke = vi.fn(async () => ({
+      error: null,
+      metrics: {
+        authDurationMs: 4,
+        commandCount: 1,
+        commandTimings: [
+          { command: "/ip/hotspot/user/add", durationMs: 25, outcome: "success" }
+        ],
+        connectDurationMs: 6,
+        connectionCount: 1,
+        fatalCount: 0,
+        retryCount: 0,
+        trapCount: 0
+      },
+      rows: []
+    }));
+    const transport = new TauriRouterOsApiTransport(invoke);
+
+    await transport.call({
+      command: "/ip/hotspot/user/add",
+      host: "10.250.0.2",
+      password: "mikrotik-password-must-not-leak",
+      params: { name: "voucher-username-must-not-leak", password: "voucher-password-must-not-leak" },
+      port: 8728,
+      username: "ticketpro-sensitive-user"
+    });
+    metrics.setRouterCreateOutcome({ failed: 0, requested: 1, succeeded: 1, uncertain: 0 });
+    const report = endVoucherGenerationPerformance(metrics);
+
+    expect(report).toContain("routerCommandCount = 1");
+    expect(report).toContain("routerConnectionCount = 1");
+    expect(report).toContain("avg = 25.00 ms");
+    expect(report).not.toContain("mikrotik-password-must-not-leak");
+    expect(report).not.toContain("voucher-username-must-not-leak");
+    expect(report).not.toContain("voucher-password-must-not-leak");
+    expect(report).not.toContain("ticketpro-sensitive-user");
+  });
+
+  it("conserve l'erreur metier native apres avoir collecte les mesures", async () => {
+    const logger = vi.fn();
+    const metrics = beginVoucherGenerationPerformance(10, { logger });
+    const invoke = vi.fn(async () => ({
+      error: "router offline: injected failure",
+      metrics: {
+        authDurationMs: 0,
+        commandCount: 0,
+        commandTimings: [],
+        connectDurationMs: 12,
+        connectionCount: 2,
+        fatalCount: 0,
+        retryCount: 1,
+        trapCount: 0
+      },
+      rows: []
+    }));
+    const transport = new TauriRouterOsApiTransport(invoke);
+
+    await expect(transport.call({
+      command: "/system/resource/print",
+      host: "10.250.0.2",
+      password: "secret",
+      port: 8728,
+      username: "api-user"
+    })).rejects.toThrow("router offline: injected failure");
+    metrics.markFailed();
+    const report = endVoucherGenerationPerformance(metrics);
+
+    expect(report).toContain("result=error");
+    expect(report).toContain("routerConnectionCount = 2");
+    expect(report).toContain("routerRetryCount = 1");
   });
 });

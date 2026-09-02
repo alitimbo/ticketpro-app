@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { InMemoryDatabaseClient } from "../InMemoryDatabaseClient";
 import { HotspotPlanRepository } from "./HotspotPlanRepository";
+import { SyncOutboxRepository } from "./SyncOutboxRepository";
 import { TicketBatchRepository } from "./TicketBatchRepository";
 
 describe("persistance plans et lots", () => {
@@ -111,7 +112,20 @@ describe("persistance plans et lots", () => {
           validity_minutes_snapshot: 300,
           username: "ABC123"
         }
-      ]
+      ],
+      [{
+        account_id: "account-test",
+        aggregate_id: "ticket-test",
+        aggregate_type: "ticket",
+        correlation_id: "batch-test",
+        id: "outbox-ticket-test",
+        idempotency_key: "routeros:voucher:create:router-test:ticket-test",
+        max_attempts: 10_000,
+        operation_type: "routeros.voucher.create",
+        payload: { ticketId: "ticket-test" },
+        priority: 20,
+        router_id: "router-test"
+      }]
     );
 
     await expect(database.query("SELECT * FROM tickets WHERE batch_id = ?1", ["batch-test"])).resolves.toEqual([
@@ -129,6 +143,14 @@ describe("persistance plans et lots", () => {
       currency: "EUR",
       price_snapshot: 800
     });
+    await expect(new SyncOutboxRepository(database).listByAccount("account-test")).resolves.toEqual([
+      expect.objectContaining({
+        aggregate_id: "ticket-test",
+        correlation_id: "batch-test",
+        max_attempts: 10_000,
+        status: "pending"
+      })
+    ]);
     await expect(
       batches.updateState("batch-test", "account-test", "partiel", "pending")
     ).resolves.toMatchObject({ status: "partiel", sync_status: "pending" });

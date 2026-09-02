@@ -17,7 +17,10 @@ export {
 export { OrganizationOperationsSyncService } from "./OrganizationOperationsSyncService";
 export {
   ROUTER_VOUCHER_CREATE_OPERATION,
-  RouterVoucherOutboxService
+  ROUTER_VOUCHER_MAX_ATTEMPTS,
+  buildRouterVoucherCreateOperations,
+  RouterVoucherOutboxService,
+  type RouterVoucherResumeReport
 } from "./RouterVoucherOutboxService";
 export {
   SyncOutboxError,
