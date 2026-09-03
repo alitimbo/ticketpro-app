@@ -145,6 +145,22 @@ export type HotspotUserLimits = {
   limitBytesTotal?: number | null;
 };
 
+export type RouterVoucherDecommissionProgress = {
+  completed: number;
+  phase: "inventory" | "removing" | "verifying";
+  total: number;
+};
+
+export type RouterVoucherDecommissionReport = {
+  cleanupVersion: 1;
+  failedCount: number;
+  remainingAuthorizationCount: number;
+  remainingManagedUserCount: number;
+  removedCount: number;
+  requestedCount: number;
+  verifiedAt: string;
+};
+
 export type HotspotUsersBatchDraft = {
   planId: string;
   quantity: number;

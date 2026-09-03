@@ -425,6 +425,10 @@ db.exec(`
     vpn_json TEXT,
     status TEXT NOT NULL CHECK(status IN ('active', 'offline', 'warning')),
     last_seen_at TEXT,
+    decommission_status TEXT NOT NULL DEFAULT 'active',
+    decommission_requested_at TEXT,
+    decommission_error_code TEXT,
+    decommission_report_json TEXT,
     created_by_user_id TEXT NOT NULL REFERENCES organization_users(id),
     updated_by_user_id TEXT NOT NULL REFERENCES organization_users(id),
     created_at TEXT NOT NULL,
@@ -432,6 +436,29 @@ db.exec(`
     deleted_at TEXT,
     UNIQUE (organization_id, stable_identity)
   );
+
+  CREATE TABLE IF NOT EXISTS organization_router_retirement_tombstones (
+    organization_id TEXT NOT NULL,
+    router_id TEXT NOT NULL,
+    stable_identity TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    retired_at TEXT NOT NULL,
+    retired_by TEXT NOT NULL,
+    PRIMARY KEY (organization_id, router_id),
+    UNIQUE (organization_id, stable_identity)
+  );
+
+  CREATE TRIGGER IF NOT EXISTS prevent_retired_router_reactivation
+  BEFORE UPDATE OF deleted_at ON organization_routers
+  WHEN OLD.deleted_at IS NOT NULL AND NEW.deleted_at IS NULL
+    AND EXISTS (
+      SELECT 1 FROM organization_router_retirement_tombstones tombstone
+      WHERE tombstone.organization_id = OLD.organization_id
+        AND (tombstone.router_id = OLD.id OR tombstone.stable_identity = OLD.stable_identity)
+    )
+  BEGIN
+    SELECT RAISE(ABORT, 'ROUTER_RETIRED');
+  END;
 
   CREATE TABLE IF NOT EXISTS organization_ticket_batches (
     id TEXT PRIMARY KEY,
@@ -682,6 +709,10 @@ ensureColumn("organization_users", "created_by_user_id", "TEXT");
 ensureColumn("organization_sessions", "active_membership_id", "TEXT");
 ensureColumn("organization_subscriptions", "max_devices", "INTEGER NOT NULL DEFAULT 1");
 ensureColumn("organization_subscriptions", "device_limit_mode", "TEXT NOT NULL DEFAULT 'limited'");
+ensureColumn("organization_routers", "decommission_status", "TEXT NOT NULL DEFAULT 'active'");
+ensureColumn("organization_routers", "decommission_requested_at", "TEXT");
+ensureColumn("organization_routers", "decommission_error_code", "TEXT");
+ensureColumn("organization_routers", "decommission_report_json", "TEXT");
 ensureColumn("organization_tickets", "duration_minutes_snapshot", "INTEGER");
 ensureColumn("organization_tickets", "validity_minutes_snapshot", "INTEGER");
 ensureColumn("organization_tickets", "data_limit_mb_snapshot", "INTEGER");
@@ -1484,6 +1515,12 @@ const statements = {
     SELECT * FROM organization_routers
     WHERE organization_id = ? AND stable_identity = ?
   `),
+  findOrganizationRouterRetirementTombstone: db.prepare(`
+    SELECT organization_id, router_id, stable_identity, reason, retired_at, retired_by
+    FROM organization_router_retirement_tombstones
+    WHERE organization_id = ? AND (router_id = ? OR stable_identity = ?)
+    LIMIT 1
+  `),
   listOrganizationRouters: db.prepare(`
     SELECT * FROM organization_routers
     WHERE organization_id = ? AND deleted_at IS NULL
@@ -1505,12 +1542,63 @@ const statements = {
       notes = ?, api_port = ?, api_ssl_port = ?, username = ?,
       credential_ciphertext = ?, connection_mode = ?, connections_json = ?,
       plans_json = ?, vpn_json = ?, status = ?, last_seen_at = ?,
-      updated_by_user_id = ?, updated_at = ?, deleted_at = NULL
+      updated_by_user_id = ?, updated_at = ?,
+      decommission_status = CASE WHEN deleted_at IS NOT NULL THEN 'active' ELSE decommission_status END,
+      decommission_requested_at = CASE WHEN deleted_at IS NOT NULL THEN NULL ELSE decommission_requested_at END,
+      decommission_error_code = CASE WHEN deleted_at IS NOT NULL THEN NULL ELSE decommission_error_code END,
+      decommission_report_json = CASE WHEN deleted_at IS NOT NULL THEN NULL ELSE decommission_report_json END,
+      deleted_at = NULL
     WHERE organization_id = ? AND id = ?
+  `),
+  beginOrganizationRouterDecommission: db.prepare(`
+    UPDATE organization_routers
+    SET decommission_status = 'pending',
+      decommission_requested_at = COALESCE(decommission_requested_at, ?),
+      decommission_error_code = NULL,
+      updated_at = ?, updated_by_user_id = ?
+    WHERE organization_id = ? AND id = ? AND deleted_at IS NULL
+      AND decommission_status NOT IN ('cleanup_verified', 'completed')
+  `),
+  markOrganizationRouterDecommissionFailure: db.prepare(`
+    UPDATE organization_routers
+    SET decommission_status = 'cleanup_required', decommission_error_code = ?,
+      updated_at = ?, updated_by_user_id = ?
+    WHERE organization_id = ? AND id = ? AND deleted_at IS NULL
+      AND decommission_status <> 'cleanup_verified'
+  `),
+  markOrganizationRouterCleanupVerified: db.prepare(`
+    UPDATE organization_routers
+    SET decommission_status = 'cleanup_verified', decommission_error_code = NULL,
+      decommission_report_json = ?, updated_at = ?, updated_by_user_id = ?
+    WHERE organization_id = ? AND id = ? AND deleted_at IS NULL
+  `),
+  upsertOrganizationRouterRetirementTombstone: db.prepare(`
+    INSERT INTO organization_router_retirement_tombstones (
+      organization_id, router_id, stable_identity, reason, retired_at, retired_by
+    ) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(organization_id, router_id) DO UPDATE SET
+      stable_identity = excluded.stable_identity,
+      reason = excluded.reason,
+      retired_at = excluded.retired_at,
+      retired_by = excluded.retired_by
+  `),
+  archiveOrganizationRouterTicketBatches: db.prepare(`
+    UPDATE organization_ticket_batches
+    SET status = 'supprimé', sync_status = 'synced', updated_at = ?
+    WHERE organization_id = ? AND router_id = ? AND status <> 'supprimé'
+  `),
+  archiveOrganizationRouterTickets: db.prepare(`
+    UPDATE organization_tickets
+    SET status = 'supprimé', deleted_at = COALESCE(deleted_at, ?),
+      archived_at = COALESCE(archived_at, ?),
+      router_deleted_at = COALESCE(router_deleted_at, ?),
+      sync_status = 'synced', updated_at = ?
+    WHERE organization_id = ? AND router_id = ?
   `),
   softDeleteOrganizationRouter: db.prepare(`
     UPDATE organization_routers
-    SET deleted_at = ?, updated_at = ?, updated_by_user_id = ?
+    SET decommission_status = 'completed', decommission_error_code = NULL,
+      deleted_at = ?, updated_at = ?, updated_by_user_id = ?
     WHERE organization_id = ? AND id = ? AND deleted_at IS NULL
   `),
   findOrganizationTicketBatchById: db.prepare(`
@@ -2170,6 +2258,55 @@ async function revokeUnmanagedOrganizationOperatorPeers(organizationId, actual =
     });
   }
   return hubState;
+}
+
+async function revokeOrganizationRouterPeers(organizationId, routerId, routerRecord = null) {
+  let hubState;
+  try {
+    hubState = await vpnHubRequest("/v1/peers/list", {
+      account_id: organizationId
+    });
+  } catch (error) {
+    if (error instanceof HttpError && error.details?.hub_error === "tenant_not_found") {
+      return 0;
+    }
+    throw error;
+  }
+
+  let storedPublicKey = null;
+  if (routerRecord?.vpn_json) {
+    try {
+      const storedVpn = JSON.parse(routerRecord.vpn_json);
+      storedPublicKey = typeof storedVpn?.public_key === "string"
+        ? storedVpn.public_key
+        : null;
+    } catch {
+      // A malformed legacy snapshot must not prevent matching by resource id.
+    }
+  }
+
+  const matchingPeers = (Array.isArray(hubState.peers) ? hubState.peers : [])
+    .filter((peer) => (
+      peer.peer_type === "router"
+      && peer.status !== "revoked"
+      && (
+        peer.resource_id === routerId
+        || (storedPublicKey && peer.public_key === storedPublicKey)
+      )
+    ));
+
+  for (const peer of matchingPeers) {
+    await vpnHubRequest("/v1/peers", {
+      account_id: organizationId,
+      action: "revoke",
+      name: peer.name || routerRecord?.name || "Routeur TicketPro supprimé",
+      peer_type: "router",
+      public_key: peer.public_key,
+      resource_id: peer.resource_id || routerId
+    });
+  }
+
+  return matchingPeers.length;
 }
 
 async function deactivateOrganizationMemberDevices(
@@ -3742,6 +3879,7 @@ function organizationRouterRecoveryResponse(record) {
     connection_mode: record.connection_mode,
     connections: JSON.parse(record.connections_json),
     credential: decryptRouterCredential(record),
+    decommission_status: record.decommission_status ?? "active",
     hotspot_address: record.hotspot_address,
     id: record.id,
     label: record.label,
@@ -3758,6 +3896,46 @@ function organizationRouterRecoveryResponse(record) {
     updated_at: record.updated_at,
     username: record.username,
     vpn: record.vpn_json ? JSON.parse(record.vpn_json) : null
+  };
+}
+
+function normalizeRouterDecommissionReport(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new HttpError(400, "Rapport de déclassement RouterOS manquant.");
+  }
+  const cleanupVersion = requireInteger(value, "cleanup_version", 1, 1);
+  const requestedCount = requireInteger(value, "requested_count", 0, 1_000_000);
+  const removedCount = requireInteger(value, "removed_count", 0, 1_000_000);
+  const failedCount = requireInteger(value, "failed_count", 0, 1_000_000);
+  const remainingManagedUserCount = requireInteger(
+    value,
+    "remaining_managed_user_count",
+    0,
+    1_000_000
+  );
+  const remainingAuthorizationCount = requireInteger(
+    value,
+    "remaining_authorization_count",
+    0,
+    1_000_000
+  );
+  const verifiedAt = requireText(value, "verified_at", 80);
+  if (Number.isNaN(Date.parse(verifiedAt)) || removedCount > requestedCount) {
+    throw new HttpError(400, "Rapport de déclassement RouterOS invalide.");
+  }
+  if (failedCount > 0 || remainingManagedUserCount > 0 || remainingAuthorizationCount > 0) {
+    throw new HttpError(409, "Le nettoyage RouterOS n'est pas entièrement confirmé. Le routeur reste compté dans l'abonnement.", {
+      code: "ROUTER_DECOMMISSION_CLEANUP_REQUIRED"
+    });
+  }
+  return {
+    cleanup_version: cleanupVersion,
+    failed_count: failedCount,
+    remaining_authorization_count: remainingAuthorizationCount,
+    remaining_managed_user_count: remainingManagedUserCount,
+    removed_count: removedCount,
+    requested_count: requestedCount,
+    verified_at: new Date(verifiedAt).toISOString()
   };
 }
 
@@ -5673,7 +5851,19 @@ const handlers = [
       throw new HttpError(409, "L'identité physique de ce routeur appartient déjà à un autre enregistrement.");
     }
     const existing = byStableIdentity ?? byId ?? null;
-    if (!existing) {
+    const retirementTombstone = statements.findOrganizationRouterRetirementTombstone.get(
+      context.organization.id,
+      snapshot.id,
+      snapshot.stable_identity
+    ) ?? null;
+    if (existing?.deleted_at && retirementTombstone) {
+      throw new HttpError(
+        409,
+        "Ce routeur a été définitivement retiré de l'organisation. Une ancienne sauvegarde locale ne peut pas le réactiver.",
+        { code: "ROUTER_RETIRED" }
+      );
+    }
+    if (!existing || existing.deleted_at) {
       const routerCount = statements.listOrganizationRouters.all(context.organization.id).length;
       if (routerCount >= Number(context.subscription.router_limit)) {
         throw new HttpError(409, "La limite de routeurs de l'abonnement est atteinte.");
@@ -5758,26 +5948,162 @@ const handlers = [
   }),
 
   route("POST", "/v1/saas/routers/remove", async (request, body) => {
-    const context = requireOrganizationPermission(request, "global.routers.delete", {
-      requireActiveSubscription: true
+    requireOrganizationPermission(request, "global.routers.delete");
+    requireText(body, "router_id", 200);
+    throw new HttpError(409, "Mettez TicketPro à jour pour déclassement sécurisé du routeur.", {
+      code: "ROUTER_DECOMMISSION_REQUIRED"
     });
+  }),
+
+  route("POST", "/v1/saas/routers/remove/prepare", async (request, body) => {
+    const context = requireOrganizationPermission(request, "global.routers.delete");
     const routerId = requireText(body, "router_id", 200);
-    const removedAt = nowIso();
-    const result = statements.softDeleteOrganizationRouter.run(
-      removedAt,
-      removedAt,
-      context.user.id,
+    const current = statements.findAnyOrganizationRouterById.get(
       context.organization.id,
       routerId
-    );
-    if (Number(result.changes) !== 1) {
-      throw new HttpError(404, "Routeur cloud introuvable.");
+    ) ?? null;
+    const alreadyRemoved = !current || Boolean(current.deleted_at);
+    if (!alreadyRemoved && current.decommission_status !== "cleanup_verified") {
+      const changedAt = nowIso();
+      statements.beginOrganizationRouterDecommission.run(
+        changedAt,
+        changedAt,
+        context.user.id,
+        context.organization.id,
+        routerId
+      );
     }
-    logEvent(request, null, "organization_router_snapshot_removed", context.organization.id, null, {
+    const prepared = statements.findAnyOrganizationRouterById.get(
+      context.organization.id,
+      routerId
+    ) ?? null;
+    const decommissionStatus = alreadyRemoved
+      ? "completed"
+      : prepared?.decommission_status ?? "pending";
+    logEvent(request, null, "organization_router_decommission_prepared", context.organization.id, null, {
       organization_user_id: context.user.id,
+      already_removed: alreadyRemoved,
+      decommission_status: decommissionStatus,
+      router_id: routerId
+    });
+    return {
+      already_removed: alreadyRemoved,
+      decommission_status: decommissionStatus,
+      ok: true,
+      requires_router_cleanup: !alreadyRemoved && decommissionStatus !== "cleanup_verified",
+      router_id: routerId
+    };
+  }),
+
+  route("POST", "/v1/saas/routers/remove/failure", async (request, body) => {
+    const context = requireOrganizationPermission(request, "global.routers.delete");
+    const routerId = requireText(body, "router_id", 200);
+    const rawErrorCode = requireText(body, "error_code", 80).toUpperCase();
+    const errorCode = /^[A-Z0-9_]+$/.test(rawErrorCode)
+      ? rawErrorCode
+      : "ROUTEROS_CLEANUP_FAILED";
+    const router = statements.findAnyOrganizationRouterById.get(
+      context.organization.id,
+      routerId
+    ) ?? null;
+    if (router && !router.deleted_at) {
+      statements.markOrganizationRouterDecommissionFailure.run(
+        errorCode,
+        nowIso(),
+        context.user.id,
+        context.organization.id,
+        routerId
+      );
+    }
+    logEvent(request, null, "organization_router_decommission_cleanup_failed", context.organization.id, null, {
+      organization_user_id: context.user.id,
+      error_code: errorCode,
       router_id: routerId
     });
     return { ok: true, router_id: routerId };
+  }),
+
+  route("POST", "/v1/saas/routers/remove/complete", async (request, body) => {
+    const context = requireOrganizationPermission(request, "global.routers.delete");
+    const routerId = requireText(body, "router_id", 200);
+    let router = statements.findAnyOrganizationRouterById.get(
+      context.organization.id,
+      routerId
+    ) ?? null;
+    const alreadyRemoved = !router || Boolean(router.deleted_at);
+
+    if (!alreadyRemoved && router.decommission_status !== "cleanup_verified") {
+      const cleanupReport = normalizeRouterDecommissionReport(body.cleanup_report);
+      const changedAt = nowIso();
+      statements.markOrganizationRouterCleanupVerified.run(
+        JSON.stringify(cleanupReport),
+        changedAt,
+        context.user.id,
+        context.organization.id,
+        routerId
+      );
+      router = statements.findAnyOrganizationRouterById.get(
+        context.organization.id,
+        routerId
+      ) ?? router;
+    }
+
+    const revokedVpnPeerCount = await revokeOrganizationRouterPeers(
+      context.organization.id,
+      routerId,
+      router
+    );
+    if (!alreadyRemoved) {
+      const removedAt = nowIso();
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        statements.upsertOrganizationRouterRetirementTombstone.run(
+          context.organization.id,
+          routerId,
+          router.stable_identity,
+          "managed_decommission",
+          removedAt,
+          context.user.id
+        );
+        statements.archiveOrganizationRouterTickets.run(
+          removedAt,
+          removedAt,
+          removedAt,
+          removedAt,
+          context.organization.id,
+          routerId
+        );
+        statements.archiveOrganizationRouterTicketBatches.run(
+          removedAt,
+          context.organization.id,
+          routerId
+        );
+        statements.softDeleteOrganizationRouter.run(
+          removedAt,
+          removedAt,
+          context.user.id,
+          context.organization.id,
+          routerId
+        );
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    logEvent(request, null, "organization_router_decommission_completed", context.organization.id, null, {
+      organization_user_id: context.user.id,
+      already_removed: alreadyRemoved,
+      revoked_vpn_peer_count: revokedVpnPeerCount,
+      router_id: routerId
+    });
+    return {
+      already_removed: alreadyRemoved,
+      ok: true,
+      revoked_vpn_peer_count: revokedVpnPeerCount,
+      router_id: routerId,
+      vpn_revocation_confirmed: true
+    };
   }),
 
   route("GET", "/v1/saas/router-ticket-catalog", async (request) => {
@@ -5817,8 +6143,16 @@ const handlers = [
       ["router.tickets.generate", "router.tickets.sync", "router.tickets.disable", "router.tickets.delete"],
       routerId
     );
-    if (!statements.findOrganizationRouterById.get(context.organization.id, routerId)) {
+    const router = statements.findOrganizationRouterById.get(context.organization.id, routerId);
+    if (!router) {
       throw new HttpError(404, "Routeur organisationnel introuvable.");
+    }
+    if ((router.decommission_status ?? "active") !== "active") {
+      throw new HttpError(
+        409,
+        "Ce routeur est en cours de déclassement. La synchronisation de nouveaux vouchers est bloquée jusqu'à la fin de l'opération.",
+        { code: "ROUTER_DECOMMISSION_IN_PROGRESS" }
+      );
     }
     const catalog = normalizeOrganizationTicketCatalog(body);
     const creatorRole = context.membership.authority_role === "owner"

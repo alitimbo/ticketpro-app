@@ -868,6 +868,24 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     return Promise.all(rows.map((row) => userRowToHotspotUser(row)));
   }
 
+  async listTicketProManagedVoucherUsernames(): Promise<string[]> {
+    const [userRows, bindingRows] = await Promise.all([
+      this.call("/ip/hotspot/user/print", { ".proplist": ".id,name,comment" }),
+      this.call("/ip/hotspot/ip-binding/print", { ".proplist": ".id,comment" })
+    ]);
+    const usernames = new Set<string>();
+    for (const row of userRows) {
+      if (!pick(row, "comment")?.startsWith(VOUCHER_LIFECYCLE_COMMENT_PREFIX)) continue;
+      const username = pick(row, "name", "user")?.trim();
+      if (username) usernames.add(username);
+    }
+    for (const row of bindingRows) {
+      const username = managedVoucherBindingUsername(row);
+      if (username) usernames.add(username);
+    }
+    return Array.from(usernames);
+  }
+
   async listHotspotUsersForVerification(): Promise<HotspotUser[]> {
     const rows = await this.call("/ip/hotspot/user/print", {
       ".proplist": HOTSPOT_USER_VERIFICATION_PROPERTIES
@@ -1356,7 +1374,7 @@ export class MikroTikRouterAdapter implements RouterAdapter {
 
     let completedTargets = 0;
     onProgress?.({ completed: 0, phase: "removing", total: targets.length });
-    await Promise.all(targets.map(async (target) => {
+    await mapWithConcurrency(targets, 8, async (target) => {
       const hasClientAuthorization = target.activeIds.length > 0
         || target.cookieIds.length > 0
         || target.hostIds.length > 0
@@ -1378,7 +1396,7 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       }
       completedTargets += 1;
       onProgress?.({ completed: completedTargets, phase: "removing", total: targets.length });
-    }));
+    });
 
     onProgress?.({ completed: targets.length, phase: "verifying", total: targets.length });
     const [remainingUsers, remainingActiveRows, remainingCookieRows, remainingHosts, remainingBindings, remainingConnections] = await Promise.all([
@@ -2370,6 +2388,15 @@ function isManagedVoucherBinding(row: RouterOsApiRow, username: string): boolean
   const comment = pick(row, "comment") ?? "";
   return comment.startsWith(`TicketPro voucher:${username}`)
     || comment.startsWith(`TicketPro ticket:${username}`);
+}
+
+function managedVoucherBindingUsername(row: RouterOsApiRow): string | null {
+  const comment = pick(row, "comment") ?? "";
+  const prefix = ["TicketPro voucher:", "TicketPro ticket:"]
+    .find((candidate) => comment.startsWith(candidate));
+  if (!prefix) return null;
+  const username = comment.slice(prefix.length).split(";")[0]?.trim() ?? "";
+  return username || null;
 }
 
 function connectionAddressMatches(value: string | undefined, address: string): boolean {

@@ -5,6 +5,7 @@ import { FakeRouterAdapter } from "./FakeRouterAdapter";
 import { RouterService, RouterServiceError, translateRouterError } from "./RouterService";
 
 const operatorSession = createSession("operator", "doumacorporation@gmail.com", Date.now());
+const adminSession = createSession("admin", "admin@example.com", Date.now());
 
 describe("RouterService", () => {
   it("simule un routeur MikroTik complet sans routeur réel", async () => {
@@ -180,6 +181,52 @@ describe("RouterService", () => {
       action: "createHotspotUser",
       internalProfileId: "account-douma-demo:internal-profile-operator",
       internalProfileRole: "operator"
+    });
+  });
+
+  it("déclasse uniquement les vouchers marqués TicketPro et vérifie leur disparition", async () => {
+    const adapter = new FakeRouterAdapter({ latencyMs: 0 });
+    await adapter.createHotspotUser({
+      comment: "TicketPro:v1;batch=batch-decommission;state=new;",
+      passwordSecretRef: "secret://managed/password",
+      planId: "plan-jour",
+      username: "TP-MANAGED"
+    });
+    const service = new RouterService({ adapter, authSession: adminSession });
+
+    const report = await service.decommissionTicketProVouchers();
+
+    expect(report).toMatchObject({
+      cleanupVersion: 1,
+      failedCount: 0,
+      remainingAuthorizationCount: 0,
+      remainingManagedUserCount: 0,
+      removedCount: 1,
+      requestedCount: 1
+    });
+    await expect(adapter.findHotspotUser("TP-MANAGED")).resolves.toBeNull();
+    await expect(adapter.findHotspotUser("J001")).resolves.not.toBeNull();
+  });
+
+  it("conserve un rapport non conforme lorsque RouterOS refuse un nettoyage", async () => {
+    const adapter = new FakeRouterAdapter({ latencyMs: 0 });
+    await adapter.createHotspotUser({
+      comment: "TicketPro:v1;batch=batch-failure;state=new;",
+      passwordSecretRef: "secret://managed-failure/password",
+      planId: "plan-jour",
+      username: "TP-FAILURE"
+    });
+    adapter.removeHotspotUser = async () => {
+      throw new Error("RouterOS unavailable");
+    };
+    const service = new RouterService({ adapter, authSession: adminSession });
+
+    await expect(service.decommissionTicketProVouchers()).resolves.toMatchObject({
+      failedCount: 1,
+      remainingAuthorizationCount: 1,
+      remainingManagedUserCount: 1,
+      removedCount: 0,
+      requestedCount: 1
     });
   });
 });

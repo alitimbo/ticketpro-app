@@ -165,6 +165,7 @@ export type SaasRouterRecoverySnapshot = {
     use_ssl: boolean;
   }>;
   credential: string;
+  decommission_status?: "active" | "cleanup_required" | "cleanup_verified" | "completed" | "pending";
   hotspot_address: string | null;
   id: string;
   label: string;
@@ -947,11 +948,77 @@ export async function cleanSaasRouterActivityLogs(routerId: string, before: stri
   return result.removed;
 }
 
-export async function removeSaasRouterRecoverySnapshot(routerId: string): Promise<void> {
+export type SaasRouterRemovalResult = {
+  already_removed: boolean;
+  ok: true;
+  revoked_vpn_peer_count: number;
+  router_id: string;
+  vpn_revocation_confirmed: boolean;
+};
+
+export type SaasRouterDecommissionPreparation = {
+  already_removed: boolean;
+  decommission_status: "active" | "cleanup_required" | "cleanup_verified" | "completed" | "pending";
+  ok: true;
+  requires_router_cleanup: boolean;
+  router_id: string;
+};
+
+export type SaasRouterDecommissionCleanupReport = {
+  cleanup_version: 1;
+  failed_count: number;
+  remaining_authorization_count: number;
+  remaining_managed_user_count: number;
+  removed_count: number;
+  requested_count: number;
+  verified_at: string;
+};
+
+export async function removeSaasRouterRecoverySnapshot(
+  routerId: string
+): Promise<SaasRouterRemovalResult> {
   const token = await requireSessionToken();
-  await request(
+  return request<SaasRouterRemovalResult>(
     "/v1/saas/routers/remove",
     { router_id: routerId },
+    token
+  );
+}
+
+export async function prepareSaasRouterDecommission(
+  routerId: string
+): Promise<SaasRouterDecommissionPreparation> {
+  const token = await requireSessionToken();
+  return request<SaasRouterDecommissionPreparation>(
+    "/v1/saas/routers/remove/prepare",
+    { router_id: routerId },
+    token
+  );
+}
+
+export async function reportSaasRouterDecommissionFailure(
+  routerId: string,
+  errorCode = "ROUTEROS_CLEANUP_FAILED"
+): Promise<void> {
+  const token = await requireSessionToken();
+  await request(
+    "/v1/saas/routers/remove/failure",
+    { error_code: errorCode, router_id: routerId },
+    token
+  );
+}
+
+export async function completeSaasRouterDecommission(
+  routerId: string,
+  cleanupReport?: SaasRouterDecommissionCleanupReport
+): Promise<SaasRouterRemovalResult> {
+  const token = await requireSessionToken();
+  return request<SaasRouterRemovalResult>(
+    "/v1/saas/routers/remove/complete",
+    {
+      ...(cleanupReport ? { cleanup_report: cleanupReport } : {}),
+      router_id: routerId
+    },
     token
   );
 }

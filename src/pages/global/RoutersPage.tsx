@@ -22,6 +22,7 @@ import { AuthorizationError, requireProfilePermission } from "../../services/aut
 import { decryptLocalSecret, encryptLocalSecret } from "../../services/security/localSecrets";
 import { RouterConnectionRepository, RouterRepository, useAppDatabase } from "../../services/database";
 import {
+  createPersistedRouterService,
   FakeRouterAdapter,
   remoteSecurityWarnings,
   RouterService,
@@ -65,7 +66,11 @@ import {
 } from "./routerPageModel";
 import { countRoutersForSubscription, getSubscriptionOverview } from "./subscriptionPageModel";
 import { RouterCloudRecoveryService } from "../../services/recovery";
-import { removeSaasRouterRecoverySnapshot } from "../../services/saas";
+import {
+  completeSaasRouterDecommission,
+  prepareSaasRouterDecommission,
+  reportSaasRouterDecommissionFailure
+} from "../../services/saas";
 
 const statusLabels: Record<RouterCardData["status"], string> = {
   active: "Connecté",
@@ -106,6 +111,7 @@ export function RoutersPage() {
   const [formState, setFormState] = useState<RouterFormState | null>(null);
   const [formOperation, setFormOperation] = useState<RouterFormOperation>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteProgress, setDeleteProgress] = useState<string | null>(null);
   const [connectingRouterIds, setConnectingRouterIds] = useState<Set<string>>(() => new Set());
   const connectionAttemptsRef = useRef<Set<string>>(new Set());
   const routersForHealthCheckRef = useRef<RouterCardData[]>([]);
@@ -634,23 +640,84 @@ export function RoutersPage() {
   const confirmDeleteRouter = async () => {
     const router = routerToDelete;
     if (!router || isDeleting) return;
+    const cloudRouterId = router.cloudRouterId ?? router.id;
+    let routerCleanupStarted = false;
+    let routerCleanupConfirmed = false;
     setIsDeleting(true);
+    setDeleteProgress("Préparation du déclassement sécurisé…");
     try {
       requireProfilePermission(session, "global.routers.delete");
       if (isPersistent) {
         if (!accountId) throw new Error("Compte actif introuvable.");
-        await removeSaasRouterRecoverySnapshot(router.cloudRouterId ?? router.id);
-        await routerRepository.remove(accountId, router.id);
+        const preparation = await prepareSaasRouterDecommission(cloudRouterId);
+        let cleanupReport: Parameters<typeof completeSaasRouterDecommission>[1];
+        if (preparation.requires_router_cleanup) {
+          routerCleanupStarted = true;
+          const record = await routerRepository.findById(router.id);
+          if (!record || record.deleted_at) {
+            throw new Error("La configuration locale du routeur est introuvable. Restaurez-la avant de reprendre la suppression.");
+          }
+          const connections = await connectionRepository.listByRouter(record.id);
+          const routerService = await createPersistedRouterService({
+            authSession: session,
+            connections,
+            database,
+            router: record
+          });
+          const report = await routerService.decommissionTicketProVouchers((progress) => {
+            if (progress.phase === "inventory") {
+              setDeleteProgress("Recherche des vouchers TicketPro sur MikroTik…");
+            } else if (progress.phase === "verifying") {
+              setDeleteProgress("Vérification finale des accès RouterOS…");
+            } else {
+              setDeleteProgress(
+                progress.total > 0
+                  ? `Neutralisation des vouchers : ${progress.completed} / ${progress.total}`
+                  : "Aucun voucher TicketPro actif à neutraliser."
+              );
+            }
+          });
+          if (
+            report.failedCount > 0
+            || report.remainingAuthorizationCount > 0
+            || report.remainingManagedUserCount > 0
+          ) {
+            throw new Error(
+              "Le routeur a conservé au moins un voucher ou une autorisation réseau. Il reste enregistré et continue d'occuper sa place. Réessayez lorsqu'il est joignable."
+            );
+          }
+          routerCleanupConfirmed = true;
+          cleanupReport = {
+            cleanup_version: report.cleanupVersion,
+            failed_count: report.failedCount,
+            remaining_authorization_count: report.remainingAuthorizationCount,
+            remaining_managed_user_count: report.remainingManagedUserCount,
+            removed_count: report.removedCount,
+            requested_count: report.requestedCount,
+            verified_at: report.verifiedAt
+          };
+        }
+        setDeleteProgress("Révocation de l'accès distant et libération de la place…");
+        const removal = await completeSaasRouterDecommission(cloudRouterId, cleanupReport);
+        await routerRepository.remove(accountId, router.id, {
+          vpnRevocationConfirmed: removal.vpn_revocation_confirmed
+        });
       }
       setRouters((current) => current.filter((item) => item.id !== router.id));
       setSelectedRouter((current) => (current?.id === router.id ? null : current));
       setFormState((current) => (current?.router?.id === router.id ? null : current));
       setRouterToDelete(null);
-      setMessage(`${router.zoneName} supprimé de TicketPro.`);
+      setMessage(
+        `${router.zoneName} déclassé : vouchers TicketPro neutralisés, accès VPN révoqué et place libérée.`
+      );
     } catch (error) {
+      if (isPersistent && routerCleanupStarted && !routerCleanupConfirmed) {
+        await reportSaasRouterDecommissionFailure(cloudRouterId).catch(() => undefined);
+      }
       setMessage(error instanceof Error ? error.message : "Le routeur n'a pas pu être supprimé.");
     } finally {
       setIsDeleting(false);
+      setDeleteProgress(null);
     }
   };
 
@@ -862,6 +929,7 @@ export function RoutersPage() {
         operation={formOperation}
       />
       <DeleteRouterDialog
+        deleteProgress={deleteProgress}
         isDeleting={isDeleting}
         onCancel={() => setRouterToDelete(null)}
         onConfirm={() => void confirmDeleteRouter()}
@@ -1168,11 +1236,13 @@ function RouterFormDialog({
 }
 
 function DeleteRouterDialog({
+  deleteProgress,
   isDeleting,
   onCancel,
   onConfirm,
   router
 }: {
+  deleteProgress: string | null;
   isDeleting: boolean;
   onCancel: () => void;
   onConfirm: () => void;
@@ -1192,10 +1262,14 @@ function DeleteRouterDialog({
         <div className="form-error">
           <AlertTriangle aria-hidden="true" />
           <span>
-            Cette action retire le routeur de TicketPro et du coffre de restauration VPS.
-            Les tickets historiques restent archivés. Un pair VPN actif doit être révoqué avant la suppression.
+            TicketPro supprimera du MikroTik tous les vouchers qu'il gère et coupera leurs autorisations réseau.
+            Le routeur ne libérera sa place dans l'abonnement qu'après vérification, puis son accès VPN sera révoqué.
+            Les historiques restent archivés. Les utilisateurs Hotspot créés manuellement ne sont pas touchés.
           </span>
         </div>
+        {isDeleting && deleteProgress ? (
+          <p aria-live="polite" className="connection-dialog__progress">{deleteProgress}</p>
+        ) : null}
         <div className="confirm-dialog__actions">
           <Button disabled={isDeleting} onClick={onCancel} variant="ghost">Annuler</Button>
           <Button

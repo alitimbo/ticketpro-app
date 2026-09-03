@@ -12,6 +12,8 @@ import type {
   RouterDateTime,
   RouterErrorCode,
   RouterHealth,
+  RouterVoucherDecommissionProgress,
+  RouterVoucherDecommissionReport,
   RouterSummary,
   RouterSystemInfo,
   TicketDraft
@@ -297,6 +299,52 @@ export class RouterService {
     }, "router.tickets.delete");
   }
 
+  decommissionTicketProVouchers(
+    onProgress?: (progress: RouterVoucherDecommissionProgress) => void
+  ): Promise<RouterVoucherDecommissionReport> {
+    return this.run("decommissionTicketProVouchers", async () => {
+      onProgress?.({ completed: 0, phase: "inventory", total: 0 });
+      const usernames = this.adapter.listTicketProManagedVoucherUsernames
+        ? await this.adapter.listTicketProManagedVoucherUsernames()
+        : (await this.adapter.listHotspotUsers())
+          .filter((user) => user.comment?.startsWith("TicketPro:v1;"))
+          .map((user) => user.username);
+      onProgress?.({ completed: 0, phase: "removing", total: usernames.length });
+
+      const results = usernames.length === 0
+        ? []
+        : this.adapter.removeHotspotUsersBatch
+          ? await this.adapter.removeHotspotUsersBatch(usernames, undefined, (progress) => {
+              onProgress?.({
+                completed: progress.completed,
+                phase: progress.phase,
+                total: progress.total
+              });
+            })
+          : await removeHotspotUsersFallback(this.adapter, usernames, onProgress);
+
+      onProgress?.({ completed: usernames.length, phase: "verifying", total: usernames.length });
+      const remainingManagedUserCount = this.adapter.listTicketProManagedVoucherUsernames
+        ? (await this.adapter.listTicketProManagedVoucherUsernames()).length
+        : (this.adapter.listHotspotUsersForVerification
+            ? await this.adapter.listHotspotUsersForVerification()
+            : await this.adapter.listHotspotUsers())
+          .filter((user) => user.comment?.startsWith("TicketPro:v1;"))
+          .length;
+      const failedCount = results.filter((result) => result.status === "error").length;
+
+      return {
+        cleanupVersion: 1,
+        failedCount,
+        remainingAuthorizationCount: failedCount,
+        remainingManagedUserCount,
+        removedCount: results.filter((result) => result.status === "removed").length,
+        requestedCount: usernames.length,
+        verifiedAt: new Date().toISOString()
+      };
+    }, "global.routers.delete");
+  }
+
   bindHotspotUserToMac(username: string, macAddress: string) {
     return this.run(
       "bindHotspotUserToMac",
@@ -516,6 +564,28 @@ function extractRouterOsDetail(message: string): string {
     .replace(/^RouterOS API error:\s*router_rejected:\s*/i, "")
     .replace(/^router rejected:\s*/i, "")
     .slice(0, 180);
+}
+
+async function removeHotspotUsersFallback(
+  adapter: RouterAdapter,
+  usernames: string[],
+  onProgress?: (progress: RouterVoucherDecommissionProgress) => void
+): Promise<HotspotUserBatchRemovalResult[]> {
+  const results: HotspotUserBatchRemovalResult[] = [];
+  for (const username of usernames) {
+    try {
+      await adapter.removeHotspotUser(username);
+      results.push({ status: "removed", username });
+    } catch (error) {
+      results.push({
+        message: error instanceof Error ? error.message : "Suppression RouterOS impossible.",
+        status: "error",
+        username
+      });
+    }
+    onProgress?.({ completed: results.length, phase: "removing", total: usernames.length });
+  }
+  return results;
 }
 
 class NoopRouterActionLogger implements RouterActionLogger {

@@ -134,7 +134,11 @@ export class RouterRepository {
     return updated;
   }
 
-  async remove(accountId: string, routerId: string): Promise<void> {
+  async remove(
+    accountId: string,
+    routerId: string,
+    options: { vpnRevocationConfirmed?: boolean } = {}
+  ): Promise<void> {
     const activePeers = await this.database.query<{ count: number }>(
       `SELECT COUNT(*) AS count
        FROM vpn_peers
@@ -142,12 +146,33 @@ export class RouterRepository {
       [accountId, routerId]
     );
 
-    if (Number(activePeers[0]?.count ?? 0) > 0) {
+    if (Number(activePeers[0]?.count ?? 0) > 0 && !options.vpnRevocationConfirmed) {
       throw new Error("Révoquez d'abord le pair VPN de ce routeur avant de le supprimer.");
     }
 
     const now = new Date().toISOString();
-    const results = await this.database.transaction([
+    const statements: DatabaseStatement[] = [
+      ...(options.vpnRevocationConfirmed
+        ? [{
+            params: [now, routerId, accountId],
+            sql: `UPDATE vpn_peers
+                  SET status = 'revoked', updated_at = ?1
+                  WHERE router_id = ?2 AND account_id = ?3 AND status <> 'revoked'`
+          }]
+        : []),
+      {
+        params: ["supprimé", now, routerId, accountId],
+        sql: `UPDATE tickets
+              SET status = ?1, deleted_at = ?2, archived_at = ?2,
+                router_deleted_at = ?2, sync_status = 'synced', updated_at = ?2
+              WHERE router_id = ?3 AND account_id = ?4`
+      },
+      {
+        params: ["supprimé", now, routerId, accountId],
+        sql: `UPDATE ticket_batches
+              SET status = ?1, deleted_at = ?2, sync_status = 'synced', updated_at = ?2
+              WHERE router_id = ?3 AND account_id = ?4`
+      },
       {
         params: [now, now, routerId, accountId],
         sql: `UPDATE routers
@@ -160,9 +185,11 @@ export class RouterRepository {
               SET deleted_at = ?1, updated_at = ?2, status = 'inactive'
               WHERE router_id = ?3 AND deleted_at IS NULL`
       }
-    ]);
+    ];
+    const routerUpdateIndex = statements.length - 2;
+    const results = await this.database.transaction(statements);
 
-    if ((results[0]?.rowsAffected ?? 0) === 0) {
+    if ((results[routerUpdateIndex]?.rowsAffected ?? 0) === 0) {
       throw new Error("Le routeur est introuvable ou a déjà été supprimé.");
     }
   }

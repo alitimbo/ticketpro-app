@@ -616,18 +616,107 @@ test("le coffre cloud restaure le parc, les plans et le VPN sans exposer les sec
   assert.equal(deduplicated.payload.router.id, "router-original");
   assert.equal(deduplicated.payload.router.name, "Site central restauré");
 
-  const removed = await api("/v1/saas/routers/remove", {
+  const legacyRemoval = await api("/v1/saas/routers/remove", {
     token: owner.payload.session.token,
     body: { router_id: "router-original" }
   });
+  assert.equal(legacyRemoval.status, 409);
+  assert.equal(legacyRemoval.payload.details.code, "ROUTER_DECOMMISSION_REQUIRED");
+
+  const preparedRemoval = await api("/v1/saas/routers/remove/prepare", {
+    token: owner.payload.session.token,
+    body: { router_id: "router-original" }
+  });
+  assert.equal(preparedRemoval.status, 200);
+  assert.equal(preparedRemoval.payload.requires_router_cleanup, true);
+
+  const blockedCatalogDuringDecommission = await api("/v1/saas/router-ticket-catalog", {
+    token: owner.payload.session.token,
+    body: { router_id: "router-original", batches: [], tickets: [] }
+  });
+  assert.equal(blockedCatalogDuringDecommission.status, 409);
+  assert.equal(
+    blockedCatalogDuringDecommission.payload.details.code,
+    "ROUTER_DECOMMISSION_IN_PROGRESS"
+  );
+
+  const replacementWhileCleanupPending = await api("/v1/saas/routers/snapshot", {
+    token: owner.payload.session.token,
+    body: {
+      router: {
+        ...routerSnapshot,
+        id: "router-too-early",
+        stable_identity: "serial:CHR-TOO-EARLY",
+        serial_number: "CHR-TOO-EARLY",
+        vpn: null
+      }
+    }
+  });
+  assert.equal(replacementWhileCleanupPending.status, 409);
+
+  const rejectedRemoval = await api("/v1/saas/routers/remove/complete", {
+    token: owner.payload.session.token,
+    body: {
+      router_id: "router-original",
+      cleanup_report: {
+        cleanup_version: 1,
+        requested_count: 1,
+        removed_count: 0,
+        failed_count: 1,
+        remaining_managed_user_count: 1,
+        remaining_authorization_count: 1,
+        verified_at: new Date().toISOString()
+      }
+    }
+  });
+  assert.equal(rejectedRemoval.status, 409);
+
+  const failedCleanup = await api("/v1/saas/routers/remove/failure", {
+    token: owner.payload.session.token,
+    body: { router_id: "router-original", error_code: "ROUTEROS_CLEANUP_FAILED" }
+  });
+  assert.equal(failedCleanup.status, 200);
+  const pendingDatabase = new DatabaseSync(databasePath);
+  const pendingRouter = pendingDatabase.prepare(`
+    SELECT decommission_status, deleted_at
+    FROM organization_routers
+    WHERE organization_id = ? AND id = ?
+  `).get(owner.payload.organization.id, "router-original");
+  pendingDatabase.close();
+  assert.equal(pendingRouter.decommission_status, "cleanup_required");
+  assert.equal(pendingRouter.deleted_at, null);
+
+  const removed = await api("/v1/saas/routers/remove/complete", {
+    token: owner.payload.session.token,
+    body: {
+      router_id: "router-original",
+      cleanup_report: {
+        cleanup_version: 1,
+        requested_count: 1,
+        removed_count: 1,
+        failed_count: 0,
+        remaining_managed_user_count: 0,
+        remaining_authorization_count: 0,
+        verified_at: new Date().toISOString()
+      }
+    }
+  });
   assert.equal(removed.status, 200);
+  assert.equal(removed.payload.vpn_revocation_confirmed, true);
+  assert.equal(removed.payload.revoked_vpn_peer_count, 1);
+  const repeatedRemoval = await api("/v1/saas/routers/remove/complete", {
+    token: owner.payload.session.token,
+    body: { router_id: "router-original" }
+  });
+  assert.equal(repeatedRemoval.status, 200);
+  assert.equal(repeatedRemoval.payload.already_removed, true);
   const emptyRecovery = await api("/v1/saas/routers/recovery", {
     method: "GET",
     token: owner.payload.session.token
   });
   assert.equal(emptyRecovery.payload.routers.length, 0);
 
-  const reactivated = await api("/v1/saas/routers/snapshot", {
+  const staleReactivation = await api("/v1/saas/routers/snapshot", {
     token: owner.payload.session.token,
     body: {
       router: {
@@ -637,9 +726,66 @@ test("le coffre cloud restaure le parc, les plans et le VPN sans exposer les sec
       }
     }
   });
-  assert.equal(reactivated.status, 200);
-  assert.equal(reactivated.payload.router.id, "router-original");
-  assert.equal(reactivated.payload.router.credential, "SecretRouterOS-456");
+  assert.equal(staleReactivation.status, 409);
+  assert.equal(staleReactivation.payload.details.code, "ROUTER_RETIRED");
+
+  const replacement = await api("/v1/saas/routers/snapshot", {
+    token: owner.payload.session.token,
+    body: {
+      router: {
+        ...routerSnapshot,
+        id: "router-replacement",
+        stable_identity: "serial:CHR-RECOVERY-002",
+        name: "Site de remplacement",
+        serial_number: "CHR-RECOVERY-002",
+        vpn: null
+      }
+    }
+  });
+  assert.equal(replacement.status, 200);
+  assert.equal(replacement.payload.router.id, "router-replacement");
+
+  const retiredRouterStillBlocked = await api("/v1/saas/routers/snapshot", {
+    token: owner.payload.session.token,
+    body: {
+      router: {
+        ...routerSnapshot,
+        id: "router-after-third-install"
+      }
+    }
+  });
+  assert.equal(retiredRouterStillBlocked.status, 409);
+  assert.equal(retiredRouterStillBlocked.payload.details.code, "ROUTER_RETIRED");
+
+  const expiryDatabase = new DatabaseSync(databasePath);
+  expiryDatabase.prepare(`
+    UPDATE organization_subscriptions
+    SET status = 'expired', current_period_end = ?
+    WHERE organization_id = ?
+  `).run("2026-01-01T00:00:00.000Z", owner.payload.organization.id);
+  expiryDatabase.close();
+
+  const preparedWithExpiredSubscription = await api("/v1/saas/routers/remove/prepare", {
+    token: owner.payload.session.token,
+    body: { router_id: "router-replacement" }
+  });
+  assert.equal(preparedWithExpiredSubscription.status, 200);
+  const removedWithExpiredSubscription = await api("/v1/saas/routers/remove/complete", {
+    token: owner.payload.session.token,
+    body: {
+      router_id: "router-replacement",
+      cleanup_report: {
+        cleanup_version: 1,
+        requested_count: 0,
+        removed_count: 0,
+        failed_count: 0,
+        remaining_managed_user_count: 0,
+        remaining_authorization_count: 0,
+        verified_at: new Date().toISOString()
+      }
+    }
+  });
+  assert.equal(removedWithExpiredSubscription.status, 200);
 });
 
 test("les vouchers générés par un opérateur deviennent visibles par l'administrateur de l'organisation", async () => {
@@ -996,6 +1142,46 @@ test("les vouchers générés par un opérateur deviennent visibles par l'admini
   });
   assert.equal(cleanedLogs.status, 200, JSON.stringify(cleanedLogs.payload));
   assert.equal(cleanedLogs.payload.removed, 1);
+
+  const preparedDecommission = await api("/v1/saas/routers/remove/prepare", {
+    token: ownerToken,
+    body: { router_id: routerId }
+  });
+  assert.equal(preparedDecommission.status, 200);
+  const completedDecommission = await api("/v1/saas/routers/remove/complete", {
+    token: ownerToken,
+    body: {
+      router_id: routerId,
+      cleanup_report: {
+        cleanup_version: 1,
+        requested_count: 1,
+        removed_count: 1,
+        failed_count: 0,
+        remaining_managed_user_count: 0,
+        remaining_authorization_count: 0,
+        verified_at: new Date().toISOString()
+      }
+    }
+  });
+  assert.equal(completedDecommission.status, 200, JSON.stringify(completedDecommission.payload));
+  const decommissionDatabase = new DatabaseSync(databasePath, { readOnly: true });
+  const archivedTicket = decommissionDatabase.prepare(`
+    SELECT status, deleted_at, archived_at, router_deleted_at
+    FROM organization_tickets WHERE id = ?
+  `).get("ticket-catalogue-482793");
+  const archivedBatch = decommissionDatabase.prepare(`
+    SELECT status FROM organization_ticket_batches WHERE id = ?
+  `).get("batch-catalogue-1");
+  const retainedFile = decommissionDatabase.prepare(`
+    SELECT id FROM organization_generated_files WHERE id = ?
+  `).get("file-catalogue-1");
+  decommissionDatabase.close();
+  assert.equal(archivedTicket.status, "supprimé");
+  assert.ok(archivedTicket.deleted_at);
+  assert.ok(archivedTicket.archived_at);
+  assert.ok(archivedTicket.router_deleted_at);
+  assert.equal(archivedBatch.status, "supprimé");
+  assert.equal(retainedFile.id, "file-catalogue-1");
 });
 
 test("une inscription abandonnée sans essai ni paiement ne peut pas ouvrir de session", async () => {

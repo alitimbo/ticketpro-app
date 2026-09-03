@@ -64,6 +64,7 @@ export interface RouterAdapter {
   updateHotspotPlan(planId: string, updates: Partial<HotspotPlanDraft>): Promise<HotspotPlan>;
   deleteHotspotPlan(planId: string): Promise<void>;
   listHotspotUsers(): Promise<HotspotUser[]>;
+  listTicketProManagedVoucherUsernames?(): Promise<string[]>;
   listHotspotUsersForVerification?(): Promise<HotspotUser[]>;
   listHotspotUsernames?(): Promise<Array<{ username: string }>>;
   findHotspotUser(username: string): Promise<HotspotUser | null>;

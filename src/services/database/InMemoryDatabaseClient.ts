@@ -204,6 +204,22 @@ export class InMemoryDatabaseClient implements DatabaseClient {
       ) as T[];
     }
 
+    if (
+      normalized.includes("count(*) as count")
+      && tableName === "vpn_peers"
+      && /where\s+account_id\s*=\s*\?1\s+and\s+router_id\s*=\s*\?2/.test(normalized)
+    ) {
+      return [
+        {
+          count: rows.filter(
+            (row) => row.account_id === params[0]
+              && row.router_id === params[1]
+              && row.status !== "revoked"
+          ).length
+        }
+      ] as T[];
+    }
+
     if (normalized.includes("count(*) as count") && normalized.includes("where account_id = ?1")) {
       return [
         {

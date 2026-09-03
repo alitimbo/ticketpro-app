@@ -2458,6 +2458,17 @@ a {
   color: var(--color-muted);
 }
 
+.connection-dialog__progress {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--color-primary) 24%, var(--color-border));
+  border-radius: var(--radius-md);
+  color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 7%, var(--color-surface));
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
 .connection-options {
   display: grid;
   gap: 10px;

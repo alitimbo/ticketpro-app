@@ -1179,6 +1179,27 @@ describe("MikroTikRouterAdapter", () => {
     ]);
   });
 
+  it("inventorie les vouchers TicketPro et leurs bindings orphelins sans inclure les comptes manuels", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/ip-binding/print": [
+        { ".id": "*B1", comment: "TicketPro voucher:managed-binding", type: "bypassed" },
+        { ".id": "*B2", comment: "TicketPro ticket:legacy-binding", type: "bypassed" },
+        { ".id": "*B3", comment: "Administration manuelle", type: "bypassed" }
+      ],
+      "/ip/hotspot/user/print": [
+        { ".id": "*U1", comment: "TicketPro:v1;batch=batch-1;state=new;", name: "managed-user" },
+        { ".id": "*U2", comment: "Créé dans WinBox", name: "manual-user" }
+      ]
+    });
+    const adapter = createAdapter(transport);
+
+    await expect(adapter.listTicketProManagedVoucherUsernames()).resolves.toEqual([
+      "managed-user",
+      "managed-binding",
+      "legacy-binding"
+    ]);
+  });
+
   it("supprime un lot avec un seul inventaire RouterOS avant et apres les mutations", async () => {
     const usernames = Array.from({ length: 100 }, (_, index) => `voucher-${index + 1}`);
     const allUsernames = [...usernames, "voucher-orphelin"];
