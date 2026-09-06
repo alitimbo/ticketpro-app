@@ -1521,6 +1521,11 @@ const statements = {
     WHERE organization_id = ? AND (router_id = ? OR stable_identity = ?)
     LIMIT 1
   `),
+  listRetiredOrganizationRouters: db.prepare(`
+    SELECT id AS router_id, stable_identity, deleted_at AS retired_at
+    FROM organization_routers
+    WHERE organization_id = ? AND deleted_at IS NOT NULL
+  `),
   listOrganizationRouters: db.prepare(`
     SELECT * FROM organization_routers
     WHERE organization_id = ? AND deleted_at IS NULL
@@ -5831,7 +5836,9 @@ const handlers = [
       organization_user_id: context.user.id,
       router_count: routers.length
     });
-    return { routers };
+    const retired = statements.listRetiredOrganizationRouters.all(context.organization.id)
+      .filter((router) => access.mode === "all" || access.router_ids.includes(router.router_id));
+    return { routers, retired, organization_id: context.organization.id };
   }),
 
   route("POST", "/v1/saas/routers/snapshot", async (request, body) => {
@@ -5856,7 +5863,7 @@ const handlers = [
       snapshot.id,
       snapshot.stable_identity
     ) ?? null;
-    if (existing?.deleted_at && retirementTombstone) {
+    if (existing?.deleted_at || retirementTombstone) {
       throw new HttpError(
         409,
         "Ce routeur a été définitivement retiré de l'organisation. Une ancienne sauvegarde locale ne peut pas le réactiver.",
@@ -8488,3 +8495,4 @@ const vpnReconciliationTimer = setInterval(() => {
   ? VPN_RECONCILIATION_INTERVAL_MS
   : 60_000);
 vpnReconciliationTimer.unref();
+

@@ -10,6 +10,7 @@ export {
   getSaasRouterAccessPolicy,
   getSaasRouterAccessPolicyHistory,
   getSaasRouterRecoverySnapshots,
+  getSaasRouterRecoveryState,
   getSaasRouterTicketCatalog,
   getSaasRouterFiles,
   getSaasTicketPrintArchive,
@@ -71,3 +72,4 @@ export {
   SaasRequestError,
   type SaasSubscription
 } from "./SaasClient";
+

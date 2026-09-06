@@ -17,6 +17,12 @@ export async function createPersistedRouterService(input: {
   logActions?: boolean;
 }): Promise<RouterService> {
   const { router, connections = [] } = input;
+  const current = input.database
+    ? (await input.database.query<RouterRecord>("SELECT * FROM routers WHERE id = ?1", [router.id]))[0]
+    : router;
+  if (!current || current.deleted_at || router.deleted_at) {
+    throw new Error("Ce routeur a été supprimé. Actualisez la liste des routeurs.");
+  }
   const password = await resolvePersistedRouterPassword(router.encrypted_password);
 
   const databaseLogger = input.database && input.logActions !== false
@@ -136,3 +142,4 @@ function orderConnections(router: RouterRecord, storedConnections: RouterConnect
     .filter((connection) => connection.mode !== "agent_future" && connection.host.trim().length > 0)
     .sort((left, right) => modeWeight(left) - modeWeight(right));
 }
+

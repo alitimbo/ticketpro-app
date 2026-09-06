@@ -715,6 +715,12 @@ test("le coffre cloud restaure le parc, les plans et le VPN sans exposer les sec
     token: owner.payload.session.token
   });
   assert.equal(emptyRecovery.payload.routers.length, 0);
+  assert.equal(emptyRecovery.payload.retired.length, 1);
+  assert.equal(emptyRecovery.payload.retired[0].router_id, "router-original");
+  assert.equal(emptyRecovery.payload.retired[0].stable_identity, routerSnapshot.stable_identity.toLowerCase());
+  assert.ok(emptyRecovery.payload.retired[0].retired_at);
+  assert.ok(emptyRecovery.payload.organization_id);
+  assert.equal(emptyRecovery.payload.retired[0].credential, undefined);
 
   const staleReactivation = await api("/v1/saas/routers/snapshot", {
     token: owner.payload.session.token,
@@ -2904,3 +2910,4 @@ test("authentification, licences, paiements iPay et crédits revendeur restent c
   });
   assert.equal(childBStillValid.status, 200);
 });
+

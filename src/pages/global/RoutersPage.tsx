@@ -148,7 +148,11 @@ export function RoutersPage() {
     const scopedAccountId = accountId;
     const selectedOrganizationId = organizationId;
 
+    let loading = false;
+    let initialBackupDone = false;
     async function loadRouters() {
+      if (loading) return;
+      loading = true;
       try {
         let records = selectedOrganizationId
           ? await routerRepository.listByOrganization(scopedAccountId, selectedOrganizationId)
@@ -164,7 +168,8 @@ export function RoutersPage() {
             ? await routerRepository.listByOrganization(scopedAccountId, selectedOrganizationId)
             : await routerRepository.listByAccount(scopedAccountId);
         }
-        if (isPersistent && records.length > 0 && recoveryService && canEditRouter) {
+        if (isPersistent && records.length > 0 && recoveryService && canEditRouter && !initialBackupDone) {
+          initialBackupDone = true;
           void Promise.all(records.map((record) => recoveryService.backupRouter(record.id))).catch(() => {
             // La sauvegarde sera retentée au prochain chargement sans bloquer le travail local.
           });
@@ -179,11 +184,18 @@ export function RoutersPage() {
         if (!mounted) return;
         setMessage(readUnknownError(error, "Impossible de charger les routeurs."));
         setRouters(isPersistent ? [] : demoRouters);
+      } finally {
+        loading = false;
       }
     }
 
     void loadRouters();
+    const refresh = () => { if (document.visibilityState !== "hidden") void loadRouters(); };
+    const interval = window.setInterval(refresh, 30_000);
+    window.addEventListener("focus", refresh);
     return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refresh);
       mounted = false;
     };
   }, [
@@ -1378,3 +1390,4 @@ function isValidPort(value: string): boolean {
   const port = Number(value);
   return Number.isInteger(port) && port >= 1 && port <= 65535;
 }
+

@@ -111,4 +111,36 @@ describe("reportPageModel", () => {
     expect(csv).toContain("10.0.0.2");
     expect(csv).toContain("AA:BB:CC:DD:EE:FF");
   });
+  it("garde les tickets imprimés non utilisés dans le stock disponible", () => {
+    const base = createDemoReportTickets()[1];
+    const ticket = { ...base, status: "imprimé" as const, activatedAt: null, deletedAt: null, archivedAt: null, uptimeSeconds: 0 };
+    const filters = { ...emptyReportFilters, dateFrom: "", dateTo: "" };
+    expect(getTicketsForMetric([ticket], "available", filters)).toHaveLength(1);
+    expect(getTicketsForMetric([{ ...ticket, activatedAt: ticket.createdAt }], "available", filters)).toHaveLength(0);
+  });
+
+  it("conserve l’expiration après archivage et exclut une suppression avant expiration", () => {
+    const ticket = { ...createDemoReportTickets()[1], status: "archivé" as const,
+      expiresAt: "2026-07-10T10:00:00.000Z", archivedAt: "2026-07-11T10:00:00.000Z",
+      routerDeletedAt: "2026-07-11T10:00:00.000Z", deletedAt: null };
+    const filters = { ...emptyReportFilters, dateFrom: "2026-07-10", dateTo: "2026-07-10" };
+    expect(buildReportSummary([ticket], filters).metrics.find(m => m.id === "expired")?.value).toBe(1);
+    expect(getTicketsForMetric([{ ...ticket, deletedAt: "2026-07-09T10:00:00.000Z" }], "expired", filters)).toHaveLength(0);
+  });
+
+  it("ne fabrique pas une date d’impression à partir de la création ou synchronisation", () => {
+    const ticket = { ...createDemoReportTickets()[1], printedAt: [], printedCount: 2 };
+    expect(getTicketsForMetric([ticket], "printed", emptyReportFilters)).toHaveLength(0);
+    expect(getTicketsForMetric([ticket], "printed", { ...emptyReportFilters, dateFrom: "", dateTo: "" })).toHaveLength(1);
+    expect(getTicketsForMetric([{ ...ticket, printedCount: 0, printedAt: [ticket.createdAt] }], "printed", emptyReportFilters)).toHaveLength(0);
+  });
+
+  it("applique les droits du rapport indépendamment des droits de la liste des tickets", () => {
+    const tickets = createDemoReportTickets();
+    const session = { ...agentSession, permissions: ["router.report.read" as const] };
+    expect(scopeReportTicketsForSession(tickets, session)).toEqual(tickets.filter(ticket => ticket.accountId === session.account_id));
+    expect(scopeReportTicketsForSession(tickets, { ...session, permissions: [] })).toEqual([]);
+  });
+
 });
+

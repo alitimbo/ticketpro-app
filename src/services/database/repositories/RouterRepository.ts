@@ -194,6 +194,17 @@ export class RouterRepository {
     }
   }
 
+  /** Apply an explicit server deletion without rewriting historical ticket activity. */
+  async retireFromCloud(accountId: string, routerId: string, retiredAt: string): Promise<void> {
+    const router = await this.findById(routerId);
+    if (!router || router.account_id !== accountId || router.deleted_at) return;
+    await this.database.transaction([
+      { sql: "UPDATE routers SET deleted_at = ?1, updated_at = ?1, status = 'offline', subscription_counted = 0 WHERE id = ?2 AND account_id = ?3", params: [retiredAt, routerId, accountId] },
+      { sql: "UPDATE router_connections SET deleted_at = ?1, updated_at = ?1, status = 'inactive' WHERE router_id = ?2 AND deleted_at IS NULL", params: [retiredAt, routerId] },
+      { sql: "UPDATE vpn_peers SET status = 'revoked', updated_at = ?1 WHERE router_id = ?2 AND account_id = ?3", params: [retiredAt, routerId, accountId] }
+    ]);
+  }
+
   async recordConnectionTest(input: {
     accountId: string;
     internalProfileId: string;
@@ -390,3 +401,4 @@ function assertRouterConnectionValidated(input: CreateRouterInput): void {
 function normalizeRouterConnection(input: CreateRouterConnectionInput): CreateRouterConnectionInput {
   return input.mode === "vpn" ? { ...input, port: 8728, use_ssl: 0 } : input;
 }
+

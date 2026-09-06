@@ -137,6 +137,53 @@ describe("RouterCloudRecoveryService", () => {
       })
     ]);
   });
+  it("retire la copie d’un autre PC sans toucher à un autre compte ni aux routeurs simplement absents", async () => {
+    const database = new InMemoryDatabaseClient();
+    await database.initialize();
+    const snapshot = recoverySnapshot();
+    const cloud = {
+      bootstrapVpn: vi.fn(async () => ({ address_pool: "10.250.0.0/24", server_endpoint: "vpn.test", server_port: 51820, server_public_key: "key" })),
+      getSnapshots: vi.fn(async () => [snapshot]),
+      saveSnapshot: vi.fn(async (router: SaasRouterRecoverySnapshot) => router)
+    };
+    await new RouterCloudRecoveryService(database, "owner", "owner:admin", cloud, "org").restoreMissingRouters();
+    const second = new RouterCloudRecoveryService(database, "pc2", "pc2:admin", cloud, "org");
+    const restored = await second.restoreMissingRouters();
+    const localId = restored.restoredRouterIds[0];
+    expect(localId).not.toBe(snapshot.id);
+    const retiredAt = "2026-09-06T10:00:00.000Z";
+    await new RouterRepository(database).setCloudId("pc2", localId, "legacy-local-id");
+    const retiringCloud = { ...cloud, getState: vi.fn(async () => ({ organization_id: "org", routers: [], retired: [{ router_id: snapshot.id, stable_identity: snapshot.stable_identity.toLowerCase(), retired_at: retiredAt }] })) };
+    const retiring = new RouterCloudRecoveryService(database, "pc2", "pc2:admin", retiringCloud, "org");
+    await retiring.restoreMissingRouters();
+    await retiring.restoreMissingRouters();
+    const routers = new RouterRepository(database);
+    expect(await routers.listByAccount("pc2")).toEqual([]);
+    expect(await routers.findById(localId)).toMatchObject({ deleted_at: retiredAt, subscription_counted: 0 });
+    expect(await routers.listByAccount("owner")).toHaveLength(1);
+    expect(await new RouterConnectionRepository(database).listByRouter(localId)).toEqual([]);
+    expect(await new VpnPeerRepository(database).findByRouter("pc2", localId)).toBeNull();
+    expect(await database.query("SELECT * FROM vpn_peers WHERE router_id = ?1", [localId])).toEqual([expect.objectContaining({ status: "revoked" })]);
+    await expect(retiring.backupRouter(localId)).rejects.toThrow("introuvable");
+    expect(cloud.saveSnapshot).not.toHaveBeenCalled();
+    // An empty inventory alone is not a deletion instruction (offline/local-only router).
+    await new RouterCloudRecoveryService(database, "owner", "owner:admin", {
+      ...cloud, getState: async () => ({ organization_id: "org", routers: [], retired: [] })
+    }, "org").restoreMissingRouters();
+    expect(await routers.listByAccount("owner")).toHaveLength(1);
+  });
+
+  it("refuse les suppressions provenant d’une autre organisation", async () => {
+    const database = new InMemoryDatabaseClient();
+    await database.initialize();
+    const cloud = {
+      bootstrapVpn: vi.fn(), getSnapshots: vi.fn(), saveSnapshot: vi.fn(),
+      getState: async () => ({ organization_id: "other-org", routers: [], retired: [] })
+    };
+    await expect(new RouterCloudRecoveryService(database, "owner", "owner:admin", cloud, "org")
+      .restoreMissingRouters()).rejects.toThrow("organisation");
+  });
+
 });
 
 function recoverySnapshot(): SaasRouterRecoverySnapshot {
@@ -194,3 +241,4 @@ function recoverySnapshot(): SaasRouterRecoverySnapshot {
     }
   };
 }
+
