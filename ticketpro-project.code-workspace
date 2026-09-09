@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "../ticketpro-landing"
+		},
+		{
+			"path": "."
+		},
+		{
+			"path": "../ticketprodashboard"
+		}
+	],
+	"settings": {}
+}
