@@ -23,8 +23,7 @@ import {
   RouterConnectionRepository,
   RouterRepository,
   TicketBatchRepository,
-  TicketRepository,
-  TicketStateHistoryRepository
+  TicketRepository
 } from "../../services/database/repositories";
 import { TauriFileService } from "../../services/files";
 import { AuditLogService } from "../../services/logging";
@@ -32,7 +31,6 @@ import { generateReportPdf } from "../../services/pdf";
 import { createPersistedRouterService } from "../../services/router";
 import {
   OrganizationOperationsSyncService,
-  OrganizationTicketCatalogService,
   RouterTicketSyncService
 } from "../../services/sync";
 import { Badge, Button, Card, EmptyState, PageHeader, StatCard } from "../../shared/ui";
@@ -63,8 +61,10 @@ import {
   ticketStatusLabel,
   ticketStatusToBadge
 } from "./ticketsPageModel";
-import { RouterCloudRecoveryService } from "../../services/recovery";
-import { persistTicketSyncReport } from "./ticketSyncPersistence";
+import { getSaasRouterRecoveryState, getSaasRouterTicketCatalog, SaasRequestError } from "../../services/saas";
+import { routerAccessPolicyCloudId } from "../../services/access/routerAccessPolicyIdentity";
+import { mergeTicketUpdate } from "./ticketSyncPersistence";
+import { cloudReportTickets, reportRead } from "./reportRead";
 
 type SelectedReportTickets = {
   title: string;
@@ -94,29 +94,24 @@ export function ReportPage() {
   const [lastLiveSyncAt, setLastLiveSyncAt] = useState<string | null>(null);
   const [liveError, setLiveError] = useState<string | null>(null);
   const [routerOnlyCount, setRouterOnlyCount] = useState(0);
-  const liveSyncRunningRef = useRef(false);
+  const [loadedScope, setLoadedScope] = useState("");
+  const activeRead = useRef<AbortController | null>(null);
+  const latestTickets = useRef<ReportTicket[]>([]);
+  latestTickets.current = tickets;
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+  const reportScope = JSON.stringify([routerId, session?.account_id, session?.internal_profile_id,
+    session?.permissions, saasAccount?.organization.id, saasAccount?.user.id]);
 
   const ticketRepository = useMemo(() => new TicketRepository(database), [database]);
   const planRepository = useMemo(() => new HotspotPlanRepository(database), [database]);
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
   const routerConnectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
   const ticketBatchRepository = useMemo(() => new TicketBatchRepository(database), [database]);
-  const ticketStateHistoryRepository = useMemo(() => new TicketStateHistoryRepository(database), [database]);
   const printHistoryRepository = useMemo(() => new PrintHistoryRepository(database), [database]);
   const generatedFileRepository = useMemo(() => new GeneratedFileRepository(database), [database]);
   const auditLogService = useMemo(() => new AuditLogService(database), [database]);
   const fileService = useMemo(() => new TauriFileService(), []);
-  const organizationTicketCatalog = useMemo(
-    () => session
-      ? new OrganizationTicketCatalogService(
-          database,
-          session.account_id,
-          session.internal_profile_id,
-          session.internal_profile_role
-        )
-      : null,
-    [database, session]
-  );
   const organizationOperations = useMemo(
     () => session
       ? new OrganizationOperationsSyncService(
@@ -130,12 +125,15 @@ export function ReportPage() {
   );
 
   const loadReport = useCallback(async (options: { silent?: boolean } = {}) => {
+    const session = sessionRef.current;
     if (!isPersistent || !isInitialized || !session) {
       return;
     }
-    if (liveSyncRunningRef.current) return;
-
-    liveSyncRunningRef.current = true;
+    if (activeRead.current) return;
+    const controller = new AbortController();
+    activeRead.current = controller;
+    const current = () => activeRead.current === controller && !controller.signal.aborted;
+    const read = <T,>(label: string, work: () => Promise<T>) => reportRead(controller.signal, label, work);
     if (!options.silent) setIsLoading(true);
     setLiveStatus("connecting");
     setLiveError(null);
@@ -146,36 +144,26 @@ export function ReportPage() {
 
     try {
       let catalogError: string | null = null;
-      // Preserve local reporting if the server is temporarily unreachable.
-      try {
-        await new RouterCloudRecoveryService(database, session.account_id, session.internal_profile_id,
-          undefined, saasAccount?.organization.id ?? null).restoreMissingRouters();
-      } catch (error) {
-        catalogError = error instanceof Error ? error.message : "Synchronisation du compte indisponible.";
-      }
-      const activeRouter = await routerRepository.findById(routerId);
-      if (!activeRouter || activeRouter.deleted_at || activeRouter.account_id !== session.account_id) {
+      if (!session.permissions.some(permission => permission === "router.report.read" || permission === "router.report.own")) {
         setTickets([]);
-        throw new Error("Ce routeur a été supprimé ou n’est plus accessible.");
-      }
-      try {
-        await organizationTicketCatalog?.pullRouter(routerId, "report");
-      } catch (error) {
-        catalogError = error instanceof Error ? error.message : "Catalogue partagé indisponible.";
+        throw new Error("Votre rôle n’autorise pas la consultation des rapports.");
       }
       const profileScope = session.permissions.includes("router.report.read")
         ? undefined
         : session.internal_profile_id;
-      const [router, records, plans, batches, printHistory, connections] = await Promise.all([
+      const [router, records, plans, batches, printHistory, connections] = await read("Lecture locale", () => Promise.all([
         routerRepository.findById(routerId),
         ticketRepository.listForReportByAccount(session.account_id, profileScope),
         planRepository.listByRouter(routerId),
         ticketBatchRepository.listByRouter(routerId),
         printHistoryRepository.listByAccount(session.account_id),
         routerConnectionRepository.listByRouter(routerId)
-      ]);
+      ]));
+      if (!current()) return;
 
-      if (!router || router.deleted_at || router.account_id !== session.account_id) {
+      if (!router || router.deleted_at || router.account_id !== session.account_id ||
+          (router.organization_id && saasAccount?.organization.id && router.organization_id !== saasAccount.organization.id)) {
+        setTickets([]);
         throw new Error("Routeur introuvable pour ce compte.");
       }
 
@@ -212,41 +200,72 @@ export function ReportPage() {
           });
 
       // Keep the latest persisted snapshot visible even while RouterOS is being read.
+      if (latestTickets.current.length > 0) {
+        const cached = new Map(latestTickets.current.map(ticket => [ticket.code, ticket]));
+        reportTickets = [...cached.values(), ...reportTickets.filter(ticket => !cached.has(ticket.code))];
+      }
       setTickets(reportTickets);
+      setIsLoading(false);
 
-      const routerService = await createPersistedRouterService({
+      const cloudController = new AbortController();
+      const abortCloud = () => cloudController.abort();
+      controller.signal.addEventListener("abort", abortCloud, { once: true });
+      try {
+        const [state, catalog] = await read("Lecture du catalogue partagé", () => Promise.all([
+          getSaasRouterRecoveryState(cloudController.signal),
+          getSaasRouterTicketCatalog(router.cloud_router_id ?? router.id, "report", cloudController.signal)
+        ]));
+        if (!current()) return;
+        const identity = routerAccessPolicyCloudId(router, connections).toLowerCase();
+        if ((state.organization_id && state.organization_id !== saasAccount?.organization.id) ||
+            catalog.router_id !== (router.cloud_router_id ?? router.id) ||
+            state.retired?.some(item => item.router_id === (router.cloud_router_id ?? router.id) ||
+              item.stable_identity.toLowerCase() === identity)) {
+          setTickets([]);
+          throw new SaasRequestError("Ce routeur n’est plus accessible dans cette organisation.", 403);
+        }
+        const shared = cloudReportTickets(catalog, session, saasAccount?.user.id, routerId, router.name, plans);
+        const localByCode = new Map(reportTickets.map(ticket => [ticket.code, ticket]));
+        const sharedByCode = new Map(shared.map(ticket => [ticket.code, {
+          ...ticket, printedAt: localByCode.get(ticket.code)?.printedAt ?? []
+        }]));
+        reportTickets = [...sharedByCode.values(), ...reportTickets.filter(ticket => !sharedByCode.has(ticket.code))];
+        setTickets(reportTickets);
+      } catch (error) {
+        if (!current()) return;
+        if (error instanceof SaasRequestError && [401, 403, 404].includes(error.status)) {
+          setTickets([]);
+          setSelectedTickets(null);
+          throw error;
+        }
+        catalogError = error instanceof Error ? error.message : "Catalogue partagé indisponible.";
+      } finally {
+        cloudController.abort();
+        controller.signal.removeEventListener("abort", abortCloud);
+      }
+
+      const routerService = await read("Connexion MikroTik", () => createPersistedRouterService({
         authSession: session,
         connections,
         database,
         logActions: false,
         router
-      });
-      const syncReport = await new RouterTicketSyncService(routerService).compareTickets(
+      }));
+      if (!current()) return;
+      const syncReport = await read("Lecture MikroTik", () => new RouterTicketSyncService(routerService).compareTickets(
         reportTickets.filter((ticket) => ticket.status !== "supprimé")
-      );
-      reportTickets = (await persistTicketSyncReport({
-        actorProfileId: session.internal_profile_id,
-        batchRepository: ticketBatchRepository,
-        report: syncReport,
-        ticketHistoryRepository: ticketStateHistoryRepository,
-        ticketRepository,
-        tickets: reportTickets
-      })) as ReportTicket[];
+      ));
+      if (!current()) return;
+      const updates = new Map(syncReport.updates.map(update => [update.id, update]));
+      reportTickets = reportTickets.map(ticket => ({ ...ticket, ...mergeTicketUpdate(ticket, updates.get(ticket.id)) }));
 
       setTickets(reportTickets);
       setRouterOnlyCount(syncReport.localMissing.length);
       setLastLiveSyncAt(new Date().toISOString());
-      try {
-        if (["router.tickets.generate", "router.tickets.sync", "router.tickets.disable", "router.tickets.delete"]
-          .some((permission) => session.permissions.includes(permission as typeof session.permissions[number]))) {
-          await organizationTicketCatalog?.publishRouter(routerId);
-        }
-      } catch (error) {
-        catalogError ??= error instanceof Error ? error.message : "Publication du catalogue indisponible.";
-      }
       setLiveStatus(catalogError ? "degraded" : "live");
       setLiveError(catalogError ? `Lecture MikroTik réussie, mais les données entre PC peuvent être incomplètes : ${catalogError}` : null);
     } catch (error) {
+      if (!current()) return;
       const errorMessage = error instanceof Error ? error.message : "Le routeur ne répond pas.";
       setLiveStatus("degraded");
       setLiveError(errorMessage);
@@ -255,28 +274,35 @@ export function ReportPage() {
         setMessageIsError(true);
       }
     } finally {
-      liveSyncRunningRef.current = false;
-      if (!options.silent) setIsLoading(false);
+      if (current()) {
+        activeRead.current = null;
+        setIsLoading(false);
+      }
+      controller.abort();
     }
   }, [
     database,
     isInitialized,
     isPersistent,
-    organizationTicketCatalog,
-    organizationOperations,
     planRepository,
     printHistoryRepository,
     routerConnectionRepository,
     routerId,
     routerRepository,
-    session,
+    reportScope,
+    saasAccount?.user.id,
     saasAccount?.organization.id,
     ticketBatchRepository,
-    ticketRepository,
-    ticketStateHistoryRepository
+    ticketRepository
   ]);
 
   useEffect(() => {
+    setLoadedScope(reportScope);
+    latestTickets.current = [];
+    setTickets(isPersistent ? [] : createDemoReportTickets());
+    setSelectedTickets(null);
+    setLastLiveSyncAt(null);
+    setRouterOnlyCount(0);
     void loadReport();
     if (!isPersistent) return undefined;
     const synchronize = () => {
@@ -286,12 +312,16 @@ export function ReportPage() {
     const interval = window.setInterval(synchronize, reportLiveRefreshIntervalMs);
     window.addEventListener("focus", synchronize);
     return () => {
+      activeRead.current?.abort();
+      activeRead.current = null;
       window.clearInterval(interval);
       window.removeEventListener("focus", synchronize);
     };
   }, [isPersistent, loadReport]);
 
-  const scopedTickets = useMemo(() => scopeReportTicketsForSession(tickets, session), [session, tickets]);
+  const scopedTickets = useMemo(() => scopeReportTicketsForSession(
+    !isPersistent || loadedScope === reportScope ? tickets : [], session
+  ), [session, tickets, isPersistent, loadedScope, reportScope]);
   const filteredTickets = useMemo(() => filterReportTickets(scopedTickets, filters), [filters, scopedTickets]);
   const summary = useMemo(() => buildReportSummary(scopedTickets, filters), [filters, scopedTickets]);
   const filterOptions = useMemo(() => buildFilterOptions(scopedTickets), [scopedTickets]);
@@ -645,7 +675,7 @@ function reportLiveDescription(
     return "Lecture des utilisateurs, sessions, compteurs, appareils et états réels du MikroTik…";
   }
   if (status === "degraded") {
-    return `Dernières données SQLite conservées. ${error ?? "Le routeur est momentanément inaccessible."}`;
+    return `Dernières données disponibles conservées. ${error ?? "Le routeur est momentanément inaccessible."}`;
   }
   if (status === "live") {
     return synchronizedAt

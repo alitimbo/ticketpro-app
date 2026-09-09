@@ -824,9 +824,9 @@ export type SaasRouterRecoveryState = {
   retired?: Array<{ router_id: string; stable_identity: string; retired_at: string }>;
 };
 
-export async function getSaasRouterRecoveryState(): Promise<SaasRouterRecoveryState> {
+export async function getSaasRouterRecoveryState(signal?: AbortSignal): Promise<SaasRouterRecoveryState> {
   const token = await requireSessionToken();
-  return request<SaasRouterRecoveryState>("/v1/saas/routers/recovery", undefined, token, "GET");
+  return request<SaasRouterRecoveryState>("/v1/saas/routers/recovery", undefined, token, "GET", signal);
 }
 
 export async function getSaasRouterRecoverySnapshots(): Promise<SaasRouterRecoverySnapshot[]> {
@@ -852,13 +852,14 @@ export async function saveSaasRouterRecoverySnapshot(
   return result.router;
 }
 
-export async function getSaasRouterTicketCatalog(routerId: string, purpose: "tickets" | "report" = "tickets"): Promise<SaasRouterTicketCatalog> {
+export async function getSaasRouterTicketCatalog(routerId: string, purpose: "tickets" | "report" = "tickets", signal?: AbortSignal): Promise<SaasRouterTicketCatalog> {
   const token = await requireSessionToken();
   return request<SaasRouterTicketCatalog>(
     `/v1/saas/router-ticket-catalog?router_id=${encodeURIComponent(routerId)}&purpose=${purpose}`,
     undefined,
     token,
-    "GET"
+    "GET",
+    signal
   );
 }
 
@@ -1086,11 +1087,13 @@ async function request<T>(
   pathname: string,
   body?: Record<string, unknown>,
   bearerToken?: string,
-  method: "GET" | "POST" = "POST"
+  method: "GET" | "POST" = "POST",
+  signal?: AbortSignal
 ): Promise<T> {
   if (!apiUrl) throw new Error("L'API TicketPro n'est pas configurée.");
   recordActiveVpsRequest();
   const response = await fetch(`${apiUrl}${pathname}`, {
+    signal,
     method,
     headers: {
       ...(body ? { "content-type": "application/json" } : {}),
