@@ -715,6 +715,23 @@ test("le coffre cloud restaure le parc, les plans et le VPN sans exposer les sec
     token: owner.payload.session.token
   });
   assert.equal(emptyRecovery.payload.routers.length, 0);
+  assert.equal(emptyRecovery.payload.retired.length, 1);
+  assert.equal(emptyRecovery.payload.retired[0].router_id, "router-original");
+  assert.equal(emptyRecovery.payload.retired[0].stable_identity, routerSnapshot.stable_identity.toLowerCase());
+  assert.ok(emptyRecovery.payload.retired[0].retired_at);
+  assert.ok(emptyRecovery.payload.organization_id);
+  assert.equal(emptyRecovery.payload.retired[0].credential, undefined);
+  // Legacy/manual removal may leave only a tombstone, with no router row.
+  const tombstoneDb = new DatabaseSync(databasePath);
+  const insertTombstone = tombstoneDb.prepare(`INSERT INTO organization_router_retirement_tombstones
+    (organization_id, router_id, stable_identity, reason, retired_at, retired_by)
+    VALUES (?, ?, ?, 'test', ?, 'test')`);
+  insertTombstone.run(owner.payload.organization.id, "orphan-retirement", "serial:orphan", new Date().toISOString());
+  insertTombstone.run("another-organization", "foreign-retirement", "serial:foreign", new Date().toISOString());
+  tombstoneDb.close();
+  const tombstoneRecovery = await api("/v1/saas/routers/recovery", { method: "GET", token: owner.payload.session.token });
+  assert.equal(tombstoneRecovery.status, 200, JSON.stringify(tombstoneRecovery.payload));
+  assert.deepEqual(tombstoneRecovery.payload.retired.map((row) => row.router_id).sort(), ["orphan-retirement", "router-original"]);
 
   const staleReactivation = await api("/v1/saas/routers/snapshot", {
     token: owner.payload.session.token,
@@ -946,6 +963,42 @@ test("les vouchers générés par un opérateur deviennent visibles par l'admini
   assert.equal(ownerCatalog.payload.tickets[0].duration_minutes_snapshot, 60);
   assert.equal(ownerCatalog.payload.tickets[0].validity_minutes_snapshot, 180);
   assert.equal(Object.hasOwn(ownerCatalog.payload.tickets[0], "password"), false);
+  const ownerReport = await api(`/v1/saas/router-ticket-catalog?router_id=${routerId}&purpose=report`, {
+    method: "GET", token: ownerToken
+  });
+  assert.equal(ownerReport.status, 200);
+  assert.equal(ownerReport.payload.tickets.length, 1);
+  const invalidPurpose = await api(`/v1/saas/router-ticket-catalog?router_id=${routerId}&purpose=admin`, {
+    method: "GET", token: ownerToken
+  });
+  assert.equal(invalidPurpose.status, 400);
+  // Changing the role must preserve own-only filtering and router access checks.
+  const roleDb = new DatabaseSync(databasePath);
+  const setRole = roleDb.prepare("UPDATE organization_memberships SET app_role = ? WHERE organization_id = ? AND user_id = ?");
+  const operatorId = operator.payload.user.id;
+  setRole.run("agent", owner.payload.organization.id, operatorId);
+  let report = await api(`/v1/saas/router-ticket-catalog?router_id=${routerId}&purpose=report`, {
+    method: "GET", token: operator.payload.session.token
+  });
+  assert.equal(report.status, 200);
+  assert.equal(report.payload.tickets.length, 1);
+  // Make the ticket belong to someone else: the agent must not see it.
+  roleDb.prepare("UPDATE organization_tickets SET created_by_user_id = ? WHERE organization_id = ? AND router_id = ?")
+    .run(owner.payload.user.id, owner.payload.organization.id, routerId);
+  report = await api(`/v1/saas/router-ticket-catalog?router_id=${routerId}&purpose=report`, {
+    method: "GET", token: operator.payload.session.token
+  });
+  assert.equal(report.status, 200);
+  assert.equal(report.payload.tickets.length, 0);
+  assert.equal(report.payload.batches.length, 0);
+  const forbiddenReport = await api("/v1/saas/router-ticket-catalog?router_id=not-assigned&purpose=report", {
+    method: "GET", token: operator.payload.session.token
+  });
+  assert.equal(forbiddenReport.status, 403);
+  roleDb.prepare("UPDATE organization_tickets SET created_by_user_id = ? WHERE organization_id = ? AND router_id = ?")
+    .run(operatorId, owner.payload.organization.id, routerId);
+  setRole.run("operator", owner.payload.organization.id, operatorId);
+  roleDb.close();
 
   const exhausted = {
     ...ownerCatalog.payload.tickets[0],
@@ -2904,3 +2957,4 @@ test("authentification, licences, paiements iPay et crédits revendeur restent c
   });
   assert.equal(childBStillValid.status, 200);
 });
+

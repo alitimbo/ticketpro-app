@@ -1521,6 +1521,18 @@ const statements = {
     WHERE organization_id = ? AND (router_id = ? OR stable_identity = ?)
     LIMIT 1
   `),
+  listRetiredOrganizationRouters: db.prepare(`
+    SELECT router_id, stable_identity, MAX(retired_at) AS retired_at
+    FROM (
+      SELECT id AS router_id, stable_identity, deleted_at AS retired_at
+      FROM organization_routers
+      WHERE organization_id = ? AND deleted_at IS NOT NULL
+      UNION ALL
+      SELECT router_id, stable_identity, retired_at
+      FROM organization_router_retirement_tombstones
+      WHERE organization_id = ?
+    ) GROUP BY router_id, stable_identity
+  `),
   listOrganizationRouters: db.prepare(`
     SELECT * FROM organization_routers
     WHERE organization_id = ? AND deleted_at IS NULL
@@ -5831,7 +5843,9 @@ const handlers = [
       organization_user_id: context.user.id,
       router_count: routers.length
     });
-    return { routers };
+    const retired = statements.listRetiredOrganizationRouters.all(context.organization.id, context.organization.id)
+      .filter((router) => access.mode === "all" || access.router_ids.includes(router.router_id));
+    return { routers, retired, organization_id: context.organization.id };
   }),
 
   route("POST", "/v1/saas/routers/snapshot", async (request, body) => {
@@ -5856,7 +5870,7 @@ const handlers = [
       snapshot.id,
       snapshot.stable_identity
     ) ?? null;
-    if (existing?.deleted_at && retirementTombstone) {
+    if (existing?.deleted_at || retirementTombstone) {
       throw new HttpError(
         409,
         "Ce routeur a été définitivement retiré de l'organisation. Une ancienne sauvegarde locale ne peut pas le réactiver.",
@@ -6107,6 +6121,10 @@ const handlers = [
   }),
 
   route("GET", "/v1/saas/router-ticket-catalog", async (request) => {
+    const purpose = new URL(request.url, "http://ticketpro.local").searchParams.get("purpose") ?? "tickets";
+    if (purpose !== "tickets" && purpose !== "report") {
+      throw new HttpError(400, "Contexte de lecture invalide.");
+    }
     const routerId = String(
       new URL(request.url, "http://ticketpro.local").searchParams.get("router_id") ?? ""
     ).trim();
@@ -6115,13 +6133,13 @@ const handlers = [
     }
     const context = requireOrganizationRouterAnyPermission(
       request,
-      ["router.tickets.read", "router.tickets.own"],
+      purpose === "report" ? ["router.report.read", "router.report.own"] : ["router.tickets.read", "router.tickets.own"],
       routerId
     );
     if (!statements.findOrganizationRouterById.get(context.organization.id, routerId)) {
       throw new HttpError(404, "Routeur organisationnel introuvable.");
     }
-    const canReadAll = organizationContextHasPermission(context, "router.tickets.read");
+    const canReadAll = organizationContextHasPermission(context, purpose === "report" ? "router.report.read" : "router.tickets.read");
     const tickets = statements.listOrganizationTickets
       .all(context.organization.id, routerId)
       .filter((ticket) => canReadAll || ticket.created_by_user_id === context.user.id);
@@ -8488,3 +8506,4 @@ const vpnReconciliationTimer = setInterval(() => {
   ? VPN_RECONCILIATION_INTERVAL_MS
   : 60_000);
 vpnReconciliationTimer.unref();
+

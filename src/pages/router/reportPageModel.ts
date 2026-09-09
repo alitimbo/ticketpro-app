@@ -1,6 +1,5 @@
 import {
   createDemoTickets,
-  scopeTicketsForSession,
   type TicketListItem,
   type TicketListStatus
 } from "./ticketsPageModel";
@@ -95,7 +94,12 @@ export function scopeReportTicketsForSession(
   tickets: ReportTicket[],
   session: AuthSession | null | undefined
 ): ReportTicket[] {
-  return scopeTicketsForSession(tickets, session) as ReportTicket[];
+  if (!session) return [];
+  const accountTickets = tickets.filter((ticket) => ticket.accountId === session.account_id);
+  if (session.permissions.includes("router.report.read")) return accountTickets;
+  return session.permissions.includes("router.report.own")
+    ? accountTickets.filter((ticket) => ticket.createdByProfileId === session.internal_profile_id)
+    : [];
 }
 
 export function filterReportTickets(tickets: ReportTicket[], filters: ReportFilters): ReportTicket[] {
@@ -165,6 +169,10 @@ export function getTicketsForMetric(
   filters: ReportFilters
 ): ReportTicket[] {
   return tickets.filter((ticket) => {
+    // A known print count without a dated history belongs only in the all-time total.
+    if (metricId === "printed" && ticket.printedCount > 0 && ticket.printedAt.length === 0) {
+      return !filters.dateFrom && !filters.dateTo;
+    }
     return getMetricDates(ticket, metricId).some((eventDate) => isDateInPeriod(eventDate, filters));
   });
 }
@@ -347,11 +355,7 @@ function getMetricDates(ticket: ReportTicket, metricId: ReportMetricId): string[
   }
 
   if (metricId === "printed") {
-    return ticket.printedAt.length > 0
-      ? ticket.printedAt
-      : ticket.printedCount > 0
-        ? [ticket.createdAt]
-        : [];
+    return ticket.printedCount > 0 ? ticket.printedAt : [];
   }
 
   if (metricId === "activated") {
@@ -363,14 +367,22 @@ function getMetricDates(ticket: ReportTicket, metricId: ReportMetricId): string[
   }
 
   if (metricId === "expired") {
-    return ticket.status === "expiré" && ticket.expiresAt ? [ticket.expiresAt] : [];
+    // Archiving or deleting an expired voucher must not erase its expiration event.
+    return ticket.expiresAt && Date.parse(ticket.expiresAt) <= Date.now()
+      && (!ticket.deletedAt || Date.parse(ticket.deletedAt) >= Date.parse(ticket.expiresAt))
+      && (!ticket.routerDeletedAt || Date.parse(ticket.routerDeletedAt) >= Date.parse(ticket.expiresAt))
+      && ["expiré", "archivé", "supprimé_routeur", "supprimé"].includes(ticket.status)
+      ? [ticket.expiresAt] : [];
   }
 
   if (metricId === "deleted") {
     return ticket.deletedAt ? [ticket.deletedAt] : [];
   }
 
-  return ticket.status === "disponible" ? [ticket.createdAt] : [];
+  return (ticket.status === "disponible" || ticket.status === "imprimé")
+    && !ticket.activatedAt && !ticket.deletedAt && !ticket.archivedAt
+    && ticket.uptimeSeconds === 0
+    ? [ticket.createdAt] : [];
 }
 
 function getTicketActivityDates(ticket: ReportTicket): string[] {
@@ -467,3 +479,4 @@ function startOfDay(date: string): number {
 function endOfDay(date: string): number {
   return new Date(`${date}T23:59:59.999`).getTime();
 }
+

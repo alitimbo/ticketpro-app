@@ -133,9 +133,9 @@ export class OrganizationTicketCatalogService {
     });
   }
 
-  async pullRouter(routerId: string): Promise<OrganizationTicketCatalogSyncResult> {
+  async pullRouter(routerId: string, purpose: "tickets" | "report" = "tickets"): Promise<OrganizationTicketCatalogSyncResult> {
     const router = await this.requireOwnedRouter(routerId);
-    const catalog = await getSaasRouterTicketCatalog(router.cloud_router_id ?? router.id);
+    const catalog = await getSaasRouterTicketCatalog(router.cloud_router_id ?? router.id, purpose);
     const plans = await this.plans.listByRouter(routerId);
     const byId = new Map(plans.map((plan) => [plan.id, plan]));
     const byProfile = new Map(plans.filter((plan) => plan.mikrotik_profile_name).map((plan) => [plan.mikrotik_profile_name as string, plan]));

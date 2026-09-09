@@ -24,6 +24,16 @@ vi.mock("../saas", async (importOriginal) => {
 });
 
 describe("OrganizationTicketCatalogService outbox", () => {
+  it("uses report permissions explicitly without publishing from a read", async () => {
+    const database = await setupCatalog(0);
+    mocks.getCatalog.mockResolvedValue({ batches: [], tickets: [] });
+    const service = new OrganizationTicketCatalogService(database, "account-1", "profile-guest", "guest");
+    await service.pullRouter("router-1", "report");
+    expect(mocks.getCatalog).toHaveBeenLastCalledWith("cloud-router-1", "report");
+    await service.pullRouter("router-1");
+    expect(mocks.getCatalog).toHaveBeenLastCalledWith("cloud-router-1", "tickets");
+    expect(mocks.saveCatalog).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     mocks.getCatalog.mockReset();
     mocks.saveCatalog.mockReset();

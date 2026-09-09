@@ -63,6 +63,7 @@ import {
   ticketStatusLabel,
   ticketStatusToBadge
 } from "./ticketsPageModel";
+import { RouterCloudRecoveryService } from "../../services/recovery";
 import { persistTicketSyncReport } from "./ticketSyncPersistence";
 
 type SelectedReportTickets = {
@@ -76,7 +77,7 @@ const reportLiveRefreshIntervalMs = 15_000;
 
 export function ReportPage() {
   const { routerId = "routeur-demo" } = useParams();
-  const { session } = useAuth();
+  const { session, saasAccount } = useAuth();
   const { database, isInitialized, isPersistent } = useAppDatabase();
   const [tickets, setTickets] = useState<ReportTicket[]>(() => (isPersistent ? [] : createDemoReportTickets()));
   const [filters, setFilters] = useState<ReportFilters>(() =>
@@ -144,8 +145,24 @@ export function ReportPage() {
     }
 
     try {
-      await organizationTicketCatalog?.publishRouter(routerId).catch(() => undefined);
-      await organizationTicketCatalog?.pullRouter(routerId).catch(() => undefined);
+      let catalogError: string | null = null;
+      // Preserve local reporting if the server is temporarily unreachable.
+      try {
+        await new RouterCloudRecoveryService(database, session.account_id, session.internal_profile_id,
+          undefined, saasAccount?.organization.id ?? null).restoreMissingRouters();
+      } catch (error) {
+        catalogError = error instanceof Error ? error.message : "Synchronisation du compte indisponible.";
+      }
+      const activeRouter = await routerRepository.findById(routerId);
+      if (!activeRouter || activeRouter.deleted_at || activeRouter.account_id !== session.account_id) {
+        setTickets([]);
+        throw new Error("Ce routeur a été supprimé ou n’est plus accessible.");
+      }
+      try {
+        await organizationTicketCatalog?.pullRouter(routerId, "report");
+      } catch (error) {
+        catalogError = error instanceof Error ? error.message : "Catalogue partagé indisponible.";
+      }
       const profileScope = session.permissions.includes("router.report.read")
         ? undefined
         : session.internal_profile_id;
@@ -158,7 +175,7 @@ export function ReportPage() {
         routerConnectionRepository.listByRouter(routerId)
       ]);
 
-      if (!router || router.account_id !== session.account_id) {
+      if (!router || router.deleted_at || router.account_id !== session.account_id) {
         throw new Error("Routeur introuvable pour ce compte.");
       }
 
@@ -187,9 +204,7 @@ export function ReportPage() {
               ...ticket,
               currency: currencyByBatchId.get(record.batch_id) ?? "CFA",
               deletedAt: record.deleted_at,
-              printedAt:
-                printDatesByBatch.get(record.batch_id) ??
-                (record.printed_count > 0 ? [record.updated_at] : []),
+              printedAt: record.printed_count > 0 ? printDatesByBatch.get(record.batch_id) ?? [] : [],
               priceHint: priceByBatchId.has(record.batch_id)
                 ? priceByBatchId.get(record.batch_id) ?? null
                 : plansById.get(ticket.planId)?.price_hint ?? null
@@ -221,8 +236,16 @@ export function ReportPage() {
       setTickets(reportTickets);
       setRouterOnlyCount(syncReport.localMissing.length);
       setLastLiveSyncAt(new Date().toISOString());
-      setLiveStatus("live");
-      await organizationTicketCatalog?.publishRouter(routerId).catch(() => undefined);
+      try {
+        if (["router.tickets.generate", "router.tickets.sync", "router.tickets.disable", "router.tickets.delete"]
+          .some((permission) => session.permissions.includes(permission as typeof session.permissions[number]))) {
+          await organizationTicketCatalog?.publishRouter(routerId);
+        }
+      } catch (error) {
+        catalogError ??= error instanceof Error ? error.message : "Publication du catalogue indisponible.";
+      }
+      setLiveStatus(catalogError ? "degraded" : "live");
+      setLiveError(catalogError ? `Lecture MikroTik réussie, mais les données entre PC peuvent être incomplètes : ${catalogError}` : null);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Le routeur ne répond pas.";
       setLiveStatus("degraded");
@@ -247,6 +270,7 @@ export function ReportPage() {
     routerId,
     routerRepository,
     session,
+    saasAccount?.organization.id,
     ticketBatchRepository,
     ticketRepository,
     ticketStateHistoryRepository
@@ -342,6 +366,9 @@ export function ReportPage() {
             <span>Actualisation</span>
             <strong>15 secondes</strong>
             {routerOnlyCount > 0 ? <small>{routerOnlyCount} ticket(s) présent(s) uniquement sur le routeur</small> : null}
+            {scopedTickets.some((ticket) => ticket.printedCount > 0 && ticket.printedAt.length === 0) ? (
+              <small>Certaines impressions historiques sont sans date connue : elles figurent uniquement dans le total sans période.</small>
+            ) : null}
           </div>
         </div>
       </Card>
@@ -820,3 +847,4 @@ function sanitizeReportFileSegment(value: string): string {
     .replace(/^[-_.]+|[-_.]+$/g, "")
     .slice(0, 24) || "CFA";
 }
+

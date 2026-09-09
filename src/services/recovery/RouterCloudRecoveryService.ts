@@ -16,6 +16,7 @@ import { decryptLocalSecret, encryptLocalSecret } from "../security/localSecrets
 import {
   bootstrapSaasVpn,
   getSaasRouterRecoverySnapshots,
+  getSaasRouterRecoveryState,
   saveSaasRouterRecoverySnapshot,
   type SaasRouterRecoverySnapshot
 } from "../saas";
@@ -28,12 +29,14 @@ export type RouterRecoveryResult = {
 type RouterRecoveryCloudClient = {
   bootstrapVpn: typeof bootstrapSaasVpn;
   getSnapshots: typeof getSaasRouterRecoverySnapshots;
+  getState?: typeof getSaasRouterRecoveryState;
   saveSnapshot: typeof saveSaasRouterRecoverySnapshot;
 };
 
 const defaultCloudClient: RouterRecoveryCloudClient = {
   bootstrapVpn: bootstrapSaasVpn,
   getSnapshots: getSaasRouterRecoverySnapshots,
+  getState: getSaasRouterRecoveryState,
   saveSnapshot: saveSaasRouterRecoverySnapshot
 };
 
@@ -184,7 +187,11 @@ export class RouterCloudRecoveryService {
   }
 
   private async restoreMissingRoutersOnce(): Promise<RouterRecoveryResult> {
-    const remoteRouters = await this.cloud.getSnapshots();
+    const state = this.cloud.getState ? await this.cloud.getState() : null;
+    if (state?.organization_id && this.organizationId && state.organization_id !== this.organizationId) {
+      throw new Error("L’organisation a changé pendant la synchronisation des routeurs.");
+    }
+    const remoteRouters = state?.routers ?? await this.cloud.getSnapshots();
     const accountRouters = await this.routers.listByAccount(this.accountId);
     const localRouters = this.organizationId
       ? accountRouters.filter((router) => (
@@ -199,8 +206,15 @@ export class RouterCloudRecoveryService {
         router,
         await this.connections.listByRouter(router.id)
       );
+      const retirement = state?.retired?.find((item) =>
+        item.router_id === (router.cloud_router_id ?? router.id) || item.stable_identity.toLowerCase() === stableIdentity.toLowerCase()
+      );
+      if (retirement) {
+        await this.routers.retireFromCloud(this.accountId, router.id, retirement.retired_at);
+        continue;
+      }
       localStableIdentities.add(stableIdentity);
-      localByStableIdentity.set(stableIdentity, router);
+      localByStableIdentity.set(stableIdentity.toLowerCase(), router);
       localByCloudId.set(router.cloud_router_id ?? router.id, router);
     }
 
@@ -215,8 +229,11 @@ export class RouterCloudRecoveryService {
     for (const remote of remoteRouters) {
       try {
         const existing = localByCloudId.get(remote.id)
-          ?? localByStableIdentity.get(remote.stable_identity);
+          ?? localByStableIdentity.get(remote.stable_identity.toLowerCase());
         if (existing) {
+          if (existing.cloud_router_id !== remote.id) {
+            await this.routers.setCloudId(this.accountId, existing.id, remote.id);
+          }
           if (this.organizationId && existing.organization_id !== this.organizationId) {
             await this.routers.setOrganizationId(this.accountId, existing.id, this.organizationId);
           }
@@ -470,3 +487,4 @@ function planInputFromRecovery(
     validity_minutes: plan.validity_minutes
   };
 }
+
