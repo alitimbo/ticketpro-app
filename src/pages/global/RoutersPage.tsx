@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { refreshRouterSnapshot } from "./routerRecoveryRefresh";
 import {
   AlertTriangle,
   Edit3,
@@ -157,18 +158,29 @@ export function RoutersPage() {
         let records = selectedOrganizationId
           ? await routerRepository.listByOrganization(scopedAccountId, selectedOrganizationId)
           : await routerRepository.listByAccount(scopedAccountId);
+        // Render the scoped local snapshot before waiting for the network.
+        const localCards = await Promise.all(records.map(async (record) =>
+          routerCardFromRecord(record, await connectionRepository.listByRouter(record.id))));
+        if (mounted) setRouters(localCards.length > 0 || isPersistent ? localCards : demoRouters);
+        let recoverySucceeded = !isPersistent;
         if (isPersistent && recoveryService) {
-          const recovery = await recoveryService.restoreMissingRouters();
-          if (recovery.restoredRouterIds.length > 0 && mounted) {
+          const refreshed = await refreshRouterSnapshot(
+            () => recoveryService.restoreMissingRouters(),
+            () => selectedOrganizationId
+              ? routerRepository.listByOrganization(scopedAccountId, selectedOrganizationId)
+              : routerRepository.listByAccount(scopedAccountId),
+            (error) => { if (mounted) setMessage(readUnknownError(error, "Synchronisation indisponible. Les routeurs locaux restent accessibles.")); }
+          );
+          recoverySucceeded = refreshed.succeeded;
+          records = refreshed.records;
+          const recovery = refreshed.recovery;
+          if (recovery && recovery.restoredRouterIds.length > 0 && mounted) {
             setMessage(
               `${recovery.restoredRouterIds.length} routeur(s) restauré(s) depuis le coffre TicketPro. Vérification réelle en attente.`
             );
           }
-          records = selectedOrganizationId
-            ? await routerRepository.listByOrganization(scopedAccountId, selectedOrganizationId)
-            : await routerRepository.listByAccount(scopedAccountId);
         }
-        if (isPersistent && records.length > 0 && recoveryService && canEditRouter && !initialBackupDone) {
+        if (isPersistent && recoverySucceeded && records.length > 0 && recoveryService && canEditRouter && !initialBackupDone) {
           initialBackupDone = true;
           void Promise.all(records.map((record) => recoveryService.backupRouter(record.id))).catch(() => {
             // La sauvegarde sera retentée au prochain chargement sans bloquer le travail local.
@@ -183,7 +195,7 @@ export function RoutersPage() {
       } catch (error) {
         if (!mounted) return;
         setMessage(readUnknownError(error, "Impossible de charger les routeurs."));
-        setRouters(isPersistent ? [] : demoRouters);
+        // Keep the last scoped snapshot; account/organization changes clear it separately.
       } finally {
         loading = false;
       }

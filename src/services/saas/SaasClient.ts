@@ -852,10 +852,10 @@ export async function saveSaasRouterRecoverySnapshot(
   return result.router;
 }
 
-export async function getSaasRouterTicketCatalog(routerId: string): Promise<SaasRouterTicketCatalog> {
+export async function getSaasRouterTicketCatalog(routerId: string, purpose: "tickets" | "report" = "tickets"): Promise<SaasRouterTicketCatalog> {
   const token = await requireSessionToken();
   return request<SaasRouterTicketCatalog>(
-    `/v1/saas/router-ticket-catalog?router_id=${encodeURIComponent(routerId)}`,
+    `/v1/saas/router-ticket-catalog?router_id=${encodeURIComponent(routerId)}&purpose=${purpose}`,
     undefined,
     token,
     "GET"

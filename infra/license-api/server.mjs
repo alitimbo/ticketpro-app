@@ -1522,9 +1522,16 @@ const statements = {
     LIMIT 1
   `),
   listRetiredOrganizationRouters: db.prepare(`
-    SELECT id AS router_id, stable_identity, deleted_at AS retired_at
-    FROM organization_routers
-    WHERE organization_id = ? AND deleted_at IS NOT NULL
+    SELECT router_id, stable_identity, MAX(retired_at) AS retired_at
+    FROM (
+      SELECT id AS router_id, stable_identity, deleted_at AS retired_at
+      FROM organization_routers
+      WHERE organization_id = ? AND deleted_at IS NOT NULL
+      UNION ALL
+      SELECT router_id, stable_identity, retired_at
+      FROM organization_router_retirement_tombstones
+      WHERE organization_id = ?
+    ) GROUP BY router_id, stable_identity
   `),
   listOrganizationRouters: db.prepare(`
     SELECT * FROM organization_routers
@@ -5836,7 +5843,7 @@ const handlers = [
       organization_user_id: context.user.id,
       router_count: routers.length
     });
-    const retired = statements.listRetiredOrganizationRouters.all(context.organization.id)
+    const retired = statements.listRetiredOrganizationRouters.all(context.organization.id, context.organization.id)
       .filter((router) => access.mode === "all" || access.router_ids.includes(router.router_id));
     return { routers, retired, organization_id: context.organization.id };
   }),
@@ -6114,6 +6121,10 @@ const handlers = [
   }),
 
   route("GET", "/v1/saas/router-ticket-catalog", async (request) => {
+    const purpose = new URL(request.url, "http://ticketpro.local").searchParams.get("purpose") ?? "tickets";
+    if (purpose !== "tickets" && purpose !== "report") {
+      throw new HttpError(400, "Contexte de lecture invalide.");
+    }
     const routerId = String(
       new URL(request.url, "http://ticketpro.local").searchParams.get("router_id") ?? ""
     ).trim();
@@ -6122,13 +6133,13 @@ const handlers = [
     }
     const context = requireOrganizationRouterAnyPermission(
       request,
-      ["router.tickets.read", "router.tickets.own"],
+      purpose === "report" ? ["router.report.read", "router.report.own"] : ["router.tickets.read", "router.tickets.own"],
       routerId
     );
     if (!statements.findOrganizationRouterById.get(context.organization.id, routerId)) {
       throw new HttpError(404, "Routeur organisationnel introuvable.");
     }
-    const canReadAll = organizationContextHasPermission(context, "router.tickets.read");
+    const canReadAll = organizationContextHasPermission(context, purpose === "report" ? "router.report.read" : "router.tickets.read");
     const tickets = statements.listOrganizationTickets
       .all(context.organization.id, routerId)
       .filter((ticket) => canReadAll || ticket.created_by_user_id === context.user.id);

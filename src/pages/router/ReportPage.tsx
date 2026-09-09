@@ -159,7 +159,7 @@ export function ReportPage() {
         throw new Error("Ce routeur a été supprimé ou n’est plus accessible.");
       }
       try {
-        await organizationTicketCatalog?.pullRouter(routerId);
+        await organizationTicketCatalog?.pullRouter(routerId, "report");
       } catch (error) {
         catalogError = error instanceof Error ? error.message : "Catalogue partagé indisponible.";
       }
@@ -237,7 +237,10 @@ export function ReportPage() {
       setRouterOnlyCount(syncReport.localMissing.length);
       setLastLiveSyncAt(new Date().toISOString());
       try {
-        await organizationTicketCatalog?.publishRouter(routerId);
+        if (["router.tickets.generate", "router.tickets.sync", "router.tickets.disable", "router.tickets.delete"]
+          .some((permission) => session.permissions.includes(permission as typeof session.permissions[number]))) {
+          await organizationTicketCatalog?.publishRouter(routerId);
+        }
       } catch (error) {
         catalogError ??= error instanceof Error ? error.message : "Publication du catalogue indisponible.";
       }
