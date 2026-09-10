@@ -5149,6 +5149,18 @@ a {
   min-width: 0;
 }
 
+.ticket-row__badges .badge--warning {
+  --badge-color: #87530f;
+}
+
+.ticket-row__badges .badge--success {
+  --badge-color: #116b42;
+}
+
+.ticket-row__badges .badge--offline {
+  --badge-color: #566171;
+}
+
 .ticket-row__badges {
   align-items: center;
   display: flex;

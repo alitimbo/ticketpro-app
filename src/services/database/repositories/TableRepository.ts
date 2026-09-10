@@ -306,6 +306,8 @@ const tableColumns: Record<LocalTableName, string[]> = {
     "archived_at",
     "router_deleted_at",
     "last_router_sync_at",
+    "router_observation_status",
+    "router_observation_at",
     "uptime_seconds",
     "remaining_seconds",
     "data_remaining_bytes",

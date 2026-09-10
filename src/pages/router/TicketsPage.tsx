@@ -62,15 +62,13 @@ import {
   OrganizationTicketCatalogService,
   RouterVoucherOutboxService,
   RouterTicketSyncService,
-  syncStatusLabel,
   type RouterOnlyTicket,
-  type RouterTicketSyncStatus,
   type TicketSyncReport,
   type TicketSyncSummary
 } from "../../services/sync";
 import { TauriFileService } from "../../services/files";
 import { ActionMenu, AsyncStateCard, Badge, Button, Card, EmptyState, PageHeader } from "../../shared/ui";
-import type { AppStatus, IconComponent } from "../../shared/ui";
+import type { IconComponent } from "../../shared/ui";
 import { formatInternationalPhone, normalizeInternationalPhone } from "../../shared/phone";
 import { TicketDisplaySettingsForm } from "./TicketDisplaySettingsForm";
 import {
@@ -84,22 +82,25 @@ import {
   formatDateTime,
   formatDuration,
   formatSeconds,
-  getPageCount,
-  paginateTickets,
   scopeTicketsForSession,
   ticketFromRecord,
-  ticketPageSize,
   ticketStatusLabel,
-  ticketStatusToBadge,
+  ticketLifecycleBadges,
+  ticketRouterBadge,
   type TicketFilters,
   type TicketListItem,
   type TicketListStatus
 } from "./ticketsPageModel";
 import {
   mergeTicketUpdate,
+  hasTicketDataChanges,
   persistTicketSyncReport,
   ticketToCreateInput
 } from "./ticketSyncPersistence";
+import { presentTicketSync } from "./presentTicketSync";
+import { TicketPagination } from "./TicketPagination";
+import { forEachCooperative } from "./cooperativeWork";
+import { useTicketCloudQueue, type TicketCloudQueueState } from "./useTicketCloudQueue";
 
 type TicketLog = {
   createdAt: string;
@@ -121,7 +122,6 @@ export function TicketsPage() {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [displaySettings, setDisplaySettings] = useState<TicketDisplaySettings>(defaultTicketDisplaySettings);
-  const [page, setPage] = useState(1);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [logs, setLogs] = useState<TicketLog[]>([]);
@@ -145,6 +145,8 @@ export function TicketsPage() {
     printerId: "pdf-export"
   });
   const [syncSummary, setSyncSummary] = useState<TicketSyncSummary | null>(null);
+  const [routerCheckFailed, setRouterCheckFailed] = useState(false);
+  const cloudQueue = useTicketCloudQueue(database, session?.account_id, routerId, isPersistent && isInitialized);
   const [remoteOnlyTickets, setRemoteOnlyTickets] = useState<RouterOnlyTicket[]>([]);
   const ticketRepository = useMemo(() => new TicketRepository(database), [database]);
   const ticketHistoryRepository = useMemo(() => new TicketStateHistoryRepository(database), [database]);
@@ -179,6 +181,9 @@ export function TicketsPage() {
       : null,
     [database, session]
   );
+  // Keep pre-enqueue failures retryable too. On reopening, the existing initial
+  // publishRouter reconciles persisted tickets even if the app previously exited.
+  const batchesPendingPublication = useMemo(() => new Set<string>(), [routerId, session?.account_id]);
   const organizationOperations = useMemo(
     () => session
       ? new OrganizationOperationsSyncService(
@@ -406,8 +411,10 @@ export function TicketsPage() {
   useEffect(() => {
     if (!isPersistent || !isInitialized || !session || !organizationTicketCatalog) return undefined;
     let disposed = false;
+    let refreshing = false;
     const refreshSharedCatalog = async () => {
-      if (bulkBusyRef.current) return;
+      if (disposed || bulkBusyRef.current || refreshing) return;
+      refreshing = true;
       try {
         const result = await organizationTicketCatalog.pullRouter(routerId);
         if (disposed || (result.importedBatches === 0 && result.importedTickets === 0)) return;
@@ -427,6 +434,8 @@ export function TicketsPage() {
         }
       } catch {
         // Synchronisation silencieuse : les actions manuelles restent explicites.
+      } finally {
+        refreshing = false;
       }
     };
     const onFocus = () => void refreshSharedCatalog();
@@ -466,9 +475,6 @@ export function TicketsPage() {
   const scopedTickets = useMemo(() => scopeTicketsForSession(tickets, session), [session, tickets]);
   const filterOptions = useMemo(() => buildFilterOptions(scopedTickets), [scopedTickets]);
   const filteredTickets = useMemo(() => filterTickets(scopedTickets, filters), [filters, scopedTickets]);
-  const pageCount = getPageCount(filteredTickets.length, ticketPageSize);
-  const currentPage = Math.min(page, pageCount);
-  const visibleTickets = paginateTickets(filteredTickets, currentPage, ticketPageSize);
   const canRevealPasswords = Boolean(session?.permissions.includes("router.tickets.revealPassword"));
   const ticketsRef = useRef<TicketListItem[]>(tickets);
   const automaticSyncRunning = useRef(false);
@@ -501,7 +507,6 @@ export function TicketsPage() {
 
   const updateFilters = (partial: Partial<TicketFilters>) => {
     setFilters((current) => ({ ...current, ...partial }));
-    setPage(1);
     clearFeedback();
   };
 
@@ -551,12 +556,12 @@ export function TicketsPage() {
     report: TicketSyncReport,
     options: { publishOrganization?: boolean } = {}
   ) => {
+    setRouterCheckFailed(false);
     const currentTickets = ticketsRef.current;
     const updates = new Map(report.updates.map((update) => [update.id, update]));
-    let nextTickets = currentTickets.map((ticket) => mergeTicketUpdate(ticket, updates.get(ticket.id)));
-    if (isPersistent) {
-      if (session) {
-        nextTickets = await persistTicketSyncReport({
+    await presentTicketSync(async () => {
+      if (isPersistent && session) {
+        return persistTicketSyncReport({
           actorProfileId: session.internal_profile_id,
           batchRepository,
           report,
@@ -564,23 +569,32 @@ export function TicketsPage() {
           ticketRepository,
           tickets: currentTickets
         });
-        if (options.publishOrganization !== false && organizationTicketCatalog) {
+      }
+      return currentTickets.map((ticket) => mergeTicketUpdate(ticket, updates.get(ticket.id)));
+    }, (nextTickets) => {
+      ticketsRef.current = nextTickets;
+      setTickets(nextTickets);
+      setSelectedTicket((current) => current ? mergeTicketUpdate(current, updates.get(current.id)) : null);
+      setSyncSummary(report.summary);
+      setRemoteOnlyTickets(report.localMissing);
+      report.logs.slice(0, 8).forEach((log) => writeLog({ message: log.message, ticketCode: log.ticketCode ?? "-", type: "sync" }));
+    }, async () => {
+        if (isPersistent && session && options.publishOrganization !== false && organizationTicketCatalog) {
           const affectedBatchIds = Array.from(new Set(
             currentTickets
-              .filter((ticket) => updates.has(ticket.id))
+              .filter((ticket) => updates.has(ticket.id) && hasTicketDataChanges(ticket, mergeTicketUpdate(ticket, updates.get(ticket.id))))
               .map((ticket) => ticket.batchId)
           ));
-          await Promise.allSettled(
-            affectedBatchIds.map((batchId) => organizationTicketCatalog.publishBatch(routerId, batchId))
-          );
+          affectedBatchIds.forEach(batchId => batchesPendingPublication.add(batchId));
+          await forEachCooperative([...batchesPendingPublication], async batchId => {
+            try {
+              await organizationTicketCatalog.publishBatch(routerId, batchId);
+              batchesPendingPublication.delete(batchId);
+            } catch { /* Keep it retryable even if enqueue itself failed. */ }
+          });
+          if (affectedBatchIds.length === 0) await organizationTicketCatalog.resumePending(routerId).catch(() => undefined);
         }
-      }
-    }
-    setTickets(nextTickets);
-    setSelectedTicket((current) => current ? mergeTicketUpdate(current, updates.get(current.id)) : null);
-    setSyncSummary(report.summary);
-    setRemoteOnlyTickets(report.localMissing);
-    report.logs.slice(0, 8).forEach((log) => writeLog({ message: log.message, ticketCode: log.ticketCode ?? "-", type: "sync" }));
+    });
   };
 
   const markPrinted = async (ticket: TicketListItem) => {
@@ -731,6 +745,7 @@ export function TicketsPage() {
       await applySyncReport(report);
       setMessage(`${report.summary.routerSynced} synchronisé(s), ${report.summary.routerMissing} absent(s) du routeur, ${report.summary.localMissing} absent(s) localement.`);
     } catch (actionError) {
+      setRouterCheckFailed(true);
       setError(actionError instanceof Error ? actionError.message : "La synchronisation a échoué.");
     } finally {
       setIsBulkBusy(false);
@@ -945,7 +960,6 @@ export function TicketsPage() {
 
   const resetFilters = () => {
     setFilters(emptyTicketFilters);
-    setPage(1);
     clearFeedback();
   };
 
@@ -1026,7 +1040,7 @@ export function TicketsPage() {
         const report = await syncService.compareTickets(ticketsRef.current.filter((ticket) => ticket.status !== "supprimé"));
         if (!disposed) await applySyncReport(report);
       } catch {
-        // The manual feedback remains available; background polling stays silent.
+        if (!disposed) setRouterCheckFailed(true);
       } finally {
         automaticSyncRunning.current = false;
       }
@@ -1107,6 +1121,8 @@ export function TicketsPage() {
 
       {message ? <p className="form-error form-error--success">{message}</p> : null}
       {error ? <p className="form-error">{error}</p> : null}
+      <p className="muted-inline">Les badges RouterOS décrivent la dernière observation, pas une garantie de présence en temps réel. « À vérifier » ne signifie pas « supprimé ».</p>
+      {routerCheckFailed ? <p role="status" className="form-error">Vérification du routeur impossible. Les derniers états connus sont conservés ; aucune absence ni suppression nouvelle n’est confirmée.</p> : null}
 
       <Card title="Préparation impression" description="Réglez l'impression thermique sans bloquer l'export CSV.">
         <div className="print-setup-grid">
@@ -1119,9 +1135,10 @@ export function TicketsPage() {
       </Card>
 
       <Card className="tickets-list-card">
-        {visibleTickets.length > 0 ? (
-          <div className="ticket-list">
-            {visibleTickets.map((ticket) => (
+        <TicketPagination
+          key={JSON.stringify([routerId, session?.account_id, session?.internal_profile_id, filters])}
+          tickets={filteredTickets}
+          renderTicket={(ticket) => (
               <TicketRow
                 busy={isBulkBusy || busyTicketId !== null}
                 key={ticket.id}
@@ -1139,18 +1156,14 @@ export function TicketsPage() {
                 role={session?.internal_profile_role ?? "guest"}
                 canDeleteBatch={Boolean(session?.permissions.includes("router.tickets.delete"))}
                 displaySettings={displaySettings}
+                cloudState={cloudQueue?.get(ticket.batchId)}
                 ticket={ticket}
               />
-            ))}
-          </div>
-        ) : (
+          )}
+          empty={
           <EmptyState action={<Button icon={Filter} onClick={resetFilters}>Réinitialiser les filtres</Button>} description="Aucun voucher ne correspond aux critères." icon={Search} title="Aucun voucher trouvé" />
-        )}
-        <div className="pagination-row">
-          <Button disabled={currentPage <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))} variant="ghost">Précédent</Button>
-          <span>Page {currentPage} / {pageCount}</span>
-          <Button disabled={currentPage >= pageCount} onClick={() => setPage((current) => Math.min(pageCount, current + 1))} variant="ghost">Suivant</Button>
-        </div>
+          }
+        />
       </Card>
 
       <TicketDetailDialog
@@ -1203,6 +1216,7 @@ export function TicketsPage() {
 }
 
 function TicketRow({
+  cloudState,
   busy,
   canDeleteBatch,
   displaySettings,
@@ -1220,6 +1234,7 @@ function TicketRow({
   role,
   ticket
 }: {
+  cloudState?: TicketCloudQueueState;
   busy: boolean;
   canDeleteBatch: boolean;
   displaySettings: TicketDisplaySettings;
@@ -1238,6 +1253,7 @@ function TicketRow({
   ticket: TicketListItem;
 }) {
   const permissions = getTicketActionPermissions(role, ticket);
+  const routerBadge = ticketRouterBadge(ticket);
   const menuItems = [{ icon: Eye, label: "Voir détail", onSelect: onOpen }];
   if (permissions.canReprint) {
     menuItems.push({ icon: Printer, label: "Réimprimer", onSelect: onReprint });
@@ -1274,8 +1290,9 @@ function TicketRow({
           <div className="ticket-row__top">
             <div className="ticket-row__code"><strong>{displaySettings.showUsername ? ticket.code : "Ticket"}</strong>{ticket.hasPdf ? <FileText aria-label="PDF" /> : null}</div>
             <div className="ticket-row__badges">
-              <Badge className="ticket-row__badge" status={ticketStatusToBadge(ticket.status)}>{ticketStatusLabel(ticket.status)}</Badge>
-              <Badge className="ticket-row__badge" status={syncStatusToBadge(ticket.syncStatus)}>{syncStatusLabel(ticket.syncStatus)}</Badge>
+              {ticketLifecycleBadges(ticket).filter(badge => badge.label !== routerBadge.label).map(badge => <Badge key={badge.label} className="ticket-row__badge" status={badge.status}>{badge.label}</Badge>)}
+              <span title={ticket.routerObservationAt ? `Dernière observation : ${formatDateTime(ticket.routerObservationAt)}` : "Aucune observation RouterOS fiable enregistrée"}><Badge className="ticket-row__badge" status={routerBadge.status}>{routerBadge.label}</Badge></span>
+              {cloudState ? <Badge className="ticket-row__badge" status={cloudState === "error" ? "error" : "warning"}>{cloudState === "error" ? "Envoi cloud en échec" : "Envoi cloud en attente"}</Badge> : null}
               {busy ? <Badge status="warning">Action en cours</Badge> : null}
             </div>
           </div>
@@ -1361,7 +1378,7 @@ function TicketDetailDialog({
       <section aria-modal="true" className="router-form-dialog ticket-detail-dialog" role="dialog">
         <header className="ticket-detail-header">
           <div className="ticket-detail-header__identity"><div className="router-card__icon"><Ticket aria-hidden="true" /></div><div><p className="ticket-detail-header__eyebrow">Détail voucher</p><h2>{ticket.code}</h2><p>{ticket.planName} · {ticket.routerName}</p></div></div>
-          <Badge status={ticketStatusToBadge(ticket.status)}>{ticketStatusLabel(ticket.status)}</Badge>
+          <div className="ticket-row__badges">{ticketLifecycleBadges(ticket).map(badge => <Badge key={badge.label} status={badge.status}>{badge.label}</Badge>)}</div>
         </header>
         <div className="ticket-detail-layout">
           <section className="ticket-detail-section">
@@ -1375,7 +1392,8 @@ function TicketDetailDialog({
               <DetailLine icon={Router} label="Routeur" value={ticket.routerName} />
               <DetailLine icon={Layers} label="Lot" value={ticket.batchId} />
               <DetailLine icon={ShieldCheck} label="Statut" value={ticketStatusLabel(ticket.status)} />
-              <DetailLine icon={RefreshCw} label="Synchronisation" value={syncStatusLabel(ticket.syncStatus)} />
+              <DetailLine icon={RefreshCw} label="Dernier état RouterOS" value={ticketRouterBadge(ticket).label} />
+              <DetailLine icon={Clock} label="Observation RouterOS" value={ticket.routerObservationAt ? formatDateTime(ticket.routerObservationAt) : "Non vérifiée sur ce poste"} />
               <DetailLine icon={UserRound} label="Créé par" value={profileLabel(ticket.operatorProfile)} />
               <DetailLine icon={Hash} label="ID MikroTik" value={ticket.mikrotikId ?? "Non disponible"} />
             </dl>
@@ -1586,13 +1604,6 @@ function getTicketActionPermissions(role: UserRole, ticket: TicketListItem) {
   return { canDelete: false, canDisable: false, canEnable: false, canRevealPassword: false, canReprint: false, canSync: false };
 }
 
-function syncStatusToBadge(status: RouterTicketSyncStatus): AppStatus {
-  if (status === "router_synced") return "success";
-  if (status === "error") return "error";
-  if (status === "conflict" || status === "local_missing" || status === "router_missing") return "warning";
-  return "offline";
-}
-
 function buildPrintTicketFromTicket(ticket: TicketListItem, passwordLabel?: string) {
   return {
     batchId: ticket.batchId,
@@ -1616,7 +1627,7 @@ async function downloadTicketsCsv(tickets: TicketListItem[], fileName: string, i
     })] : []),
     ticket.planName,
     ticketStatusLabel(ticket.status),
-    syncStatusLabel(ticket.syncStatus),
+    ticketRouterBadge(ticket).label,
     ticket.routerName,
     ticket.batchId,
     ticket.createdAt,

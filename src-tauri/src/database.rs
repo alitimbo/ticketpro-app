@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Manager};
 
 const MIGRATIONS: &[(i64, &str, &str)] = &[
@@ -156,6 +157,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         30,
         "sync_outbox",
         include_str!("../migrations/030_sync_outbox.sql"),
+    ),
+    (
+        31,
+        "ticket_router_observation",
+        include_str!("../migrations/031_ticket_router_observation.sql"),
     ),
 ];
 
@@ -406,16 +412,39 @@ fn table_has_column(connection: &Connection, table: &str, column: &str) -> Resul
 }
 
 #[tauri::command]
-pub fn db_initialize(app: AppHandle) -> Result<(), String> {
-    initialize_database(&app)
+pub async fn db_initialize(app: AppHandle) -> Result<(), String> {
+    run_database_work(move || initialize_database(&app)).await
+}
+
+// Await admission before spawning: bursts of IPC calls must not occupy the UI
+// thread or create hundreds of blocking workers competing for SQLite locks.
+async fn run_database_work<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    static LANE: OnceLock<Arc<tauri::async_runtime::Mutex<()>>> = OnceLock::new();
+    let permit = LANE
+        .get_or_init(|| Arc::new(tauri::async_runtime::Mutex::new(())))
+        .clone()
+        .lock_owned()
+        .await;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    .map_err(|_| "Le traitement SQLite a été interrompu.".to_string())?
 }
 
 #[tauri::command]
-pub fn db_execute(
+pub async fn db_execute(
     app: AppHandle,
     sql: String,
     params: Vec<DbParam>,
 ) -> Result<DbExecuteResult, String> {
+    run_database_work(move || db_execute_blocking(app, sql, params)).await
+}
+
+fn db_execute_blocking(app: AppHandle, sql: String, params: Vec<DbParam>) -> Result<DbExecuteResult, String> {
     let connection = open_connection(&app)?;
     let values: Vec<SqliteValue> = params.into_iter().map(db_param_to_sqlite_value).collect();
     let rows_affected = connection
@@ -426,10 +455,14 @@ pub fn db_execute(
 }
 
 #[tauri::command]
-pub fn db_transaction(
+pub async fn db_transaction(
     app: AppHandle,
     statements: Vec<DbStatement>,
 ) -> Result<Vec<DbExecuteResult>, String> {
+    run_database_work(move || db_transaction_blocking(app, statements)).await
+}
+
+fn db_transaction_blocking(app: AppHandle, statements: Vec<DbStatement>) -> Result<Vec<DbExecuteResult>, String> {
     let mut connection = open_connection(&app)?;
     let transaction = connection
         .transaction()
@@ -454,11 +487,15 @@ pub fn db_transaction(
 }
 
 #[tauri::command]
-pub fn db_query(
+pub async fn db_query(
     app: AppHandle,
     sql: String,
     params: Vec<DbParam>,
 ) -> Result<Vec<Map<String, Value>>, String> {
+    run_database_work(move || db_query_blocking(app, sql, params)).await
+}
+
+fn db_query_blocking(app: AppHandle, sql: String, params: Vec<DbParam>) -> Result<Vec<Map<String, Value>>, String> {
     let connection = open_connection(&app)?;
     let values: Vec<SqliteValue> = params.into_iter().map(db_param_to_sqlite_value).collect();
     let mut statement = connection
@@ -518,7 +555,11 @@ pub fn db_list_backups(app: AppHandle) -> Result<Vec<DatabaseBackup>, String> {
 }
 
 #[tauri::command]
-pub fn db_backup(app: AppHandle, file_name: String) -> Result<DatabaseBackup, String> {
+pub async fn db_backup(app: AppHandle, file_name: String) -> Result<DatabaseBackup, String> {
+    run_database_work(move || db_backup_blocking(app, file_name)).await
+}
+
+fn db_backup_blocking(app: AppHandle, file_name: String) -> Result<DatabaseBackup, String> {
     let source = database_path(&app)?;
     if !source.is_file() {
         return Err("La base locale n'existe pas encore.".to_string());
@@ -536,7 +577,11 @@ pub fn db_backup(app: AppHandle, file_name: String) -> Result<DatabaseBackup, St
 }
 
 #[tauri::command]
-pub fn db_restore(app: AppHandle, file_name: String) -> Result<(), String> {
+pub async fn db_restore(app: AppHandle, file_name: String) -> Result<(), String> {
+    run_database_work(move || db_restore_blocking(app, file_name)).await
+}
+
+fn db_restore_blocking(app: AppHandle, file_name: String) -> Result<(), String> {
     let source = backup_path(&app, &file_name)?;
     if !source.is_file() {
         return Err("Sauvegarde introuvable.".to_string());
@@ -547,4 +592,35 @@ pub fn db_restore(app: AppHandle, file_name: String) -> Result<(), String> {
     fs::copy(&temporary, &target).map_err(|error| error.to_string())?;
     let _ = fs::remove_file(temporary);
     initialize_database(&app)
+}
+
+#[cfg(test)]
+mod work_lane_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn database_work_is_off_caller_thread_serial_and_recovers_after_error() {
+        tauri::async_runtime::block_on(async {
+            let caller = std::thread::current().id();
+            let worker = run_database_work(|| Ok(std::thread::current().id())).await.unwrap();
+            assert_ne!(caller, worker);
+            let active = Arc::new(AtomicUsize::new(0));
+            let mut tasks = Vec::new();
+            for _ in 0..16 {
+                let active = active.clone();
+                tasks.push(tauri::async_runtime::spawn(async move {
+                    run_database_work(move || {
+                        assert_eq!(active.fetch_add(1, Ordering::SeqCst), 0);
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                        assert_eq!(active.fetch_sub(1, Ordering::SeqCst), 1);
+                        Ok(())
+                    }).await
+                }));
+            }
+            for task in tasks { task.await.unwrap().unwrap(); }
+            assert!(run_database_work::<()>(|| Err("injected".into())).await.is_err());
+            assert_eq!(run_database_work(|| Ok(42)).await.unwrap(), 42);
+        });
+    }
 }

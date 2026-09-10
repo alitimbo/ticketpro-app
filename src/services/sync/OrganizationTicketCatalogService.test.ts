@@ -24,6 +24,22 @@ vi.mock("../saas", async (importOriginal) => {
 });
 
 describe("OrganizationTicketCatalogService outbox", () => {
+  it("coalesces overlapping catalogue pulls and permits a retry after failure", async () => {
+    const database = await setupCatalog(0);
+    let resolve!: (value: { batches: never[]; tickets: never[] }) => void;
+    mocks.getCatalog.mockReturnValue(new Promise(done => { resolve = done; }));
+    const service = new OrganizationTicketCatalogService(database, "account-1", "profile-guest", "guest");
+    const first = service.pullRouter("router-1");
+    const second = service.pullRouter("router-1");
+    await vi.waitFor(() => expect(mocks.getCatalog).toHaveBeenCalledOnce());
+    resolve({ batches: [], tickets: [] });
+    await Promise.all([first, second]);
+    mocks.getCatalog.mockRejectedValueOnce(new Error("offline"));
+    await expect(service.pullRouter("router-1")).rejects.toThrow("offline");
+    mocks.getCatalog.mockResolvedValue({ batches: [], tickets: [] });
+    await expect(service.pullRouter("router-1")).resolves.toEqual({ importedBatches: 0, importedTickets: 0 });
+    expect(mocks.getCatalog).toHaveBeenCalledTimes(3);
+  });
   it("uses report permissions explicitly without publishing from a read", async () => {
     const database = await setupCatalog(0);
     mocks.getCatalog.mockResolvedValue({ batches: [], tickets: [] });

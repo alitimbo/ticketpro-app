@@ -58,6 +58,7 @@ export type TicketListItem = {
   serverName: string;
   status: TicketListStatus;
   syncStatus: RouterTicketSyncStatus;
+  routerObservationAt?: string | null;
   uploadedBytes: number;
   uptimeSeconds: number;
   remainingSeconds: number | null;
@@ -121,7 +122,8 @@ export function ticketFromRecord(
     routerDeletedAt: record.router_deleted_at ?? null,
     serverName: record.hotspot_server_name ?? "all",
     status: record.status as TicketListStatus,
-    syncStatus: databaseSyncStatusToTicketSyncStatus(record.sync_status),
+    syncStatus: restoreRouterObservation(record),
+    routerObservationAt: restoreRouterObservation(record) === "local_only" ? null : record.router_observation_at ?? null,
     uploadedBytes: record.uploaded_bytes,
     uptimeSeconds: record.uptime_seconds ?? 0,
     remainingSeconds: record.remaining_seconds ?? null
@@ -374,7 +376,9 @@ export function ticketStatusToBadge(status: TicketListStatus): AppStatus {
     return "active";
   }
 
-  if (status === "disponible" || status === "complété" || status === "consommé") {
+  if (status === "consommé") return "warning";
+
+  if (status === "disponible" || status === "complété") {
     return "success";
   }
 
@@ -383,6 +387,17 @@ export function ticketStatusToBadge(status: TicketListStatus): AppStatus {
   }
 
   return "offline";
+}
+
+export function ticketLifecycleBadges(ticket: Pick<TicketListItem, "status" | "routerDeletedAt" | "syncStatus">) {
+  const badges = [{ label: ticketStatusLabel(ticket.status), status: ticketStatusToBadge(ticket.status) }];
+  // A timestamp alone can be stale. Only add the network state for a terminal,
+  // synchronized record. Unexpected absence must remain "Absent routeur".
+  if ((ticket.status === "archivé" || ticket.status === "supprimé") &&
+      ticket.routerDeletedAt && ticket.syncStatus === "router_synced") {
+    badges.push({ label: "Supprimé du routeur", status: "offline" });
+  }
+  return badges;
 }
 
 export function formatDuration(minutes: number): string {
@@ -550,18 +565,26 @@ function padDatePart(value: number): string {
   return String(value).padStart(2, "0");
 }
 
-function databaseSyncStatusToTicketSyncStatus(status: TicketRecord["sync_status"]): RouterTicketSyncStatus {
-  if (status === "synced") {
-    return "router_synced";
-  }
-
-  if (status === "conflict") {
-    return "conflict";
-  }
-
-  if (status === "pending") {
-    return "local_only";
-  }
-
+export function restoreRouterObservation(record: Pick<TicketRecord,
+  "router_observation_status" | "router_observation_at" | "last_router_sync_at"
+>): RouterTicketSyncStatus {
+  const observed = Date.parse(record.router_observation_at ?? "");
+  const shared = Date.parse(record.last_router_sync_at ?? "");
+  // A newer remote snapshot must not inherit older local evidence.
+  if (!Number.isFinite(observed) || (Number.isFinite(shared) && shared > observed)) return "local_only";
+  const status = record.router_observation_status;
+  if (status === "router_synced" || status === "router_missing" || status === "error" ||
+      status === "conflict" || status === "local_missing") return status;
   return "local_only";
+}
+
+export function ticketRouterBadge(ticket: Pick<TicketListItem, "status" | "syncStatus" | "routerDeletedAt">): { label: string; status: AppStatus } {
+  if (ticket.syncStatus === "router_synced") {
+    const removed = ticket.status === "supprimé" || ticket.status === "supprimé_routeur" || (ticket.status === "archivé" && Boolean(ticket.routerDeletedAt));
+    return { label: removed ? "Supprimé du routeur" : "Présent sur le routeur", status: removed ? "offline" : "success" };
+  }
+  if (ticket.syncStatus === "router_missing") return { label: "Absent du routeur", status: "warning" };
+  if (ticket.syncStatus === "error") return { label: "Erreur de vérification / action", status: "error" };
+  if (ticket.syncStatus === "conflict") return { label: "Conflit RouterOS", status: "warning" };
+  return { label: "À vérifier sur le routeur", status: "offline" };
 }

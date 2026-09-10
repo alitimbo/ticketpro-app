@@ -345,6 +345,8 @@ export type TicketRecord = {
   archived_at?: string | null;
   router_deleted_at?: string | null;
   last_router_sync_at?: string | null;
+  router_observation_status?: string | null;
+  router_observation_at?: string | null;
   uptime_seconds?: number;
   remaining_seconds?: number | null;
   data_remaining_bytes?: number | null;

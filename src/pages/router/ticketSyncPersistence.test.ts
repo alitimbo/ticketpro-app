@@ -1,7 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { TicketListItem } from "./ticketsPageModel";
 import {
   mergeTicketUpdate,
+  hasTicketDataChanges,
+  persistTicketSyncReport,
+  type PersistTicketSyncReportInput,
   ticketHistoryTransitions,
   ticketToCreateInput
 } from "./ticketSyncPersistence";
@@ -50,6 +53,29 @@ const ticket: TicketListItem = {
 };
 
 describe("ticketSyncPersistence", () => {
+  it("does not rewrite 10000 unchanged vouchers but still saves fresh RouterOS evidence", async () => {
+    const tickets = Array.from({ length: 10_000 }, (_, i) => ({ ...ticket, id: `t-${i}`, syncStatus: "router_synced" as const }));
+    const update = vi.fn();
+    const saveRouterObservations = vi.fn();
+    const record = vi.fn();
+    const updateState = vi.fn();
+    const input = {
+      actorProfileId: "account-1:profile-1", tickets,
+      report: { updates: tickets.map(t => ({ id: t.id, syncStatus: "router_synced", lastRouterSyncAt: "2026-09-10T10:00:00Z" })) },
+      ticketRepository: { update, saveRouterObservations, listByBatch: vi.fn().mockResolvedValue([]) },
+      ticketHistoryRepository: { record }, batchRepository: { updateState }
+    } as unknown as PersistTicketSyncReportInput;
+    const result = await persistTicketSyncReport(input);
+    expect(result).toHaveLength(10_000);
+    expect(saveRouterObservations).toHaveBeenCalledOnce();
+    expect(saveRouterObservations.mock.calls[0][0]).toHaveLength(10_000);
+    expect(update).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled();
+    expect(updateState).not.toHaveBeenCalled();
+    expect(hasTicketDataChanges(ticket, { ...ticket, downloadedBytes: 123 })).toBe(true);
+    expect(hasTicketDataChanges(ticket, { ...ticket, status: "expiré" })).toBe(true);
+    expect(hasTicketDataChanges(ticket, { ...ticket, syncStatus: "router_missing" })).toBe(true);
+  });
   it("fusionne tous les compteurs et états lus en direct depuis RouterOS", () => {
     const synchronized = mergeTicketUpdate(ticket, {
       activatedAt: "2026-08-13T09:00:00.000Z",

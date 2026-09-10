@@ -11,6 +11,15 @@ import type {
 } from "../../services/sync";
 import { ticketLifecyclePhase } from "../../services/tickets";
 import type { TicketListItem, TicketListStatus } from "./ticketsPageModel";
+import { forEachCooperative } from "./cooperativeWork";
+
+export function hasTicketDataChanges(previous: TicketListItem, next: TicketListItem): boolean {
+  const before = ticketToCreateInput(previous);
+  const after = ticketToCreateInput(next);
+  return (Object.keys(after) as Array<keyof CreateTicketInput>).some(key =>
+    key !== "last_router_sync_at" && before[key] !== after[key]
+  );
+}
 
 export type PersistTicketSyncReportInput = {
   actorProfileId: string;
@@ -31,18 +40,21 @@ export async function persistTicketSyncReport({
 }: PersistTicketSyncReportInput): Promise<TicketListItem[]> {
   const updates = new Map(report.updates.map((update) => [update.id, update]));
   const nextTickets = tickets.map((ticket) => mergeTicketUpdate(ticket, updates.get(ticket.id)));
-  const changedTickets = nextTickets.filter((ticket) => updates.has(ticket.id));
+  const previousById = new Map(tickets.map((ticket) => [ticket.id, ticket]));
+  const observedTickets = nextTickets.filter(ticket => updates.has(ticket.id));
+  const changedTickets = observedTickets.filter(ticket => hasTicketDataChanges(previousById.get(ticket.id)!, ticket));
 
-  await Promise.all(
-    changedTickets.map((ticket) => ticketRepository.update(ticketToCreateInput(ticket)))
-  );
+  await forEachCooperative(changedTickets, ticket => ticketRepository.update(ticketToCreateInput(ticket)));
+  await ticketRepository.saveRouterObservations(observedTickets.map(ticket => ({
+    id: ticket.id, accountId: ticket.accountId, routerId: ticket.routerId,
+    status: ticket.syncStatus, observedAt: ticket.routerObservationAt!
+  })));
 
-  await Promise.all(
-    changedTickets.flatMap((nextTicket) => {
-      const previous = tickets.find((ticket) => ticket.id === nextTicket.id);
-      if (!previous || previous.status === nextTicket.status) return [];
-      return ticketHistoryTransitions(previous, nextTicket).map((transition) =>
-        ticketHistoryRepository.record({
+  await forEachCooperative(changedTickets, async (nextTicket) => {
+      const previous = previousById.get(nextTicket.id);
+      if (!previous || previous.status === nextTicket.status) return;
+      for (const transition of ticketHistoryTransitions(previous, nextTicket)) {
+        await ticketHistoryRepository.record({
           account_id: nextTicket.accountId,
           created_by_profile_id: actorProfileId,
           message: transition.message,
@@ -51,14 +63,14 @@ export async function persistTicketSyncReport({
           router_id: nextTicket.routerId,
           source: transition.source,
           ticket_id: nextTicket.id
-        })
-      );
-    })
-  );
+        });
+      }
+    });
 
-  const affectedBatchIds = Array.from(new Set(changedTickets.map((ticket) => ticket.batchId)));
-  await Promise.all(
-    affectedBatchIds.map(async (batchId) => {
+  // Reconcile aggregate state even after a previous attempt saved tickets but
+  // failed before updating the batch. This is one read per batch, not per ticket.
+  const affectedBatchIds = Array.from(new Set(observedTickets.map((ticket) => ticket.batchId)));
+  await forEachCooperative(affectedBatchIds, async (batchId) => {
       const batchTickets = await ticketRepository.listByBatch(batchId);
       const accountId = batchTickets[0]?.account_id;
       if (!accountId) return;
@@ -70,8 +82,7 @@ export async function persistTicketSyncReport({
         allSynced ? "terminé" : "partiel",
         allSynced ? "synced" : hasConflict ? "conflict" : "pending"
       );
-    })
-  );
+    });
 
   return nextTickets;
 }
@@ -154,6 +165,7 @@ export function mergeTicketUpdate(
     serverName: update.serverName ?? ticket.serverName,
     status,
     syncStatus: update.syncStatus,
+    routerObservationAt: update.lastRouterSyncAt ?? new Date().toISOString(),
     uploadedBytes: update.uploadedBytes ?? ticket.uploadedBytes,
     uptimeSeconds: update.uptimeSeconds ?? ticket.uptimeSeconds
   };

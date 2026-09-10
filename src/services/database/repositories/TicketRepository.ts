@@ -69,6 +69,19 @@ export class TicketRepository {
     return rows[0] ?? null;
   }
 
+  async saveRouterObservations(observations: Array<{
+    id: string; accountId: string; routerId: string; status: string; observedAt: string;
+  }>): Promise<void> {
+    // One bounded transaction per chunk, no per-ticket read and no secret fields.
+    for (let offset = 0; offset < observations.length; offset += 250) {
+      await this.database.transaction(observations.slice(offset, offset + 250).map(item => ({
+        sql: `UPDATE tickets SET router_observation_status = ?1, router_observation_at = ?2
+          WHERE id = ?3 AND account_id = ?4 AND router_id = ?5`,
+        params: [item.status, item.observedAt, item.id, item.accountId, item.routerId]
+      })));
+    }
+  }
+
   async findByRouterUsername(routerId: string, username: string): Promise<TicketRecord | null> {
     const rows = await this.database.query<TicketRecord>(
       "SELECT * FROM tickets WHERE router_id = ?1 AND username = ?2 ORDER BY created_at DESC LIMIT 1",

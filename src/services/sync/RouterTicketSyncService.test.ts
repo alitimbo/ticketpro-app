@@ -375,7 +375,7 @@ describe("RouterTicketSyncService", () => {
       [{ ...activeUsers[0], username: localTickets[0].code }]
     );
 
-    expect(report.updates[0]).toMatchObject({ status: "expiré", syncStatus: "router_missing" });
+    expect(report.updates[0]).toMatchObject({ status: "expiré", syncStatus: "error" });
     expect(report.logs[0]).toMatchObject({ level: "error" });
   });
 

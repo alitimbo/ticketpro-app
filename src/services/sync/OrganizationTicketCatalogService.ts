@@ -27,6 +27,7 @@ const CLOUD_TICKET_CATALOG_CHUNK_SIZE = 250;
 type CloudTicketCatalogPayload = Parameters<typeof saveSaasRouterTicketCatalog>[0];
 
 export class OrganizationTicketCatalogService {
+  private readonly pullsInFlight = new Map<string, Promise<OrganizationTicketCatalogSyncResult>>();
   private readonly batches: TicketBatchRepository;
   private readonly plans: HotspotPlanRepository;
   private readonly routers: RouterRepository;
@@ -134,13 +135,27 @@ export class OrganizationTicketCatalogService {
   }
 
   async pullRouter(routerId: string, purpose: "tickets" | "report" = "tickets"): Promise<OrganizationTicketCatalogSyncResult> {
+    const key = `${routerId}:${purpose}`;
+    const existing = this.pullsInFlight.get(key);
+    if (existing) return existing;
+    const pending = this.pullRouterOnce(routerId, purpose);
+    this.pullsInFlight.set(key, pending);
+    try { return await pending; }
+    finally { if (this.pullsInFlight.get(key) === pending) this.pullsInFlight.delete(key); }
+  }
+
+  private async pullRouterOnce(routerId: string, purpose: "tickets" | "report"): Promise<OrganizationTicketCatalogSyncResult> {
     const router = await this.requireOwnedRouter(routerId);
     const catalog = await getSaasRouterTicketCatalog(router.cloud_router_id ?? router.id, purpose);
     const plans = await this.plans.listByRouter(routerId);
     const byId = new Map(plans.map((plan) => [plan.id, plan]));
     const byProfile = new Map(plans.filter((plan) => plan.mikrotik_profile_name).map((plan) => [plan.mikrotik_profile_name as string, plan]));
     const remoteTicketsByBatch = new Map<string, SaasTicketSnapshot[]>();
-    for (const ticket of catalog.tickets) remoteTicketsByBatch.set(ticket.batch_id, [...(remoteTicketsByBatch.get(ticket.batch_id) ?? []), ticket]);
+    for (const ticket of catalog.tickets) {
+      const batch = remoteTicketsByBatch.get(ticket.batch_id);
+      if (batch) batch.push(ticket);
+      else remoteTicketsByBatch.set(ticket.batch_id, [ticket]);
+    }
 
     const localBatchIds = new Map<string, string>();
     let importedBatches = 0;

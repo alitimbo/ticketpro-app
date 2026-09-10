@@ -8,6 +8,7 @@ import {
   filterTickets,
   getPageCount,
   paginateTickets,
+  ticketLifecycleBadges,
   scopeTicketsForSession
 } from "./ticketsPageModel";
 
@@ -15,6 +16,23 @@ const adminSession = createSession("admin", "doumacorporation@gmail.com", Date.n
 const agentSession = createSession("agent", "doumacorporation@gmail.com", Date.now());
 
 describe("ticketsPageModel", () => {
+  it("distingue epuisement, expiration, utilisation et suppression confirmee", () => {
+    const ticket = { ...createDemoTickets()[0], routerDeletedAt: null, syncStatus: "router_synced" as const };
+    expect(ticketLifecycleBadges({ ...ticket, status: "consommé" })).toEqual([{ label: "Épuisé", status: "warning" }]);
+    expect(ticketLifecycleBadges({ ...ticket, status: "expiré" })).toEqual([{ label: "Expiré", status: "offline" }]);
+    expect(ticketLifecycleBadges({ ...ticket, status: "en_cours_utilisation" })).toEqual([{ label: "En cours d'utilisation", status: "active" }]);
+    expect(ticketLifecycleBadges({ ...ticket, status: "archivé", routerDeletedAt: "2026-09-10" })).toEqual([
+      { label: "Archivé", status: "offline" }, { label: "Supprimé du routeur", status: "offline" }
+    ]);
+    expect(ticketLifecycleBadges({ ...ticket, status: "supprimé_routeur", routerDeletedAt: "2026-09-10" })).toHaveLength(1);
+  });
+
+  it("ne transforme pas une absence ou un horodatage ancien en suppression confirmee", () => {
+    const ticket = { ...createDemoTickets()[0], routerDeletedAt: "2026-09-10" };
+    expect(ticketLifecycleBadges({ ...ticket, status: "archivé", syncStatus: "router_missing" })).toHaveLength(1);
+    expect(ticketLifecycleBadges({ ...ticket, status: "disponible", syncStatus: "router_synced" })).toHaveLength(1);
+    expect(ticketLifecycleBadges({ ...ticket, status: "archivé", routerDeletedAt: null, syncStatus: "router_synced" })).toHaveLength(1);
+  });
   it("retrouve rapidement un ticket par code", () => {
     const tickets = createDemoTickets();
     const expectedCode = tickets[8].code;

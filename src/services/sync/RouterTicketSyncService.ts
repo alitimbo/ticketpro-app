@@ -495,11 +495,11 @@ export function compareLocalAndRouterTickets(
           : ticket.completedAt,
         id: ticket.id,
         lastRouterSyncAt: synchronizedAt,
-        routerDeletedAt: manuallyDeleted || automaticallyCleaned
+        routerDeletedAt: (manuallyDeleted && !residualSession) || automaticallyCleaned
           ? ticket.routerDeletedAt ?? synchronizedAt
           : ticket.routerDeletedAt,
         status: manuallyDeleted ? "supprimé" : automaticallyCleaned ? "archivé" : ticket.status,
-        syncStatus: manuallyDeleted || automaticallyCleaned ? "router_synced" : "router_missing"
+        syncStatus: residualSession ? "error" : manuallyDeleted || automaticallyCleaned ? "router_synced" : "router_missing"
       });
       logs.push({
         level: manuallyDeleted || automaticallyCleaned ? "info" : "error",
