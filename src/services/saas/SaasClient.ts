@@ -354,24 +354,55 @@ export class SaasRequestError extends Error {
   }
 }
 
-export async function registerSaasAndInitiatePayment(input: {
+export type SaasEmailVerification = {
+  registration_token: string;
+  email: string;
+  expires_at: string;
+  resend_after_seconds: number;
+  verified: boolean;
+  message?: string;
+};
+
+export async function startSaasEmailVerification(input: {
   organizationName: string;
   name: string;
   email: string;
   password: string;
   confirmPassword: string;
   phone?: string;
-  planId: string;
-  msisdn: string;
-  paymentType: IpayPaymentType;
-}): Promise<InitiatedPaymentOrder> {
-  return request("/v1/saas/register-and-pay", {
+}): Promise<SaasEmailVerification> {
+  return request("/v1/saas/registration/start", {
     organization_name: input.organizationName,
     name: input.name,
     email: input.email,
     password: input.password,
     confirm_password: input.confirmPassword,
-    phone: input.phone,
+    phone: input.phone
+  });
+}
+
+export async function verifySaasEmail(input: {
+  registrationToken: string;
+  verificationCode: string;
+}): Promise<SaasEmailVerification> {
+  return request("/v1/saas/registration/verify-email", {
+    registration_token: input.registrationToken,
+    verification_code: input.verificationCode
+  });
+}
+
+export async function resendSaasEmailVerificationCode(registrationToken: string): Promise<SaasEmailVerification> {
+  return request("/v1/saas/registration/resend-code", { registration_token: registrationToken });
+}
+
+export async function registerSaasAndInitiatePayment(input: {
+  registrationToken: string;
+  planId: string;
+  msisdn: string;
+  paymentType: IpayPaymentType;
+}): Promise<InitiatedPaymentOrder> {
+  return request("/v1/saas/register-and-pay", {
+    registration_token: input.registrationToken,
     plan_id: input.planId,
     msisdn: input.msisdn,
     payment_type: input.paymentType
@@ -379,20 +410,10 @@ export async function registerSaasAndInitiatePayment(input: {
 }
 
 export async function registerSaasTrial(input: {
-  organizationName: string;
-  name: string;
-  email: string;
-  password: string;
-  confirmPassword: string;
-  phone?: string;
+  registrationToken: string;
 }): Promise<SaasAuthResult> {
   const result = await request<SaasAuthResult>("/v1/saas/register-trial", {
-    organization_name: input.organizationName,
-    name: input.name,
-    email: input.email,
-    password: input.password,
-    confirm_password: input.confirmPassword,
-    phone: input.phone
+    registration_token: input.registrationToken
   });
   if (!result.session) throw new Error("La session d'essai TicketPro n'a pas été créée.");
   await storeSaasSession(result.session.token);

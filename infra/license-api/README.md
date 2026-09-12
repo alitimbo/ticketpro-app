@@ -10,13 +10,23 @@ sessions. Les jetons en clair ne sont retournés qu'au moment de leur création.
 ## Parcours SaaS principal
 
 ```text
-POST /v1/saas/register-and-pay
-→ création du compte en attente
+POST /v1/saas/registration/start
+→ envoi d'un code OTP à 6 chiffres
+→ POST /v1/saas/registration/verify-email
+→ choix essai gratuit ou forfait
+→ POST /v1/saas/register-trial ou POST /v1/saas/register-and-pay
 → paiement iPay
 → POST /v1/payments/orders/status
 → POST /v1/saas/registration/complete
 → session SaaS et abonnement actif
 ```
+
+Une adresse email doit être vérifiée avant qu'une organisation, un essai, une
+commande de paiement ou une session SaaS ne soit créée. Les inscriptions en
+attente conservent uniquement le hash `scrypt` du mot de passe et les HMAC du
+jeton de parcours et du code OTP. Le code est valide 10 minutes, avec 5 essais,
+un renvoi par minute et 3 envois par heure par adresse. Les invitations d'équipe
+et la réinitialisation de mot de passe conservent leurs flux indépendants.
 
 Une organisation peut se connecter depuis plusieurs PC. Le quota porte sur les
 routeurs, pas sur le nombre d'installations. À l'expiration, la connexion, le
@@ -29,6 +39,9 @@ Routes principales :
 - `POST /v1/saas/register-trial`
 - `POST /v1/saas/register-and-pay`
 - `POST /v1/saas/registration/complete`
+- `POST /v1/saas/registration/start`
+- `POST /v1/saas/registration/verify-email`
+- `POST /v1/saas/registration/resend-code`
 - `POST /v1/saas/auth/login`
 - `GET /v1/saas/auth/me`
 - `POST /v1/saas/auth/switch-organization`

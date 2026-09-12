@@ -10,6 +10,8 @@ import { DatabaseBackupService, type DatabaseBackup } from "../database";
 export type AppUpdate = {
   currentVersion: string;
   date?: string;
+  enforcement: "recommended" | "required";
+  minimumSupportedVersion?: string;
   notes?: string;
   version: string;
 };
@@ -27,10 +29,40 @@ export type AppUpdateInstallResult = {
 let cachedUpdate: Update | null | undefined;
 let pendingCheck: Promise<Update | null> | null = null;
 
-function toPublicUpdate(update: Update): AppUpdate {
+type AppUpdatePolicyResponse = {
+  enforcement?: unknown;
+  minimum_supported_version?: unknown;
+  version?: unknown;
+};
+
+async function getUpdatePolicy(update: Update): Promise<Pick<AppUpdate, "enforcement" | "minimumSupportedVersion">> {
+  const apiUrl = String(import.meta.env.VITE_LICENSE_API_URL ?? "").replace(/\/$/, "");
+  if (!apiUrl) return { enforcement: "recommended" };
+
+  try {
+    const response = await fetch(
+      `${apiUrl}/v1/app-updates/policy?current_version=${encodeURIComponent(update.currentVersion)}`,
+      { headers: { accept: "application/json" }, method: "GET" }
+    );
+    if (!response.ok) return { enforcement: "recommended" };
+    const policy = await response.json() as AppUpdatePolicyResponse;
+    if (policy.version !== update.version) return { enforcement: "recommended" };
+    return {
+      enforcement: policy.enforcement === "required" ? "required" : "recommended",
+      ...(typeof policy.minimum_supported_version === "string"
+        ? { minimumSupportedVersion: policy.minimum_supported_version }
+        : {})
+    };
+  } catch {
+    return { enforcement: "recommended" };
+  }
+}
+
+async function toPublicUpdate(update: Update): Promise<AppUpdate> {
   return {
     currentVersion: update.currentVersion,
     date: update.date,
+    ...(await getUpdatePolicy(update)),
     notes: update.body,
     version: update.version
   };
@@ -46,7 +78,7 @@ export async function checkForAppUpdate(force = false): Promise<AppUpdate | null
   if (!force && cachedUpdate !== undefined) {
     return cachedUpdate ? toPublicUpdate(cachedUpdate) : null;
   }
-  if (!force && pendingCheck) {
+  if (pendingCheck) {
     const update = await pendingCheck;
     return update ? toPublicUpdate(update) : null;
   }
@@ -115,4 +147,3 @@ export function describeAppUpdateError(error: unknown): string {
   }
   return message || "La mise à jour a échoué.";
 }
-

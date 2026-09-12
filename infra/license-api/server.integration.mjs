@@ -26,8 +26,46 @@ const ipayPayments = new Map();
 const hubRequests = [];
 const hubPeerAddresses = new Map();
 let nextHubOperatorAddress = 3;
+const verifiedRegistrationTokens = new Map();
 
 async function api(pathname, { method = "POST", token, body, headers = {} } = {}) {
+  if (
+    method === "POST"
+    && (pathname === "/v1/saas/register-trial" || pathname === "/v1/saas/register-and-pay")
+    && body?.email
+    && !body.registration_token
+  ) {
+    const email = String(body.email).toLowerCase();
+    let registrationToken = verifiedRegistrationTokens.get(email);
+    if (!registrationToken) {
+      const started = await api("/v1/saas/registration/start", {
+        body: {
+          organization_name: body.organization_name,
+          name: body.name,
+          email: body.email,
+          password: body.password,
+          confirm_password: body.confirm_password
+        }
+      });
+      if (started.status !== 200) return started;
+      const verified = await api("/v1/saas/registration/verify-email", {
+        body: {
+          registration_token: started.payload.registration_token,
+          verification_code: started.payload.verification_code
+        }
+      });
+      if (verified.status !== 200) return verified;
+      registrationToken = started.payload.registration_token;
+      verifiedRegistrationTokens.set(email, registrationToken);
+    }
+    const { password, confirm_password, email: _email, organization_name, name, ...activation } = body;
+    return api(pathname, {
+      method,
+      token,
+      headers,
+      body: { ...activation, registration_token: registrationToken }
+    });
+  }
   const response = await fetch(`${baseUrl}${pathname}`, {
     method,
     headers: {
@@ -196,7 +234,8 @@ before(async () => {
       IPAY_SECRET_HASH: "ipay-webhook-secret-test",
       VPN_HUB_URL: `http://127.0.0.1:${hubPort}`,
       VPN_HUB_MASTER_TOKEN: hubMasterToken,
-      SAAS_EXPOSE_RESET_TOKEN: "true"
+      SAAS_EXPOSE_RESET_TOKEN: "true",
+      SAAS_EXPOSE_EMAIL_VERIFICATION_CODE: "true"
     },
     stdio: ["ignore", "ignore", "pipe"]
   });
@@ -238,6 +277,8 @@ test("l'Updater public retourne 204 sans version puis un manifeste signé par pl
 
   fs.writeFileSync(updateManifestPath, JSON.stringify({
     version: "0.2.0",
+    enforcement: "required",
+    minimum_supported_version: "0.1.9",
     notes: "Stabilisation des mises à jour.",
     pub_date: "2026-07-29T12:00:00.000Z",
     platforms: {
@@ -256,6 +297,14 @@ test("l'Updater public retourne 204 sans version puis un manifeste signé par pl
   assert.equal(available.payload.version, "0.2.0");
   assert.equal(available.payload.notes, "Stabilisation des mises à jour.");
   assert.match(available.payload.url, /^https:\/\//);
+
+  const policy = await api(
+    "/v1/app-updates/policy?current_version=0.1.9",
+    { method: "GET" }
+  );
+  assert.equal(policy.status, 200);
+  assert.equal(policy.payload.enforcement, "required");
+  assert.equal(policy.payload.minimum_supported_version, "0.1.9");
 
   const alreadyCurrent = await api(
     "/v1/app-updates/check?target=windows&arch=x86_64&current_version=0.2.0",
@@ -1428,13 +1477,29 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
   assert.equal(plans.payload.plans.some((plan) => plan.is_reseller), false);
   const plan = plans.payload.plans[0];
 
-  const registration = await api("/v1/saas/register-and-pay", {
+  const verificationStart = await api("/v1/saas/registration/start", {
     body: {
       organization_name: "WiFi Sahel",
       name: "Amina Test",
       email: "amina.saas@example.com",
       password: "SaaSsimple123",
-      confirm_password: "SaaSsimple123",
+      confirm_password: "SaaSsimple123"
+    }
+  });
+  assert.equal(verificationStart.status, 200);
+  assert.equal(typeof verificationStart.payload.verification_code, "string");
+  const verification = await api("/v1/saas/registration/verify-email", {
+    body: {
+      registration_token: verificationStart.payload.registration_token,
+      verification_code: verificationStart.payload.verification_code
+    }
+  });
+  assert.equal(verification.status, 200);
+  assert.equal(verification.payload.verified, true);
+
+  const registration = await api("/v1/saas/register-and-pay", {
+    body: {
+      registration_token: verificationStart.payload.registration_token,
       plan_id: plan.id,
       msisdn: "90909090",
       payment_type: "mobile"
@@ -2348,6 +2413,46 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
   });
   assert.equal(expiredAccountStillAccessible.status, 200);
   assert.equal(expiredAccountStillAccessible.payload.subscription.is_active, false);
+});
+
+test("une inscription SaaS ne peut activer ni essai ni paiement avant la vérification email", async () => {
+  const started = await api("/v1/saas/registration/start", {
+    body: {
+      organization_name: "OTP obligatoire",
+      name: "Client OTP",
+      email: "otp.required@example.com",
+      password: "OtpRequired123",
+      confirm_password: "OtpRequired123"
+    }
+  });
+  assert.equal(started.status, 200);
+  assert.equal(started.payload.verified, false);
+  assert.equal("password" in started.payload, false);
+
+  const unverifiedTrial = await api("/v1/saas/register-trial", {
+    body: { registration_token: started.payload.registration_token }
+  });
+  assert.equal(unverifiedTrial.status, 403);
+
+  const wrongCode = await api("/v1/saas/registration/verify-email", {
+    body: { registration_token: started.payload.registration_token, verification_code: "000000" }
+  });
+  assert.equal(wrongCode.status, 400);
+
+  const verified = await api("/v1/saas/registration/verify-email", {
+    body: {
+      registration_token: started.payload.registration_token,
+      verification_code: started.payload.verification_code
+    }
+  });
+  assert.equal(verified.status, 200);
+  assert.equal(verified.payload.verified, true);
+
+  const trial = await api("/v1/saas/register-trial", {
+    body: { registration_token: started.payload.registration_token }
+  });
+  assert.equal(trial.status, 200);
+  assert.equal(trial.payload.subscription.plan.code, "TRIAL-7D");
 });
 
 test("authentification, licences, paiements iPay et crédits revendeur restent cohérents", async () => {

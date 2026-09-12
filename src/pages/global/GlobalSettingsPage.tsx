@@ -592,7 +592,7 @@ export function GlobalSettingsPage() {
               icon={RefreshCw}
               meta={(
                 <Button
-                  disabled={updateBusy !== null || !isAdmin}
+                  disabled={updateBusy !== null}
                   icon={RefreshCw}
                   onClick={() => void checkUpdates()}
                 >
@@ -610,7 +610,7 @@ export function GlobalSettingsPage() {
                 icon={Download}
                 meta={(
                   <Button
-                    disabled={updateBusy !== null || !isAdmin}
+                    disabled={updateBusy !== null}
                     icon={Download}
                     onClick={() => void installUpdate()}
                     variant="primary"
@@ -634,12 +634,6 @@ export function GlobalSettingsPage() {
                   : `${updateProgress} % téléchargés`}
               </span>
             </div>
-          ) : null}
-          {!isAdmin ? (
-            <StatusDot
-              label="Seul un administrateur peut installer une mise à jour sur ce poste."
-              status="warning"
-            />
           ) : null}
         </Card>
       </div>

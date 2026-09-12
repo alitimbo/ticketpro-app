@@ -42,10 +42,36 @@ const SMTP_PASSWORD = String(process.env.SMTP_PASSWORD ?? "");
 const SMTP_FROM_EMAIL = String(process.env.SMTP_FROM_EMAIL ?? SMTP_USER);
 const SMTP_FROM_NAME = String(process.env.SMTP_FROM_NAME ?? "TicketPro");
 const SAAS_EXPOSE_RESET_TOKEN = process.env.SAAS_EXPOSE_RESET_TOKEN === "true";
+// Strictly for automated tests or an isolated development environment. Never enable in production.
+const SAAS_EXPOSE_EMAIL_VERIFICATION_CODE = process.env.SAAS_EXPOSE_EMAIL_VERIFICATION_CODE === "true";
 const parsedInvitationTtlHours = Number(process.env.SAAS_INVITATION_TTL_HOURS ?? 24);
 const SAAS_INVITATION_TTL_HOURS = Number.isFinite(parsedInvitationTtlHours)
   ? Math.min(168, Math.max(1, Math.trunc(parsedInvitationTtlHours)))
   : 24;
+const SAAS_EMAIL_VERIFICATION_TTL_MINUTES = positiveIntegerSetting(
+  process.env.SAAS_EMAIL_VERIFICATION_TTL_MINUTES,
+  10,
+  5,
+  60
+);
+const SAAS_EMAIL_VERIFICATION_MAX_ATTEMPTS = positiveIntegerSetting(
+  process.env.SAAS_EMAIL_VERIFICATION_MAX_ATTEMPTS,
+  5,
+  3,
+  10
+);
+const SAAS_EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS = positiveIntegerSetting(
+  process.env.SAAS_EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS,
+  60,
+  30,
+  300
+);
+const SAAS_EMAIL_VERIFICATION_MAX_SENDS_PER_HOUR = positiveIntegerSetting(
+  process.env.SAAS_EMAIL_VERIFICATION_MAX_SENDS_PER_HOUR,
+  3,
+  1,
+  10
+);
 const parsedMaxBodyBytes = Number(process.env.LICENSE_MAX_BODY_BYTES ?? 256 * 1024);
 const MAX_BODY_BYTES = Number.isFinite(parsedMaxBodyBytes)
   ? Math.min(1024 * 1024, Math.max(64 * 1024, Math.trunc(parsedMaxBodyBytes)))
@@ -274,6 +300,28 @@ db.exec(`
     expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
     used_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS saas_registration_verifications (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    organization_name TEXT NOT NULL,
+    owner_name TEXT NOT NULL,
+    phone TEXT,
+    password_hash TEXT NOT NULL,
+    registration_token_hash TEXT NOT NULL UNIQUE,
+    verification_code_hash TEXT NOT NULL,
+    verification_expires_at TEXT NOT NULL,
+    verification_attempt_count INTEGER NOT NULL DEFAULT 0,
+    verification_send_count INTEGER NOT NULL DEFAULT 1,
+    verification_window_started_at TEXT NOT NULL,
+    verification_last_sent_at TEXT NOT NULL,
+    verified_at TEXT,
+    consumed_at TEXT,
+    organization_id TEXT REFERENCES organizations(id) ON DELETE SET NULL,
+    user_id TEXT REFERENCES organization_users(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS organization_user_router_access (
@@ -1216,6 +1264,62 @@ const statements = {
   consumeOrganizationPasswordReset: db.prepare(`
     UPDATE organization_password_reset_tokens SET used_at = ? WHERE id = ?
   `),
+  findSaasRegistrationVerificationByEmail: db.prepare(`
+    SELECT * FROM saas_registration_verifications WHERE email = ? LIMIT 1
+  `),
+  findSaasRegistrationVerificationByToken: db.prepare(`
+    SELECT * FROM saas_registration_verifications WHERE registration_token_hash = ? LIMIT 1
+  `),
+  insertSaasRegistrationVerification: db.prepare(`
+    INSERT INTO saas_registration_verifications (
+      id, email, organization_name, owner_name, phone, password_hash,
+      registration_token_hash, verification_code_hash, verification_expires_at,
+      verification_attempt_count, verification_send_count, verification_window_started_at,
+      verification_last_sent_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?, ?)
+  `),
+  updateSaasRegistrationVerification: db.prepare(`
+    UPDATE saas_registration_verifications
+    SET organization_name = ?, owner_name = ?, phone = ?, password_hash = ?,
+      registration_token_hash = ?, verification_code_hash = ?, verification_expires_at = ?,
+      verification_attempt_count = 0, verification_send_count = ?,
+      verification_window_started_at = ?, verification_last_sent_at = ?,
+      verified_at = NULL, consumed_at = NULL, organization_id = NULL, user_id = NULL, updated_at = ?
+    WHERE id = ?
+  `),
+  updateSaasRegistrationVerificationCode: db.prepare(`
+    UPDATE saas_registration_verifications
+    SET verification_code_hash = ?, verification_expires_at = ?, verification_attempt_count = 0,
+      verification_send_count = ?, verification_window_started_at = ?,
+      verification_last_sent_at = ?, updated_at = ?
+    WHERE id = ?
+  `),
+  incrementSaasRegistrationVerificationAttempts: db.prepare(`
+    UPDATE saas_registration_verifications
+    SET verification_attempt_count = verification_attempt_count + 1, updated_at = ?
+    WHERE id = ?
+  `),
+  verifySaasRegistration: db.prepare(`
+    UPDATE saas_registration_verifications SET verified_at = ?, updated_at = ? WHERE id = ?
+  `),
+  materializeSaasRegistration: db.prepare(`
+    UPDATE saas_registration_verifications
+    SET organization_id = ?, user_id = ?, updated_at = ?
+    WHERE id = ? AND organization_id IS NULL AND user_id IS NULL
+  `),
+  consumeSaasRegistration: db.prepare(`
+    UPDATE saas_registration_verifications SET consumed_at = ?, updated_at = ? WHERE id = ?
+  `),
+  findSaasRegistrationVerificationByOrganization: db.prepare(`
+    SELECT * FROM saas_registration_verifications
+    WHERE organization_id = ? AND user_id = ? AND consumed_at IS NULL
+    LIMIT 1
+  `),
+  resumeVerifiedSaasRegistration: db.prepare(`
+    UPDATE saas_registration_verifications
+    SET registration_token_hash = ?, updated_at = ?
+    WHERE id = ? AND verified_at IS NOT NULL AND consumed_at IS NULL
+  `),
   insertOrganizationSubscription: db.prepare(`
     INSERT INTO organization_subscriptions (
       id, organization_id, plan_id, plan_code, plan_name, status, router_limit, max_devices, device_limit_mode,
@@ -2045,6 +2149,49 @@ function requirePasswordInput(body, field = "password") {
 
 function randomToken(bytes = 32) {
   return crypto.randomBytes(bytes).toString("base64url");
+}
+
+function positiveIntegerSetting(value, fallback, minimum, maximum) {
+  const parsed = Number(value ?? fallback);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(maximum, Math.max(minimum, Math.trunc(parsed)));
+}
+
+function generateEmailVerificationCode() {
+  return String(crypto.randomInt(100_000, 1_000_000));
+}
+
+function emailVerificationCodeHash(registrationToken, code) {
+  return hash(`saas-email-verification:v1:${registrationToken}:${code}`);
+}
+
+function emailVerificationExpiry() {
+  return new Date(Date.now() + SAAS_EMAIL_VERIFICATION_TTL_MINUTES * 60_000).toISOString();
+}
+
+function emailVerificationPublicResponse(registrationToken, record, extra = {}) {
+  const expiresAt = record.verification_expires_at;
+  return {
+    registration_token: registrationToken,
+    email: record.email,
+    expires_at: expiresAt,
+    resend_after_seconds: SAAS_EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS,
+    verified: Boolean(record.verified_at),
+    ...extra
+  };
+}
+
+function assertUsableSaasRegistration(record, registrationToken, { requireVerified = false } = {}) {
+  if (!record || !sameHash(registrationToken, record.registration_token_hash)) {
+    throw new HttpError(400, "Cette vérification est invalide. Recommencez l'inscription.");
+  }
+  if (record.consumed_at) {
+    throw new HttpError(409, "Cette inscription est déjà terminée. Connectez-vous.");
+  }
+  if (requireVerified && !record.verified_at) {
+    throw new HttpError(403, "Vérifiez d'abord votre adresse email.");
+  }
+  return record;
 }
 
 function normalizeKey(value) {
@@ -4509,6 +4656,12 @@ function readAppUpdateManifest() {
   }
   const manifest = JSON.parse(raw);
   parseSemver(manifest.version, "version publiée");
+  if (manifest.enforcement !== undefined && !["recommended", "required"].includes(manifest.enforcement)) {
+    throw new Error("La politique de mise à jour est invalide.");
+  }
+  if (manifest.minimum_supported_version !== undefined) {
+    parseSemver(String(manifest.minimum_supported_version), "version minimale supportée");
+  }
   if (!manifest.platforms || typeof manifest.platforms !== "object") {
     throw new Error("Le manifeste de mise à jour ne contient aucune plateforme.");
   }
@@ -4593,6 +4746,86 @@ function createPasswordReset(actorType, actorId, createdByAdminId) {
 
 function generateTemporaryPassword() {
   return `Tp!9aA${randomToken(12)}`;
+}
+
+async function deliverSaasEmailVerification(record, code) {
+  const transporter = getSmtpTransporter();
+  if (!transporter) return false;
+  const expiresLabel = new Intl.DateTimeFormat("fr-FR", {
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "Africa/Niamey"
+  }).format(new Date(record.verification_expires_at));
+  await transporter.sendMail({
+    from: { name: SMTP_FROM_NAME, address: SMTP_FROM_EMAIL },
+    to: record.email,
+    subject: "Votre code de vérification TicketPro",
+    text: [
+      `Bonjour ${record.owner_name},`,
+      "",
+      "Voici votre code de vérification TicketPro :",
+      code,
+      "",
+      `Ce code expire à ${expiresLabel}. Ne le communiquez à personne.`,
+      "Si vous n'êtes pas à l'origine de cette inscription, ignorez cet email."
+    ].join("\n"),
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;color:#18202a">
+        <h1 style="font-size:24px">Vérifiez votre email TicketPro</h1>
+        <p>Bonjour ${escapeHtml(record.owner_name)},</p>
+        <p>Saisissez ce code dans TicketPro pour poursuivre votre inscription :</p>
+        <p style="font-size:30px;font-weight:700;letter-spacing:8px;margin:28px 0">${escapeHtml(code)}</p>
+        <p>Ce code expire à ${escapeHtml(expiresLabel)}. Ne le communiquez à personne.</p>
+        <p style="color:#5f6b76">Si vous n'êtes pas à l'origine de cette inscription, ignorez cet email.</p>
+      </div>
+    `,
+    disableFileAccess: true,
+    disableUrlAccess: true
+  });
+  return true;
+}
+
+function materializeVerifiedSaasRegistration(registrationId) {
+  const registrationTokenHash = hash(registrationId);
+  const record = statements.findSaasRegistrationVerificationByToken.get(registrationTokenHash);
+  if (!record) throw new HttpError(400, "Cette vérification est invalide. Recommencez l'inscription.");
+  if (record.organization_id && record.user_id) return record;
+  const existingUser = statements.findOrganizationUserByEmail.get(record.email);
+  if (existingUser) throw new HttpError(409, "Un compte existe déjà avec cet email. Connectez-vous.");
+
+  const organizationId = crypto.randomUUID();
+  const userId = crypto.randomUUID();
+  const timestamp = nowIso();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const fresh = statements.findSaasRegistrationVerificationByToken.get(registrationTokenHash);
+    assertUsableSaasRegistration(fresh, registrationId, { requireVerified: true });
+    if (fresh.organization_id && fresh.user_id) {
+      db.exec("COMMIT");
+      return fresh;
+    }
+    if (statements.findOrganizationUserByEmail.get(fresh.email)) {
+      throw new HttpError(409, "Un compte existe déjà avec cet email. Connectez-vous.");
+    }
+    statements.insertOrganization.run(organizationId, fresh.organization_name, timestamp, timestamp);
+    statements.insertOrganizationUser.run(
+      userId,
+      organizationId,
+      fresh.email,
+      fresh.owner_name,
+      fresh.phone,
+      fresh.password_hash,
+      timestamp,
+      timestamp
+    );
+    createOwnerMembership(organizationId, userId, timestamp);
+    statements.materializeSaasRegistration.run(organizationId, userId, timestamp, fresh.id);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+  return statements.findSaasRegistrationVerificationByToken.get(registrationTokenHash);
 }
 
 async function deliverOrganizationPasswordReset(user, resetToken, expiresAt) {
@@ -5041,6 +5274,20 @@ const handlers = [
       ...(manifest.pub_date ? { pub_date: manifest.pub_date } : {})
     };
   }),
+  route("GET", "/v1/app-updates/policy", async (request) => {
+    const searchParams = new URL(request.url, "http://ticketpro.local").searchParams;
+    const currentVersion = String(searchParams.get("current_version") ?? "").trim();
+    parseSemver(currentVersion, "version installée");
+    const manifest = readAppUpdateManifest();
+    if (!manifest || compareSemver(manifest.version, currentVersion) <= 0) return NO_CONTENT;
+    return {
+      version: manifest.version,
+      enforcement: manifest.enforcement === "required" ? "required" : "recommended",
+      ...(manifest.minimum_supported_version
+        ? { minimum_supported_version: String(manifest.minimum_supported_version) }
+        : {})
+    };
+  }),
   route("GET", "/v1/plans", async () => ({ plans: statements.listPlans.all().map(planResponse) })),
   route("GET", "/v1/plans/catalog", async () => ({
     plans: statements.listPublicCatalogPlans.all().map((plan) => ({
@@ -5049,80 +5296,179 @@ const handlers = [
     }))
   })),
 
-  route("POST", "/v1/saas/register-trial", async (request, body) => {
-    if (isRateLimited(request)) {
-      throw new HttpError(429, "Trop de tentatives. Réessayez dans quelques instants.");
+  route("POST", "/v1/saas/registration/start", async (request, body) => {
+    if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. Réessayez dans quelques instants.");
+    if (!smtpConfigured() && !SAAS_EXPOSE_EMAIL_VERIFICATION_CODE) {
+      throw new HttpError(503, "La vérification email est temporairement indisponible. Réessayez plus tard.");
     }
     const email = requireEmail(body);
     const password = requireCustomerPassword(body);
     if (password !== String(body.confirm_password ?? "")) {
       throw new HttpError(400, "Les mots de passe ne correspondent pas.");
     }
+    const existingUser = statements.findOrganizationUserByEmail.get(email);
+    if (existingUser) {
+      const existingOrganization = statements.findOrganizationById.get(existingUser.organization_id);
+      const resumable = existingOrganization?.status === "pending_payment"
+        && verifyPassword(password, existingUser.password_hash)
+        ? statements.findSaasRegistrationVerificationByOrganization.get(existingOrganization.id, existingUser.id)
+        : null;
+      if (resumable?.verified_at) {
+        const registrationToken = randomToken(40);
+        statements.resumeVerifiedSaasRegistration.run(hash(registrationToken), nowIso(), resumable.id);
+        const resumed = statements.findSaasRegistrationVerificationByToken.get(hash(registrationToken));
+        return emailVerificationPublicResponse(registrationToken, resumed, {
+          verified: true,
+          message: "Votre email est déjà vérifié. Reprenez le choix de votre abonnement."
+        });
+      }
+      throw new HttpError(409, "Un compte existe déjà avec cet email. Connectez-vous.");
+    }
     const organizationName = requireText(body, "organization_name", 200);
     const ownerName = requireText(body, "name", 200);
     const phone = body.phone ? String(body.phone).trim().slice(0, 40) : null;
-    const existingUser = statements.findOrganizationUserByEmail.get(email);
-    const createdAt = nowIso();
-    const expiresAt = new Date(Date.now() + SAAS_TRIAL_DAYS * 86_400_000).toISOString();
-    let organizationId;
-    let userId;
-
-    if (existingUser) {
-      const existingOrganization = statements.findOrganizationById.get(existingUser.organization_id);
-      if (!existingOrganization || existingOrganization.status !== "pending_payment") {
-        throw new HttpError(409, "Un compte existe déjà avec cet email. Connectez-vous.");
-      }
-      if (!verifyPassword(password, existingUser.password_hash)) {
-        throw new HttpError(409, "Une inscription inachevée existe déjà avec cet email.");
-      }
-      if (statements.findLatestOrganizationSubscription.get(existingOrganization.id)) {
-        throw new HttpError(409, "L'essai gratuit a déjà été utilisé pour ce compte.");
-      }
-      organizationId = existingOrganization.id;
-      userId = existingUser.id;
-    } else {
-      organizationId = crypto.randomUUID();
-      userId = crypto.randomUUID();
-    }
+    const timestamp = nowIso();
+    const registrationToken = randomToken(40);
+    const code = generateEmailVerificationCode();
+    const expiresAt = emailVerificationExpiry();
+    let record;
 
     db.exec("BEGIN IMMEDIATE");
     try {
-      if (!existingUser) {
-        statements.insertOrganization.run(
-          organizationId,
-          organizationName,
-          createdAt,
-          createdAt
-        );
-        statements.insertOrganizationUser.run(
-          userId,
-          organizationId,
-          email,
-          ownerName,
-          phone,
-          hashPassword(password),
-          createdAt,
-          createdAt
-        );
-        createOwnerMembership(organizationId, userId, createdAt);
+      const existing = statements.findSaasRegistrationVerificationByEmail.get(email);
+      if (existing?.verified_at && !existing.consumed_at) {
+        throw new HttpError(409, "Cette adresse est déjà vérifiée. Reprenez l'étape de choix de l'abonnement.");
       }
+      const windowStartedAt = existing
+        && Date.parse(existing.verification_window_started_at) > Date.now() - 3_600_000
+        ? existing.verification_window_started_at
+        : timestamp;
+      const sendsInWindow = existing && windowStartedAt === existing.verification_window_started_at
+        ? Number(existing.verification_send_count)
+        : 0;
+      if (sendsInWindow >= SAAS_EMAIL_VERIFICATION_MAX_SENDS_PER_HOUR) {
+        throw new HttpError(429, "Trop de codes envoyés. Réessayez dans une heure.");
+      }
+      if (existing) {
+        statements.updateSaasRegistrationVerification.run(
+          organizationName, ownerName, phone, hashPassword(password), hash(registrationToken),
+          emailVerificationCodeHash(registrationToken, code), expiresAt, sendsInWindow + 1,
+          windowStartedAt, timestamp, timestamp, existing.id
+        );
+      } else {
+        statements.insertSaasRegistrationVerification.run(
+          crypto.randomUUID(), email, organizationName, ownerName, phone, hashPassword(password),
+          hash(registrationToken), emailVerificationCodeHash(registrationToken, code), expiresAt,
+          timestamp, timestamp, timestamp, timestamp
+        );
+      }
+      db.exec("COMMIT");
+      record = statements.findSaasRegistrationVerificationByToken.get(hash(registrationToken));
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    if (smtpConfigured()) {
+      try {
+        await deliverSaasEmailVerification(record, code);
+      } catch (error) {
+        console.error("Impossible d'envoyer l'email de vérification:", error.message);
+        throw new HttpError(503, "Le code n'a pas pu être envoyé. Réessayez dans quelques instants.");
+      }
+    }
+    logEvent(request, null, "saas_email_verification_started", null, null, {});
+    return emailVerificationPublicResponse(registrationToken, record, {
+      message: "Un code de vérification a été envoyé à votre adresse email.",
+      ...(SAAS_EXPOSE_EMAIL_VERIFICATION_CODE ? { verification_code: code } : {})
+    });
+  }),
+
+  route("POST", "/v1/saas/registration/verify-email", async (request, body) => {
+    if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. Réessayez dans quelques instants.");
+    const registrationToken = requireText(body, "registration_token", 256);
+    const code = String(body.verification_code ?? "").replace(/\D/g, "");
+    if (!/^\d{6}$/.test(code)) throw new HttpError(400, "Saisissez le code à 6 chiffres reçu par email.");
+    const tokenHash = hash(registrationToken);
+    const record = statements.findSaasRegistrationVerificationByToken.get(tokenHash);
+    assertUsableSaasRegistration(record, registrationToken);
+    if (record.verified_at) return emailVerificationPublicResponse(registrationToken, record, { verified: true });
+    if (Date.parse(record.verification_expires_at) <= Date.now()) {
+      throw new HttpError(400, "Ce code a expiré. Demandez-en un nouveau.");
+    }
+    if (Number(record.verification_attempt_count) >= SAAS_EMAIL_VERIFICATION_MAX_ATTEMPTS) {
+      throw new HttpError(429, "Trop de codes incorrects. Demandez un nouveau code.");
+    }
+    if (!sameHash(`saas-email-verification:v1:${registrationToken}:${code}`, record.verification_code_hash)) {
+      statements.incrementSaasRegistrationVerificationAttempts.run(nowIso(), record.id);
+      throw new HttpError(400, "Ce code est incorrect. Vérifiez-le puis réessayez.");
+    }
+    const timestamp = nowIso();
+    statements.verifySaasRegistration.run(timestamp, timestamp, record.id);
+    const verified = statements.findSaasRegistrationVerificationByToken.get(tokenHash);
+    logEvent(request, null, "saas_email_verified", null, null, {});
+    return emailVerificationPublicResponse(registrationToken, verified, { verified: true });
+  }),
+
+  route("POST", "/v1/saas/registration/resend-code", async (request, body) => {
+    if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. Réessayez dans quelques instants.");
+    if (!smtpConfigured() && !SAAS_EXPOSE_EMAIL_VERIFICATION_CODE) {
+      throw new HttpError(503, "La vérification email est temporairement indisponible. Réessayez plus tard.");
+    }
+    const registrationToken = requireText(body, "registration_token", 256);
+    const tokenHash = hash(registrationToken);
+    const record = statements.findSaasRegistrationVerificationByToken.get(tokenHash);
+    assertUsableSaasRegistration(record, registrationToken);
+    if (record.verified_at) return emailVerificationPublicResponse(registrationToken, record, { verified: true });
+    const elapsedSeconds = (Date.now() - Date.parse(record.verification_last_sent_at)) / 1000;
+    if (elapsedSeconds < SAAS_EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS) {
+      throw new HttpError(429, `Attendez ${Math.ceil(SAAS_EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS - elapsedSeconds)} seconde(s) avant de demander un nouveau code.`);
+    }
+    const timestamp = nowIso();
+    const sameWindow = Date.parse(record.verification_window_started_at) > Date.now() - 3_600_000;
+    const sendCount = sameWindow ? Number(record.verification_send_count) : 0;
+    if (sendCount >= SAAS_EMAIL_VERIFICATION_MAX_SENDS_PER_HOUR) {
+      throw new HttpError(429, "Trop de codes envoyés. Réessayez dans une heure.");
+    }
+    const code = generateEmailVerificationCode();
+    const expiresAt = emailVerificationExpiry();
+    statements.updateSaasRegistrationVerificationCode.run(
+      emailVerificationCodeHash(registrationToken, code), expiresAt, sendCount + 1,
+      sameWindow ? record.verification_window_started_at : timestamp, timestamp, timestamp, record.id
+    );
+    const refreshed = statements.findSaasRegistrationVerificationByToken.get(tokenHash);
+    if (smtpConfigured()) {
+      try {
+        await deliverSaasEmailVerification(refreshed, code);
+      } catch (error) {
+        console.error("Impossible d'envoyer l'email de vérification:", error.message);
+        throw new HttpError(503, "Le code n'a pas pu être envoyé. Réessayez dans quelques instants.");
+      }
+    }
+    logEvent(request, null, "saas_email_verification_resent", null, null, {});
+    return emailVerificationPublicResponse(registrationToken, refreshed, {
+      message: "Un nouveau code a été envoyé.",
+      ...(SAAS_EXPOSE_EMAIL_VERIFICATION_CODE ? { verification_code: code } : {})
+    });
+  }),
+
+  route("POST", "/v1/saas/register-trial", async (request, body) => {
+    if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. Réessayez dans quelques instants.");
+    const registrationToken = requireText(body, "registration_token", 256);
+    const registration = materializeVerifiedSaasRegistration(registrationToken);
+    const createdAt = nowIso();
+    const expiresAt = new Date(Date.now() + SAAS_TRIAL_DAYS * 86_400_000).toISOString();
+    if (statements.findLatestOrganizationSubscription.get(registration.organization_id)) {
+      throw new HttpError(409, "L'essai gratuit a déjà été utilisé pour ce compte.");
+    }
+    db.exec("BEGIN IMMEDIATE");
+    try {
       statements.insertOrganizationSubscription.run(
-        crypto.randomUUID(),
-        organizationId,
-        SAAS_TRIAL_PLAN_ID,
-        SAAS_TRIAL_PLAN_CODE,
-        "Essai gratuit 7 jours",
-        SAAS_TRIAL_ROUTER_LIMIT,
-        1,
-        "limited",
-        0,
-        createdAt,
-        expiresAt,
-        `trial:${organizationId}`,
-        createdAt,
-        createdAt
+        crypto.randomUUID(), registration.organization_id, SAAS_TRIAL_PLAN_ID, SAAS_TRIAL_PLAN_CODE,
+        "Essai gratuit 7 jours", SAAS_TRIAL_ROUTER_LIMIT, 1, "limited", 0,
+        createdAt, expiresAt, `trial:${registration.organization_id}`, createdAt, createdAt
       );
-      statements.activateOrganization.run(createdAt, organizationId);
+      statements.activateOrganization.run(createdAt, registration.organization_id);
+      statements.consumeSaasRegistration.run(createdAt, createdAt, registration.id);
       db.exec("COMMIT");
     } catch (error) {
       db.exec("ROLLBACK");
@@ -5131,96 +5477,27 @@ const handlers = [
       }
       throw error;
     }
-
-    const user = statements.findOrganizationUserById.get(userId);
-    const membership = statements.findOrganizationMembership.get(organizationId, userId);
-    const session = createOrganizationSession(request, userId, membership.id);
-    logEvent(request, null, "saas_trial_started", organizationId, null, {
-      organization_user_id: userId,
-      duration_days: SAAS_TRIAL_DAYS,
-      router_limit: SAAS_TRIAL_ROUTER_LIMIT
+    const user = statements.findOrganizationUserById.get(registration.user_id);
+    const membership = statements.findOrganizationMembership.get(registration.organization_id, registration.user_id);
+    const session = createOrganizationSession(request, registration.user_id, membership.id);
+    logEvent(request, null, "saas_trial_started", registration.organization_id, null, {
+      organization_user_id: registration.user_id, duration_days: SAAS_TRIAL_DAYS, router_limit: SAAS_TRIAL_ROUTER_LIMIT
     });
     return organizationAuthResponse(user, session, membership);
   }),
 
   route("POST", "/v1/saas/register-and-pay", async (request, body) => {
-    if (isRateLimited(request)) {
-      throw new HttpError(429, "Trop de tentatives. Réessayez dans quelques instants.");
-    }
-    const email = requireEmail(body);
-    const password = requireCustomerPassword(body);
-    if (password !== String(body.confirm_password ?? "")) {
-      throw new HttpError(400, "Les mots de passe ne correspondent pas.");
-    }
-    const organizationName = requireText(body, "organization_name", 200);
-    const ownerName = requireText(body, "name", 200);
-    const phone = body.phone ? String(body.phone).trim().slice(0, 40) : null;
-    const existingUser = statements.findOrganizationUserByEmail.get(email);
-    let organizationId;
-    let userId;
-
-    if (existingUser) {
-      const existingOrganization = statements.findOrganizationById.get(existingUser.organization_id);
-      if (!existingOrganization || existingOrganization.status !== "pending_payment") {
-        throw new HttpError(409, "Un compte existe déjà avec cet email. Connectez-vous.");
-      }
-      if (!verifyPassword(password, existingUser.password_hash)) {
-        throw new HttpError(409, "Une inscription inachevée existe déjà avec cet email.");
-      }
-      organizationId = existingOrganization.id;
-      userId = existingUser.id;
-    } else {
-      organizationId = crypto.randomUUID();
-      userId = crypto.randomUUID();
-      const createdAt = nowIso();
-      db.exec("BEGIN IMMEDIATE");
-      try {
-        statements.insertOrganization.run(
-          organizationId,
-          organizationName,
-          createdAt,
-          createdAt
-        );
-        statements.insertOrganizationUser.run(
-          userId,
-          organizationId,
-          email,
-          ownerName,
-          phone,
-          hashPassword(password),
-          createdAt,
-          createdAt
-        );
-        createOwnerMembership(organizationId, userId, createdAt);
-        db.exec("COMMIT");
-      } catch (error) {
-        db.exec("ROLLBACK");
-        if (String(error.message).includes("UNIQUE")) {
-          throw new HttpError(409, "Un compte existe déjà avec cet email.");
-        }
-        throw error;
-      }
-    }
-
-    const result = await createIpayOrder(
-      request,
-      body,
-      "organization",
-      null,
-      null,
-      {
-        organization_id: organizationId,
-        user_id: userId,
-        organization_name: organizationName
-      }
-    );
+    if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. Réessayez dans quelques instants.");
+    const registrationToken = requireText(body, "registration_token", 256);
+    const registration = materializeVerifiedSaasRegistration(registrationToken);
+    const result = await createIpayOrder(request, body, "organization", null, null, {
+      organization_id: registration.organization_id,
+      user_id: registration.user_id,
+      organization_name: registration.organization_name
+    });
     return {
       ...result,
-      registration: {
-        organization_id: organizationId,
-        email,
-        next_step: "confirm_payment"
-      }
+      registration: { organization_id: registration.organization_id, email: registration.email, next_step: "confirm_payment" }
     };
   }),
 
@@ -5313,6 +5590,13 @@ const handlers = [
     const membership = statements.findOrganizationMembership.get(order.organization_id, user.id);
     if (!membership) {
       throw new HttpError(409, "L'appartenance liée au paiement est introuvable.");
+    }
+    const registration = statements.findSaasRegistrationVerificationByOrganization.get(
+      order.organization_id,
+      user.id
+    );
+    if (registration) {
+      statements.consumeSaasRegistration.run(nowIso(), nowIso(), registration.id);
     }
     const session = createOrganizationSession(request, user.id, membership.id);
     return organizationAuthResponse(user, session, membership);

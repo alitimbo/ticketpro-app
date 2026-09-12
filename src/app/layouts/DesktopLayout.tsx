@@ -165,9 +165,7 @@ export function DesktopLayout({ scope }: DesktopLayoutProps) {
       </aside>
 
       <main className="content">
-        <AppUpdateNotice
-          canManageUpdates={Boolean(session?.permissions.includes("global.settings"))}
-        />
+        <AppUpdateNotice />
         {isRouterScope && canSelectRouter ? (
           <Button icon={ArrowLeft} onClick={() => navigate("/routeurs")} variant="ghost">
             Changer de routeur

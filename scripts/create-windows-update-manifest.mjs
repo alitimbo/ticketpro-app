@@ -37,8 +37,20 @@ if (!installerName.includes(packageJson.version)) {
 }
 
 const outputPath = path.resolve(args.output ?? "output/app-updates/stable.json");
+const enforcement = args.enforcement ?? "recommended";
+if (!["recommended", "required"].includes(enforcement)) {
+  throw new Error("--enforcement doit être recommended ou required.");
+}
+if (args["minimum-supported-version"] && !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(args["minimum-supported-version"])) {
+  throw new Error("--minimum-supported-version doit respecter le format x.y.z.");
+}
+
 const manifest = {
   version: packageJson.version,
+  enforcement,
+  ...(args["minimum-supported-version"]
+    ? { minimum_supported_version: args["minimum-supported-version"] }
+    : {}),
   notes: args.notes ?? `Mise à jour TicketPro ${packageJson.version}.`,
   pub_date: new Date().toISOString(),
   platforms: {
@@ -55,4 +67,3 @@ await writeFile(outputPath, `${JSON.stringify(manifest, null, 2)}\n`, {
   mode: 0o600
 });
 process.stdout.write(`Manifeste Updater créé : ${outputPath}\n`);
-

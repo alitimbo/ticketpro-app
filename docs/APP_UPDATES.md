@@ -80,6 +80,27 @@ Caddy sert les installateurs depuis `/opt/ticketpro/releases`. Le manifeste
 reste dans le volume Docker persistant de l'API, sous
 `/data/app-updates/stable.json`.
 
+## Politique de déploiement
+
+Une version est `recommended` par défaut : elle est annoncée dans TicketPro et
+peut être installée immédiatement depuis le bandeau. Pour un correctif qui ne
+doit plus être contourné, publier explicitement une version `required` :
+
+```powershell
+npm.cmd run release:manifest:windows -- `
+  --installer "CHEMIN\TicketPro-Setup-<version>-x64.exe" `
+  --signature "CHEMIN\TicketPro-Setup-<version>-x64.exe.sig" `
+  --url "https://api.ticketpro-ne.com/releases/TicketPro-Setup-<version>-x64.exe" `
+  --notes "Correctif de sécurité requis." `
+  --enforcement required `
+  --minimum-supported-version "<ancienne-version-minimale>"
+```
+
+`required` bloque au prochain démarrage, avant toute action métier. Une session
+déjà ouverte n'est pas interrompue : le bandeau propose l'installation, afin de
+ne jamais couper une génération de vouchers, une synchronisation ou une action
+RouterOS en cours.
+
 ## Règles de version
 
 - utiliser SemVer : `MAJEURE.MINEURE.CORRECTIF` ;

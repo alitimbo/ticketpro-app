@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { AppSplashScreen } from "./AppSplashScreen";
-import { isAppBootstrapReady } from "./AppBootstrap";
+import { isAppBootstrapReady, shouldBlockStartupForUpdate } from "./AppBootstrap";
 
 describe("AppSplashScreen", () => {
   it("affiche l'identité TicketPro et un statut accessible", () => {
@@ -26,5 +26,13 @@ describe("isAppBootstrapReady", () => {
     expect(isAppBootstrapReady({ isInitialized: true, isMainAuthenticated: false, isSubscriptionChecked: false })).toBe(true);
     expect(isAppBootstrapReady({ isInitialized: true, isMainAuthenticated: true, isSubscriptionChecked: false })).toBe(false);
     expect(isAppBootstrapReady({ isInitialized: true, isMainAuthenticated: true, isSubscriptionChecked: true })).toBe(true);
+  });
+});
+
+describe("shouldBlockStartupForUpdate", () => {
+  it("bloque seulement une mise à jour requise trouvée pendant le splash", () => {
+    expect(shouldBlockStartupForUpdate({ currentVersion: "0.4.0", enforcement: "required", version: "0.4.1" }, true)).toBe(true);
+    expect(shouldBlockStartupForUpdate({ currentVersion: "0.4.0", enforcement: "recommended", version: "0.4.1" }, true)).toBe(false);
+    expect(shouldBlockStartupForUpdate({ currentVersion: "0.4.0", enforcement: "required", version: "0.4.1" }, false)).toBe(false);
   });
 });

@@ -1,57 +1,77 @@
-import { Download } from "lucide-react";
+import { Download, LoaderCircle } from "lucide-react";
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import {
   appUpdatesAreSupported,
   checkForAppUpdate,
-  type AppUpdate
+  describeAppUpdateError,
+  installAvailableAppUpdate,
+  type AppUpdate,
+  type AppUpdateDownloadProgress
 } from "../../services/app";
 import { Button } from "../../shared/ui";
 
-type AppUpdateNoticeProps = {
-  canManageUpdates: boolean;
-};
+const refreshIntervalMs = 15 * 60_000;
 
-export function AppUpdateNotice({ canManageUpdates }: AppUpdateNoticeProps) {
-  const navigate = useNavigate();
+export function AppUpdateNotice() {
   const [update, setUpdate] = useState<AppUpdate | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isInstalling, setIsInstalling] = useState(false);
+  const [progress, setProgress] = useState<AppUpdateDownloadProgress | null>(null);
 
   useEffect(() => {
-    if (!appUpdatesAreSupported()) return;
+    if (!appUpdatesAreSupported()) return undefined;
     let mounted = true;
-    void checkForAppUpdate()
+    const refresh = (force = false) => void checkForAppUpdate(force)
       .then((availableUpdate) => {
         if (mounted) setUpdate(availableUpdate);
       })
       .catch(() => {
-        // Le contrôle manuel dans Paramètres affichera une erreur exploitable.
+        // Une indisponibilité réseau ne doit pas polluer l'écran de travail.
       });
+    refresh();
+    const intervalId = window.setInterval(() => refresh(true), refreshIntervalMs);
     return () => {
       mounted = false;
+      window.clearInterval(intervalId);
     };
   }, []);
+
+  const install = async () => {
+    setIsInstalling(true);
+    setError(null);
+    setProgress({ downloadedBytes: 0, percent: 0, totalBytes: null });
+    try {
+      await installAvailableAppUpdate(setProgress);
+    } catch (installError) {
+      setError(describeAppUpdateError(installError));
+      setIsInstalling(false);
+    }
+  };
 
   if (!update) return null;
 
   return (
-    <div className="app-update-notice" role="status">
+    <div className="app-update-notice">
       <Download aria-hidden="true" />
       <div>
         <strong>TicketPro {update.version} est disponible</strong>
-        <p>
-          Une sauvegarde locale sera créée avant l'installation.
-          {!canManageUpdates ? " Demandez à un administrateur de lancer la mise à jour." : ""}
+        <p aria-live="polite" role="status">
+          {update.enforcement === "required"
+            ? "Cette mise à jour sera requise au prochain démarrage."
+            : "Une sauvegarde locale sera créée avant l'installation."}
+          {error ? ` ${error}` : ""}
         </p>
       </div>
-      {canManageUpdates ? (
-        <Button
-          icon={Download}
-          onClick={() => navigate("/parametres#mise-a-jour")}
-          variant="primary"
-        >
-          Voir la mise à jour
-        </Button>
-      ) : null}
+      <Button
+        disabled={isInstalling}
+        icon={isInstalling ? LoaderCircle : Download}
+        onClick={() => void install()}
+        variant="primary"
+      >
+        {isInstalling
+          ? progress?.percent === null ? "Téléchargement…" : `${progress?.percent ?? 0} %`
+          : "Sauvegarder et mettre à jour"}
+      </Button>
     </div>
   );
 }
