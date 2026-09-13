@@ -479,6 +479,11 @@ export function isRemoteConnectionMode(
   return mode !== "local";
 }
 
+/** L'écran VPN garde le routeur sélectionné lorsqu'il est ouvert depuis sa carte. */
+export function remoteVpnPathForRouter(routerId: string): string {
+  return `/vpn?router=${encodeURIComponent(routerId)}`;
+}
+
 export function normalizeHotspotDnsName(value: string): string {
   return value.trim().toLowerCase().replace(/\.$/, "");
 }

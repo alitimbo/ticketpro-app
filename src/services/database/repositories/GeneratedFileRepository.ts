@@ -123,6 +123,15 @@ export class GeneratedFileRepository {
     );
   }
 
+  async listByRouter(routerId: string, accountId: string): Promise<GeneratedFileRecord[]> {
+    return this.database.query<GeneratedFileRecord>(
+      `SELECT * FROM generated_files
+       WHERE router_id = ?1 AND account_id = ?2 AND deleted_at IS NULL
+       ORDER BY created_at DESC`,
+      [routerId, accountId]
+    );
+  }
+
   async listByRouterIncludingDeleted(routerId: string, accountId: string): Promise<GeneratedFileRecord[]> {
     return this.database.query<GeneratedFileRecord>(
       "SELECT * FROM generated_files WHERE router_id = ?1 AND account_id = ?2 ORDER BY created_at DESC",

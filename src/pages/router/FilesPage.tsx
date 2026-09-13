@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useParams } from "react-router-dom";
 import {
   ChevronDown,
   Copy,
@@ -54,7 +55,7 @@ import {
   filterArchivedFiles,
   formatFileDate,
   profileLabel,
-  scopeFilesForSession,
+  scopeFilesForRouterSession,
   type ArchivedGeneratedFile,
   type FileFilters,
   type GeneratedFileType
@@ -62,6 +63,7 @@ import {
 
 export function FilesPage() {
   const { saasAccount, session } = useAuth();
+  const { routerId = "routeur-demo" } = useParams();
   const { database, isInitialized, isPersistent } = useAppDatabase();
   const [files, setFiles] = useState<ArchivedGeneratedFile[]>(() => (isPersistent ? [] : createDemoArchivedFiles()));
   const [filters, setFilters] = useState<FileFilters>(emptyFileFilters);
@@ -74,8 +76,9 @@ export function FilesPage() {
   const [syncWarning, setSyncWarning] = useState<string | null>(null);
   const [fileToDelete, setFileToDelete] = useState<ArchivedGeneratedFile | null>(null);
   const migratedRouterIdsRef = useRef(new Set<string>());
-  const filesLoadRunningRef = useRef(false);
+  const filesLoadRunningRef = useRef(new Set<string>());
   const loadedFilesScopeRef = useRef<string | null>(null);
+  const activeFilesScopeRef = useRef<string | null>(null);
   const generatedFileRepository = useMemo(() => new GeneratedFileRepository(database), [database]);
   const accountRepository = useMemo(() => new AccountRepository(database), [database]);
   const auditLogService = useMemo(() => new AuditLogService(database), [database]);
@@ -115,13 +118,16 @@ export function FilesPage() {
       : null,
     [database, fileService, organizationOperations, session]
   );
+  const filesScope = `${session?.account_id ?? "anonymous"}:${saasAccount?.organization.id ?? "account"}:${routerId}`;
+  activeFilesScopeRef.current = filesScope;
 
   const loadFiles = useCallback(async (options: { silent?: boolean } = {}) => {
     if (!isPersistent || !isInitialized || !session) {
       return;
     }
-    if (filesLoadRunningRef.current) return;
-    filesLoadRunningRef.current = true;
+    if (filesLoadRunningRef.current.has(filesScope)) return;
+    filesLoadRunningRef.current.add(filesScope);
+    const isCurrentScope = () => activeFilesScopeRef.current === filesScope;
 
     if (!options.silent) {
       setIsLoading(true);
@@ -133,35 +139,30 @@ export function FilesPage() {
       const routers = await (saasAccount?.organization.id
           ? routerRepository.listByOrganization(session.account_id, saasAccount.organization.id)
           : routerRepository.listByAccount(session.account_id));
+      const router = routers.find((candidate) => candidate.id === routerId);
+      if (!router) {
+        throw new Error("Ce routeur n'est plus accessible dans l'organisation active.");
+      }
 
       let pdfRecoveryFailed = false;
       let recoveredPdfCount = 0;
-      await Promise.all(routers.map(async (router) => {
-        const recovery = await recoveredBatchPdfs?.recoverMissingForRouter(
-          session.account_id,
-          router.id
-        );
-        recoveredPdfCount += recovery?.results.filter((result) => result.status === "created").length ?? 0;
-        if ((recovery?.failedBatchCount ?? 0) > 0) pdfRecoveryFailed = true;
-      }));
-      if (recoveredPdfCount > 0) {
+      const recovery = await recoveredBatchPdfs?.recoverMissingForRouter(session.account_id, routerId);
+      recoveredPdfCount += recovery?.results.filter((result) => result.status === "created").length ?? 0;
+      if ((recovery?.failedBatchCount ?? 0) > 0) pdfRecoveryFailed = true;
+      if (recoveredPdfCount > 0 && isCurrentScope()) {
         setMessage(`${recoveredPdfCount} PDF interrompu(s) récupéré(s) automatiquement.`);
       }
 
       const readFiles = async (checkLocalAvailability: boolean) => {
         const [records, batches] = await Promise.all([
-          generatedFileRepository.listByAccount(session.account_id),
-          batchRepository.listByAccount(session.account_id)
+          generatedFileRepository.listByRouter(routerId, session.account_id),
+          batchRepository.listByRouter(routerId)
         ]);
-        const routerIds = new Set(routers.map((router) => router.id));
-        const scopedRecords = records.filter((record) => routerIds.has(record.router_id));
-        const scopedBatches = batches.filter((batch) => routerIds.has(batch.router_id));
-        const plans = await Promise.all(routers.map((router) => planRepository.listByRouter(router.id)));
-        const routerById = new Map(routers.map((router) => [router.id, router]));
-        const batchById = new Map(scopedBatches.map((batch) => [batch.id, batch]));
-        const planById = new Map(plans.flat().map((plan) => [plan.id, plan]));
+        const plans = await planRepository.listByRouter(routerId);
+        const batchById = new Map(batches.map((batch) => [batch.id, batch]));
+        const planById = new Map(plans.map((plan) => [plan.id, plan]));
         const archived = await Promise.all(
-          scopedRecords.map(async (record) => {
+          records.map(async (record) => {
             const metadata = checkLocalAvailability
               ? await fileService.metadata(record.file_path).catch(() => null)
               : null;
@@ -172,41 +173,39 @@ export function FilesPage() {
               fileExists: metadata?.exists ?? null,
               planId: plan?.id,
               planName: plan?.name,
-              routerName: routerById.get(record.router_id)?.name ?? record.router_id,
+              routerName: router.name,
               ticketQuantity: batch?.quantity
             });
           })
         );
 
-        setFiles(archived);
+        if (isCurrentScope()) setFiles(archived);
       };
 
-      const filesScope = `${session.account_id}:${saasAccount?.organization.id ?? "account"}`;
       if (loadedFilesScopeRef.current !== filesScope) {
-        setFiles([]);
+        if (isCurrentScope()) setFiles([]);
         // Render SQLite archives first. Network and filesystem checks continue afterwards.
         await readFiles(false);
         loadedFilesScopeRef.current = filesScope;
       }
 
       let organizationSyncFailed = false;
-      await Promise.all(routers.map(async (router) => {
-        await organizationTicketCatalog?.pullRouter(router.id).catch(() => {
+      await organizationTicketCatalog?.pullRouter(routerId).catch(() => {
+        organizationSyncFailed = true;
+      });
+      if (!migratedRouterIdsRef.current.has(routerId)) {
+        try {
+          await organizationOperations?.publishFiles(routerId);
+          migratedRouterIdsRef.current.add(routerId);
+        } catch {
           organizationSyncFailed = true;
-        });
-        if (!migratedRouterIdsRef.current.has(router.id)) {
-          try {
-            await organizationOperations?.publishFiles(router.id);
-            migratedRouterIdsRef.current.add(router.id);
-          } catch {
-            organizationSyncFailed = true;
-          }
         }
-        await organizationOperations?.pullFiles(router.id).catch(() => {
-          organizationSyncFailed = true;
-        });
-      }));
+      }
+      await organizationOperations?.pullFiles(routerId).catch(() => {
+        organizationSyncFailed = true;
+      });
       await readFiles(true);
+      if (!isCurrentScope()) return;
       setLoadError(null);
       setSyncWarning(pdfRecoveryFailed
         ? "Un lot confirmé reste sans PDF local. TicketPro réessaiera automatiquement."
@@ -215,11 +214,11 @@ export function FilesPage() {
         : null);
     } catch (error) {
       const detail = error instanceof Error ? error.message : "Impossible de récupérer les fichiers.";
-      setLoadError(detail);
+      if (isCurrentScope()) setLoadError(detail);
       throw error;
     } finally {
-      filesLoadRunningRef.current = false;
-      if (!options.silent) setIsLoading(false);
+      filesLoadRunningRef.current.delete(filesScope);
+      if (!options.silent && isCurrentScope()) setIsLoading(false);
     }
   }, [
     batchRepository,
@@ -233,8 +232,22 @@ export function FilesPage() {
     recoveredBatchPdfs,
     routerRepository,
     saasAccount?.organization.id,
-    session
+    session,
+    routerId,
+    filesScope
   ]);
+
+  useEffect(() => {
+    loadedFilesScopeRef.current = null;
+    setFiles([]);
+    setFileToDelete(null);
+    setFilters(emptyFileFilters);
+    if (isPersistent) {
+      setIsLoading(true);
+      setLoadError(null);
+      setSyncWarning(null);
+    }
+  }, [filesScope, isPersistent]);
 
   useEffect(() => {
     let mounted = true;
@@ -264,7 +277,10 @@ export function FilesPage() {
     };
   }, [isPersistent, loadFiles]);
 
-  const scopedFiles = useMemo(() => scopeFilesForSession(files, session), [files, session]);
+  const scopedFiles = useMemo(
+    () => scopeFilesForRouterSession(files, session, routerId),
+    [files, routerId, session]
+  );
   const filteredFiles = useMemo(() => filterArchivedFiles(scopedFiles, filters), [scopedFiles, filters]);
   const filterOptions = useMemo(() => buildFilterOptions(scopedFiles), [scopedFiles]);
   const availableCount = scopedFiles.filter((file) => file.status === "available").length;
@@ -833,20 +849,6 @@ function FilesFilterPanel({
             {options.operators.map((operator) => (
               <option key={operator} value={operator}>
                 {profileLabel(operator)}
-              </option>
-            ))}
-          </select>
-          <ChevronDown aria-hidden="true" />
-        </div>
-      </label>
-      <label className="form-field">
-        Routeur
-        <div className="files-select-control">
-          <select value={filters.routerId} onChange={(event) => onChange({ routerId: event.target.value })}>
-            <option value="">Tous les routeurs</option>
-            {options.routers.map((router) => (
-              <option key={router.id} value={router.id}>
-                {router.name}
               </option>
             ))}
           </select>

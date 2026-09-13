@@ -26,6 +26,8 @@ export type TicketPdfInput = {
   hotspotAddress: string;
   ownerPhone: string;
   planName: string;
+  /** Moment réel où cette version du PDF a été produite (création ou réimpression). */
+  printedAt?: string;
   previewMode?: "single-ticket";
   priceLabel?: string | null;
   qrCodeEnabled: boolean;
@@ -226,6 +228,7 @@ export function parseTicketPdfArchiveMetadata(value: string | null | undefined):
 export function generateTicketPdf(input: TicketPdfInput): Uint8Array {
   input = {
     ...input,
+    printedAt: input.printedAt ?? new Date().toISOString(),
     validityLabel: normalizeTicketValidityLabel(input.validityLabel)
   };
   const writer = new PdfWriter();
@@ -434,7 +437,10 @@ function drawEconomyGridTicket(
   }
 
   const footerLines: Array<{ bold?: boolean; text: string }> = [
-    ...(!showQr && showPrice && input.priceLabel ? [{ bold: true, text: `Tarif : ${input.priceLabel}` }] : []),
+    ...(!showQr && showPrice && input.priceLabel ? [{ bold: true, text: input.priceLabel }] : []),
+    // Cette date décrit le document effectivement produit, y compris lors
+    // d'une réimpression : elle n'est donc pas confondue avec la création du lot.
+    { text: formatTicketPrintDate(input.printedAt) },
     ...(showData && input.dataLimitLabel ? [{ text: `Volume : ${input.dataLimitLabel}` }] : []),
     ...(showCreatedAt ? [{ text: `Cree le ${input.generatedAt.slice(0, 16).replace("T", " ")}` }] : []),
     ...(showPortal ? [{ text: `Portail : ${input.hotspotAddress}` }] : []),
@@ -445,23 +451,26 @@ function drawEconomyGridTicket(
   const footerTop = y + (showQr ? cellHeight * 0.29 : cellHeight * 0.24);
   const footerGap = Math.max(
     compact ? 3.4 : 4.2,
-    Math.min(compact ? 5.3 : 6.5, (footerTop - footerBottom) / Math.max(1, footerLines.length))
+    Math.min(compact ? 5.8 : 7, (footerTop - footerBottom) / Math.max(1, footerLines.length))
   );
+  const footerFontSize = footerLines.length > 3
+    ? { maximum: compact ? 3 : 4, minimum: compact ? 2.3 : 3 }
+    : { maximum: compact ? 3.7 : 4.8, minimum: compact ? 2.7 : 3.5 };
   let footerY = footerBottom + footerGap * Math.max(0, footerLines.length - 1);
   footerLines.forEach((line) => {
     page.text(line.text, centerX, footerY, {
       align: "center",
       font: line.bold ? "bold" : "regular",
-      size: fitTextSize(line.text, contentWidth, compact ? 3.1 : 4.1, compact ? 2.25 : 3)
+      size: fitTextSize(line.text, contentWidth, footerFontSize.maximum, footerFontSize.minimum)
     });
     footerY -= footerGap;
   });
 
   if (showPoweredBy) {
-    page.text("Propulse par TicketPro", centerX, y + (compact ? 3.2 : 4.2), {
+    page.text("Propulse par TicketPro", centerX, y + (compact ? 3.6 : 4.8), {
       align: "center",
       font: "bold",
-      size: compact ? 2.5 : 3.2
+      size: compact ? 3.2 : 4
     });
   }
 }
@@ -495,49 +504,53 @@ function drawEconomyCodeBody(
   const bandX = x + padding;
   const bandWidth = cellWidth - padding * 2;
   const bandTop = y + cellHeight * (settings?.showPlanName ? 0.69 : 0.72);
-  const bandHeight = singleCode ? cellHeight * 0.2 : cellHeight * 0.27;
-  const bandBottom = bandTop - bandHeight;
   const iconColumnWidth = compact ? 12 : 16;
   const iconX = bandX + iconColumnWidth / 2;
-  const valueCenterX = bandX + iconColumnWidth + (bandWidth - iconColumnWidth) / 2;
-
-  page.rect(bandX, bandBottom, bandWidth, bandHeight);
+  let credentialsBottom: number;
 
   if (singleCode) {
+    const bandHeight = cellHeight * 0.2;
+    const bandBottom = bandTop - bandHeight;
+    const valueCenterX = bandX + iconColumnWidth + (bandWidth - iconColumnWidth) / 2;
+    page.rect(bandX, bandBottom, bandWidth, bandHeight);
     drawUserOutlineIcon(page, iconX, bandBottom + bandHeight / 2, compact ? 5.5 : 7.5);
     page.text(ticket.username, valueCenterX, bandBottom + bandHeight * 0.32, {
       align: "center",
       font: "bold",
       size: fitTextSize(ticket.username, bandWidth - iconColumnWidth - 12, compact ? 10.5 : 14, compact ? 6.3 : 8)
     });
+    credentialsBottom = bandBottom;
   } else {
-    const rightX = bandX + iconColumnWidth;
-    const rightWidth = bandX + bandWidth - rightX - 3;
-    const dividerY = bandBottom + bandHeight / 2;
-    drawUserOutlineIcon(page, iconX, dividerY + bandHeight / 4, compact ? 4.8 : 6.6);
-    drawLockOutlineIcon(page, iconX, bandBottom + bandHeight / 4, compact ? 4.8 : 6.6);
-    page.line(rightX, dividerY, bandX + bandWidth - 3, dividerY);
-    page.text("LOGIN", rightX, dividerY + (compact ? 3.2 : 4.2), {
-      font: "bold",
-      size: compact ? 2.7 : 3.5
+    // A4 conserve 40 vouchers par page : les deux cadres restent donc compacts
+    // afin de laisser une zone lisible pour durée, validité et informations.
+    const frameGap = compact ? 2 : 3.2;
+    const frameHeight = compact ? 7.4 : 13;
+    const passwordBottom = bandTop - frameHeight * 2 - frameGap;
+    const loginBottom = passwordBottom + frameHeight + frameGap;
+    drawCredentialFrame(page, {
+      compact,
+      height: frameHeight,
+      icon: "user",
+      label: "LOGIN",
+      value: ticket.username,
+      width: bandWidth,
+      x: bandX,
+      y: loginBottom
     });
-    page.text(ticket.username, rightX + rightWidth, dividerY + (compact ? 3 : 4), {
-      align: "right",
-      font: "bold",
-      size: fitTextSize(ticket.username, rightWidth * 0.68, compact ? 6.2 : 8, compact ? 4.2 : 5.2)
+    drawCredentialFrame(page, {
+      compact,
+      height: frameHeight,
+      icon: "lock",
+      label: "MOT DE PASSE",
+      value: password,
+      width: bandWidth,
+      x: bandX,
+      y: passwordBottom
     });
-    page.text("MOT DE PASSE", rightX, bandBottom + (compact ? 3.5 : 4.5), {
-      font: "bold",
-      size: compact ? 2.5 : 3.3
-    });
-    page.text(password, rightX + rightWidth, bandBottom + (compact ? 3.3 : 4.3), {
-      align: "right",
-      font: "bold",
-      size: fitTextSize(password, rightWidth * 0.62, compact ? 5.7 : 7.4, compact ? 3.8 : 4.8)
-    });
+    credentialsBottom = passwordBottom;
   }
 
-  const metricTop = bandBottom - (compact ? 5 : 7);
+  const metricTop = credentialsBottom - (compact ? 5 : 7);
   const metrics = [
     { label: "DUREE", value: input.durationLabel },
     { label: "VALIDITE", value: input.validityLabel }
@@ -559,6 +572,50 @@ function drawEconomyCodeBody(
       font: "bold",
       size: fitTextSize(metric.value, metricWidth - 5, compact ? 6.1 : 8, compact ? 3.8 : 5)
     });
+  });
+}
+
+function drawCredentialFrame(
+  page: PdfPage,
+  {
+    compact,
+    height,
+    icon,
+    label,
+    value,
+    width,
+    x,
+    y
+  }: {
+    compact: boolean;
+    height: number;
+    icon: "lock" | "user";
+    label: string;
+    value: string;
+    width: number;
+    x: number;
+    y: number;
+  }
+) {
+  const iconColumnWidth = compact ? 10 : 14;
+  const iconX = x + iconColumnWidth / 2;
+  const valueX = x + iconColumnWidth + 2;
+  const valueWidth = width - iconColumnWidth - 5;
+
+  page.rect(x, y, width, height);
+  if (icon === "user") {
+    drawUserOutlineIcon(page, iconX, y + height / 2, compact ? 4.4 : 5.8);
+  } else {
+    drawLockOutlineIcon(page, iconX, y + height / 2, compact ? 4.2 : 5.6);
+  }
+  page.text(label, valueX, y + height * (compact ? 0.59 : 0.62), {
+    font: "bold",
+    size: compact ? 2.25 : 3
+  });
+  page.text(value, x + width - 2, y + height * (compact ? 0.2 : 0.18), {
+    align: "right",
+    font: "bold",
+    size: fitTextSize(value, valueWidth, compact ? 5.8 : 7.6, compact ? 3.8 : 4.9)
   });
 }
 
@@ -614,14 +671,19 @@ function drawEconomyQrBody(
 
   let detailY = mainTop - (compact ? 27 : 35);
   if (!singleCode) {
-    const passwordLabel = `MOT DE PASSE ${password}`;
-    drawLockOutlineIcon(page, detailsX + (compact ? 4 : 5), detailY + (compact ? 1 : 1.5), compact ? 4.8 : 6.5);
-    page.text(passwordLabel, detailsCenterX + (compact ? 3 : 4), detailY, {
-      align: "center",
-      font: "bold",
-      size: fitTextSize(passwordLabel, detailsWidth - (compact ? 7 : 10), compact ? 4.2 : 5.5, compact ? 3 : 4)
+    const passwordFrameHeight = compact ? 10 : 13;
+    const passwordFrameBottom = detailY - passwordFrameHeight * 0.65;
+    drawCredentialFrame(page, {
+      compact,
+      height: passwordFrameHeight,
+      icon: "lock",
+      label: "MOT DE PASSE",
+      value: password,
+      width: detailsWidth,
+      x: detailsX,
+      y: passwordFrameBottom
     });
-    detailY -= compact ? 7 : 9;
+    detailY = passwordFrameBottom - (compact ? 5 : 7);
   }
   if (settings?.showPrice !== false && input.priceLabel) {
     page.text(input.priceLabel, detailsCenterX, detailY, {
@@ -707,6 +769,7 @@ function drawThermalTicket(
   const detailLines = [
     `Duree : ${input.durationLabel}`,
     `Validite : ${input.validityLabel}`,
+    formatTicketPrintDate(input.printedAt),
     settings?.showDataLimit ? input.dataLimitLabel : null,
     input.priceLabel && settings?.showPrice !== false ? input.priceLabel : null,
     settings?.showCreatedAt ? `Cree le ${input.generatedAt.slice(0, 10)}` : null,
@@ -733,8 +796,8 @@ function drawThermalTicket(
 
   const credentialHeight = isSingleCode ? (is58 ? 34 : 38) : (is58 ? 50 : 54);
   const credentialBottom = cursor - credentialHeight;
-  page.rect(x + padding, credentialBottom, contentWidth, credentialHeight);
   if (isSingleCode) {
+    page.rect(x + padding, credentialBottom, contentWidth, credentialHeight);
     page.text("LOGIN", centerX, cursor - 10, { align: "center", font: "bold", size: is58 ? 6.2 : 6.8 });
     page.text(showUsername ? ticket.username : "", centerX, cursor - 27, {
       align: "center",
@@ -742,19 +805,26 @@ function drawThermalTicket(
       size: fitTextSize(ticket.username, contentWidth - 10, is58 ? 14 : 16, is58 ? 9 : 10)
     });
   } else {
-    const dividerY = credentialBottom + credentialHeight / 2;
-    page.line(x + padding, dividerY, x + padding + contentWidth, dividerY);
-    page.text("LOGIN", centerX, cursor - 8, { align: "center", font: "bold", size: is58 ? 5.8 : 6.4 });
-    page.text(showUsername ? ticket.username : "", centerX, cursor - 20, {
-      align: "center",
-      font: "bold",
-      size: fitTextSize(ticket.username, contentWidth - 10, is58 ? 11 : 13, is58 ? 8 : 9)
+    const frameGap = is58 ? 4 : 5;
+    const frameHeight = (credentialHeight - frameGap) / 2;
+    const loginBottom = credentialBottom + frameHeight + frameGap;
+    drawThermalCredentialFrame(page, {
+      height: frameHeight,
+      label: "LOGIN",
+      value: showUsername ? ticket.username : "",
+      width: contentWidth,
+      x: x + padding,
+      y: loginBottom,
+      valueSize: is58 ? 11 : 13
     });
-    page.text("MOT DE PASSE", centerX, dividerY - 9, { align: "center", font: "bold", size: is58 ? 5.8 : 6.4 });
-    page.text(password, centerX, dividerY - 21, {
-      align: "center",
-      font: "bold",
-      size: fitTextSize(password, contentWidth - 10, is58 ? 11 : 13, is58 ? 8 : 9)
+    drawThermalCredentialFrame(page, {
+      height: frameHeight,
+      label: "MOT DE PASSE",
+      value: password,
+      width: contentWidth,
+      x: x + padding,
+      y: credentialBottom,
+      valueSize: is58 ? 11 : 13
     });
   }
   cursor = credentialBottom - 7;
@@ -799,6 +869,46 @@ function drawThermalTicket(
   }
 }
 
+function formatTicketPrintDate(value: string | undefined): string {
+  const date = value ? new Date(value) : new Date();
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function drawThermalCredentialFrame(
+  page: PdfPage,
+  {
+    height,
+    label,
+    value,
+    valueSize,
+    width,
+    x,
+    y
+  }: {
+    height: number;
+    label: string;
+    value: string;
+    valueSize: number;
+    width: number;
+    x: number;
+    y: number;
+  }
+) {
+  page.rect(x, y, width, height);
+  page.text(label, x + width / 2, y + height * 0.62, {
+    align: "center",
+    font: "bold",
+    size: 5.8
+  });
+  page.text(value, x + width / 2, y + height * 0.17, {
+    align: "center",
+    font: "bold",
+    size: fitTextSize(value, width - 10, valueSize, 8)
+  });
+}
+
 function isThermalFormat(format: TicketPdfFormat): boolean {
   return format === "thermal58" || format === "thermal80";
 }
@@ -821,6 +931,7 @@ function getThermalPageSize(input: TicketPdfInput, ticket?: TicketPdfTicket): Pa
   const detailCount = [
     "duration",
     "validity",
+    "printed",
     settings?.showDataLimit && input.dataLimitLabel ? "data" : null,
     input.priceLabel && settings?.showPrice !== false ? "price" : null,
     settings?.showCreatedAt ? "created" : null,

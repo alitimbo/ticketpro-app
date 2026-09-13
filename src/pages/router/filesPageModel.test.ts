@@ -6,6 +6,7 @@ import {
   emptyFileFilters,
   fileStatusLabel,
   filterArchivedFiles,
+  scopeFilesForRouterSession,
   scopeFilesForSession
 } from "./filesPageModel";
 
@@ -45,6 +46,23 @@ describe("filesPageModel", () => {
       createdByProfileId: "account-douma-demo:internal-profile-agent",
       fileName: "tickets-jour-20.pdf"
     });
+  });
+
+  it("isole toujours les fichiers du routeur affiché", () => {
+    const files = [
+      ...createDemoArchivedFiles(),
+      {
+        ...createDemoArchivedFiles()[0],
+        id: "file-other-router",
+        routerId: "routeur-autre",
+        routerName: "Routeur autre"
+      }
+    ];
+
+    expect(scopeFilesForRouterSession(files, createSession("admin", "doumacorporation@gmail.com", Date.now()), "routeur-demo"))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ routerId: "routeur-demo" })]));
+    expect(scopeFilesForRouterSession(files, createSession("admin", "doumacorporation@gmail.com", Date.now()), "routeur-demo"))
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ routerId: "routeur-autre" })]));
   });
 
   it("transforme un fichier SQLite en archive avec son état disque", () => {

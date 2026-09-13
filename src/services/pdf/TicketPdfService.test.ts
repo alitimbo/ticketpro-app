@@ -114,10 +114,29 @@ describe("TicketPdfService", () => {
     const text = new TextDecoder().decode(generateTicketPdf(input));
     const filledModules = text.match(/ re f/g) ?? [];
 
-    expect(text).toContain("(MOT DE PASSE 847295)");
+    expect(text).toContain("(MOT DE PASSE)");
+    expect(text).toContain("(847295)");
     expect(filledModules.length).toBeGreaterThan(80);
     expect(ticketQrValue(input.tickets[0])).toBe("123001");
     expect(ticketQrValue(input.tickets[0])).not.toContain("847295");
+  });
+
+  it("sépare le login et le mot de passe dans deux cadres lorsque les identifiants diffèrent", () => {
+    const input = buildPdfInput(1);
+    input.tickets[0].password = "847295";
+    const text = new TextDecoder().decode(generateTicketPdf(input));
+
+    expect(text).toContain("(LOGIN)");
+    expect(text).toContain("(MOT DE PASSE)");
+    expect(text).toContain("(847295)");
+  });
+
+  it("affiche la date du PDF produit, y compris lorsque le lot est réimprimé", () => {
+    const input = buildPdfInput(1);
+    input.printedAt = "2026-09-13T18:45:00.000Z";
+    const text = new TextDecoder().decode(generateTicketPdf(input));
+
+    expect(text).toMatch(/\(\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}\)/);
   });
 
   it.each(["thermal58", "thermal80"] as const)(

@@ -184,6 +184,14 @@ export function scopeFilesForSession(
   return [];
 }
 
+export function scopeFilesForRouterSession(
+  files: ArchivedGeneratedFile[],
+  session: AuthSession | null | undefined,
+  routerId: string
+): ArchivedGeneratedFile[] {
+  return scopeFilesForSession(files, session).filter((file) => file.routerId === routerId);
+}
+
 export function filterArchivedFiles(files: ArchivedGeneratedFile[], filters: FileFilters): ArchivedGeneratedFile[] {
   const from = filters.dateFrom ? startOfDay(filters.dateFrom) : null;
   const to = filters.dateTo ? endOfDay(filters.dateTo) : null;

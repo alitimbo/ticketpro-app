@@ -9,6 +9,7 @@ import {
   isValidHotspotDnsName,
   listRoutersForAccount,
   normalizeHotspotDnsName,
+  remoteVpnPathForRouter,
   routerPageScopeKey,
   routerCardFromRecord,
   routerConnectionInputsFromCard,
@@ -78,6 +79,10 @@ describe("routerPageModel", () => {
       organizationId: "organization-test",
       subscriptionCounted: true
     });
+  });
+
+  it("ouvre la configuration VPN dans le contexte exact du routeur", () => {
+    expect(remoteVpnPathForRouter("routeur nova/1")).toBe("/vpn?router=routeur%20nova%2F1");
   });
 
   it("normalise et valide le DNS Hotspot", () => {

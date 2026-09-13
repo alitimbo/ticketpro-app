@@ -2043,20 +2043,27 @@ function TicketCreationPreviewDialog({
 
 function TicketPdfPreviewFrame({ input }: { input: TicketPdfInput }) {
   const [url, setUrl] = useState<string | null>(null);
+  // L'aperçu est un vrai PDF à une seule cellule. Il doit donc porter le même
+  // horodatage d'impression que le document final, sans provoquer de rerender
+  // continu du modal.
+  const printablePreviewInput = useMemo(
+    () => ({ ...input, printedAt: new Date().toISOString() }),
+    [input]
+  );
 
   useEffect(() => {
-    const bytes = generateTicketPdf(input);
+    const bytes = generateTicketPdf(printablePreviewInput);
     const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
     const nextUrl = URL.createObjectURL(new Blob([buffer], { type: "application/pdf" }));
     setUrl(nextUrl);
     return () => URL.revokeObjectURL(nextUrl);
-  }, [input]);
+  }, [printablePreviewInput]);
 
   return (
     <div className="ticket-pdf-preview-frame">
       <div className="ticket-pdf-preview-frame__heading">
         <strong>Aperçu fidèle d'un ticket</strong>
-        <span>Le PDF final contiendra 40 tickets par page. Le code définitif remplacera XXXXXX.</span>
+        <span>Le PDF final contiendra 40 tickets par page. Le code définitif remplacera XXXXXX et la date affichée sera celle de l'impression.</span>
       </div>
       {url ? <iframe src={`${url}#toolbar=0&navpanes=0&view=Fit`} title="Aperçu d'un voucher" /> : null}
     </div>
@@ -2305,6 +2312,7 @@ function buildCreationPreviewPdfInput(input: {
     hotspotAddress: input.hotspotAddress,
     ownerPhone: input.ownerPhone,
     planName: input.plan.name,
+    printedAt: new Date().toISOString(),
     previewMode: "single-ticket",
     priceLabel: input.plan.priceHint === null || !input.displaySettings.showPrice
       ? null

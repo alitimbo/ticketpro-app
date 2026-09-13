@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   ChevronDown,
   Download,
@@ -84,6 +85,7 @@ function routerAllowedIpsForNetwork(addressPool: string): string {
 }
 
 export function VpnPage() {
+  const [searchParams] = useSearchParams();
   const { accountSession, saasAccount, session } = useAuth();
   const { database, isInitialized } = useAppDatabase();
   const accountId = accountSession?.accountId ?? session?.account_id ?? null;
@@ -130,6 +132,7 @@ export function VpnPage() {
   const [bootstrappedScope, setBootstrappedScope] = useState<string | null>(null);
   const [operation, setOperation] = useState<VpnOperation | null>(null);
   const [vpnProvider, setVpnProvider] = useState<"EMBEDDED" | "LEGACY">("EMBEDDED");
+  const requestedRouterId = searchParams.get("router")?.trim() ?? "";
   const activeVpnScope = `${accountId ?? ""}:${saasAccount?.organization.id ?? "legacy"}`;
   const activeVpnScopeRef = useRef(activeVpnScope);
   activeVpnScopeRef.current = activeVpnScope;
@@ -204,6 +207,11 @@ export function VpnPage() {
       setError(loadError instanceof Error ? loadError.message : "Impossible de charger le VPN.")
     );
   }, [accountId, isInitialized, networkRepository, peerRepository, routerRepository, saasAccount?.organization.id]);
+
+  useEffect(() => {
+    if (!requestedRouterId || !routers.some((router) => router.id === requestedRouterId)) return;
+    setSelectedRouterId((current) => current === requestedRouterId ? current : requestedRouterId);
+  }, [requestedRouterId, routers]);
 
   useEffect(() => {
     if (!accountId || !network) return;
@@ -921,7 +929,7 @@ export function VpnPage() {
         <EmptyState icon={Network} title="Réseau VPN en attente" description="TicketPro récupère automatiquement une configuration isolée depuis le VPS." />
       ) : (
         <div className="page-grid vpn-provision-grid">
-          <Card className="span-6 vpn-provision-card" title="Ajouter un MikroTik" description="Le pair est injecté en LAN, puis validé dès qu'un tunnel opérateur permet d'atteindre son IP WireGuard.">
+          <Card className="span-6 vpn-provision-card" title={requestedRouterId ? "Configurer l'accès distant" : "Ajouter un MikroTik"} description="Le pair est injecté en LAN, puis validé dès qu'un tunnel opérateur permet d'atteindre son IP WireGuard.">
             <div className="vpn-provision-card__body">
               <label className="vpn-form-field">
                 <span className="vpn-field-label"><Network aria-hidden="true" /> Routeur à provisionner</span>

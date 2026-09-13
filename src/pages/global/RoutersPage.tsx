@@ -58,6 +58,7 @@ import {
   routerCardFromRecord,
   routerConnectionInputsFromCard,
   routerRecordFromCard,
+  remoteVpnPathForRouter,
   routerTestMessage,
   shouldPauseRouterStatusRefresh,
   type RouterCardData,
@@ -914,6 +915,7 @@ export function RoutersPage() {
               canEdit={canEditRouter}
               key={router.id}
               isConnecting={connectingRouterIds.has(router.id)}
+              onConfigureRemote={() => navigate(remoteVpnPathForRouter(router.id))}
               onDelete={() => setRouterToDelete(router)}
               onEdit={() => openEditForm(router)}
               onLocal={() => void activateRouterMode(router, "local")}
@@ -982,6 +984,7 @@ type RouterCardProps = {
   canDelete: boolean;
   canEdit: boolean;
   isConnecting: boolean;
+  onConfigureRemote: () => void;
   onDelete: () => void;
   onEdit: () => void;
   onLocal: () => void;
@@ -991,7 +994,7 @@ type RouterCardProps = {
   router: RouterCardData;
 };
 
-function RouterCard({ canDelete, canEdit, isConnecting, onDelete, onEdit, onLocal, onOpen, onRemote, onTest, router }: RouterCardProps) {
+function RouterCard({ canDelete, canEdit, isConnecting, onConfigureRemote, onDelete, onEdit, onLocal, onOpen, onRemote, onTest, router }: RouterCardProps) {
   const routerName = router.routerName?.trim() || router.zoneName;
   const zoneName = router.zoneName.trim() || "Site non renseigné";
   const lastSeenLabel = formatRouterLastSeen(router.lastSeenAt);
@@ -1004,7 +1007,7 @@ function RouterCard({ canDelete, canEdit, isConnecting, onDelete, onEdit, onLoca
           onSelect: onRemote
         }]
       : canEdit
-        ? [{ icon: Wifi, label: "Configurer l'accès distant", onSelect: onEdit }]
+        ? [{ icon: Wifi, label: "Configurer l'accès distant", onSelect: onConfigureRemote }]
         : []),
     { icon: Search, label: "Tester la connexion", onSelect: onTest },
     ...(canEdit ? [{ icon: Edit3, label: "Modifier", onSelect: onEdit }] : []),
