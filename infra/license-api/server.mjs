@@ -146,7 +146,10 @@ db.exec(`
     is_active INTEGER NOT NULL DEFAULT 1,
     sort_order INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT,
+    deleted_by_admin_id TEXT REFERENCES admin_users(id) ON DELETE SET NULL,
+    deletion_reason TEXT
   );
 
   CREATE TABLE IF NOT EXISTS licenses (
@@ -384,6 +387,42 @@ db.exec(`
     updated_at TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS organization_subscription_schedules (
+    id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    plan_id TEXT NOT NULL,
+    plan_code TEXT NOT NULL,
+    plan_name TEXT NOT NULL,
+    router_limit INTEGER NOT NULL CHECK(router_limit > 0),
+    max_devices INTEGER NOT NULL DEFAULT 1 CHECK(max_devices > 0),
+    device_limit_mode TEXT NOT NULL DEFAULT 'limited' CHECK(device_limit_mode IN ('limited', 'unlimited')),
+    duration_days INTEGER NOT NULL CHECK(duration_days > 0),
+    source TEXT NOT NULL CHECK(source IN ('manual', 'complimentary', 'free')),
+    status TEXT NOT NULL CHECK(status IN ('pending', 'applied', 'cancelled')),
+    effective_at TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_by_admin_id TEXT,
+    created_by_label TEXT NOT NULL,
+    applied_subscription_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    applied_at TEXT,
+    cancelled_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS organization_subscription_admin_actions (
+    id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    subscription_id TEXT,
+    schedule_id TEXT,
+    action TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_by_admin_id TEXT,
+    created_by_label TEXT NOT NULL,
+    details_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS router_access_policies (
     organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     router_id TEXT NOT NULL,
@@ -612,6 +651,19 @@ db.exec(`
     created_at TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS organization_router_admin_interventions (
+    id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    router_id TEXT NOT NULL REFERENCES organization_routers(id) ON DELETE CASCADE,
+    action TEXT NOT NULL CHECK(action IN ('note', 'monitoring_started', 'incident_opened', 'incident_resolved')),
+    message TEXT NOT NULL,
+    previous_support_status TEXT NOT NULL,
+    support_status TEXT NOT NULL,
+    created_by_admin_id TEXT REFERENCES admin_users(id) ON DELETE SET NULL,
+    created_by_label TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS reseller_registrations (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL UNIQUE,
@@ -694,6 +746,12 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_organization_sessions_token ON organization_sessions(token_hash);
   CREATE INDEX IF NOT EXISTS idx_organization_subscriptions_organization
     ON organization_subscriptions(organization_id, current_period_end);
+  CREATE INDEX IF NOT EXISTS idx_subscription_schedules_due
+    ON organization_subscription_schedules(status, effective_at);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_subscription_schedules_pending_organization
+    ON organization_subscription_schedules(organization_id) WHERE status = 'pending';
+  CREATE INDEX IF NOT EXISTS idx_subscription_admin_actions_organization
+    ON organization_subscription_admin_actions(organization_id, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_organization_devices_organization
     ON organization_devices(organization_id, status, last_seen_at DESC);
   CREATE INDEX IF NOT EXISTS idx_organization_vpn_peers_desired_state
@@ -718,6 +776,9 @@ db.exec(`
     ON organization_generated_files(organization_id, created_by_user_id, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_organization_activity_logs_router
     ON organization_activity_logs(organization_id, router_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_router_admin_interventions_router
+    ON organization_router_admin_interventions(router_id, created_at DESC);
+
   CREATE INDEX IF NOT EXISTS idx_payment_orders_transaction ON payment_orders(transaction_id);
   CREATE INDEX IF NOT EXISTS idx_payment_orders_reseller ON payment_orders(reseller_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_payment_orders_registration ON payment_orders(reseller_registration_id);
@@ -725,6 +786,9 @@ db.exec(`
 `);
 
 ensureColumn("plans", "is_reseller", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("plans", "deleted_at", "TEXT");
+ensureColumn("plans", "deleted_by_admin_id", "TEXT");
+ensureColumn("plans", "deletion_reason", "TEXT");
 ensureColumn("plans", "device_limit_mode", "TEXT NOT NULL DEFAULT 'limited'");
 ensureColumn("plans", "offer_code", "TEXT");
 ensureColumn("plans", "purchase_mode", "TEXT NOT NULL DEFAULT 'online'");
@@ -757,10 +821,13 @@ ensureColumn("organization_users", "created_by_user_id", "TEXT");
 ensureColumn("organization_sessions", "active_membership_id", "TEXT");
 ensureColumn("organization_subscriptions", "max_devices", "INTEGER NOT NULL DEFAULT 1");
 ensureColumn("organization_subscriptions", "device_limit_mode", "TEXT NOT NULL DEFAULT 'limited'");
+ensureColumn("organization_subscriptions", "admin_status", "TEXT NOT NULL DEFAULT 'active'");
 ensureColumn("organization_routers", "decommission_status", "TEXT NOT NULL DEFAULT 'active'");
 ensureColumn("organization_routers", "decommission_requested_at", "TEXT");
 ensureColumn("organization_routers", "decommission_error_code", "TEXT");
 ensureColumn("organization_routers", "decommission_report_json", "TEXT");
+ensureColumn("organization_routers", "support_status", "TEXT NOT NULL DEFAULT 'normal'");
+ensureColumn("organization_routers", "support_updated_at", "TEXT");
 ensureColumn("organization_tickets", "duration_minutes_snapshot", "INTEGER");
 ensureColumn("organization_tickets", "validity_minutes_snapshot", "INTEGER");
 ensureColumn("organization_tickets", "data_limit_mb_snapshot", "INTEGER");
@@ -886,25 +953,25 @@ db.exec(`
 const statements = {
   listPlans: db.prepare(`
     SELECT * FROM plans
-    WHERE is_active = 1 AND is_reseller = 0 AND purchase_mode = 'online'
+    WHERE deleted_at IS NULL AND is_active = 1 AND is_reseller = 0 AND purchase_mode = 'online'
     ORDER BY sort_order ASC, router_limit ASC, duration_days ASC
   `),
   listPublicCatalogPlans: db.prepare(`
     SELECT * FROM plans
-    WHERE is_active = 1 AND is_reseller = 0
+    WHERE deleted_at IS NULL AND is_active = 1 AND is_reseller = 0
     ORDER BY sort_order ASC, router_limit ASC, duration_days ASC
   `),
   listAllPlans: db.prepare(`
-    SELECT * FROM plans WHERE is_reseller = 0 ORDER BY sort_order ASC, router_limit ASC
+    SELECT * FROM plans WHERE deleted_at IS NULL AND is_reseller = 0 ORDER BY sort_order ASC, router_limit ASC
   `),
   findPlanById: db.prepare("SELECT * FROM plans WHERE id = ?"),
   clearRecommendedPlans: db.prepare(`
     UPDATE plans SET is_recommended = 0, updated_at = ?
-    WHERE COALESCE(offer_code, code) <> ? AND is_reseller = 0
+    WHERE deleted_at IS NULL AND COALESCE(offer_code, code) <> ? AND is_reseller = 0
   `),
   setOfferRecommended: db.prepare(`
     UPDATE plans SET is_recommended = ?, updated_at = ?
-    WHERE COALESCE(offer_code, code) = ? AND is_reseller = 0
+    WHERE deleted_at IS NULL AND COALESCE(offer_code, code) = ? AND is_reseller = 0
   `),
   upsertPlan: db.prepare(`
     INSERT INTO plans (
@@ -922,6 +989,13 @@ const statements = {
       is_active = excluded.is_active, is_reseller = excluded.is_reseller,
       sort_order = excluded.sort_order, updated_at = excluded.updated_at
   `),
+  softDeletePlan: db.prepare(`
+    UPDATE plans
+    SET is_active = 0, is_recommended = 0, deleted_at = ?,
+      deleted_by_admin_id = ?, deletion_reason = ?, updated_at = ?
+    WHERE id = ? AND deleted_at IS NULL AND is_active = 0 AND is_reseller = 0
+  `),
+
   findLicenseByKey: db.prepare("SELECT * FROM licenses WHERE key_hash = ?"),
   findLicenseById: db.prepare("SELECT * FROM licenses WHERE id = ?"),
   insertLicense: db.prepare(`
@@ -1310,7 +1384,8 @@ const statements = {
       router.routeros_version, router.local_ip, router.hotspot_address, router.notes,
       router.api_port, router.api_ssl_port, router.connection_mode, router.status,
       router.last_seen_at, router.decommission_status, router.decommission_requested_at,
-      router.decommission_error_code, router.created_at, router.updated_at,
+      router.decommission_error_code, router.support_status, router.support_updated_at,
+      router.created_at, router.updated_at,
       CASE WHEN router.vpn_json IS NULL THEN 0 ELSE 1 END AS vpn_configured
     FROM organization_routers AS router
     JOIN organizations AS organization ON organization.id = router.organization_id
@@ -1358,6 +1433,50 @@ const statements = {
     ORDER BY created_at DESC
     LIMIT ?
   `),
+  adminRouterActivitySummary: db.prepare(`
+    SELECT COUNT(*) AS total_count,
+      COALESCE(SUM(CASE WHEN created_at >= ? AND level IN ('critical', 'error') THEN 1 ELSE 0 END), 0) AS error_count_24h,
+      COALESCE(SUM(CASE WHEN created_at >= ? AND level = 'warning' THEN 1 ELSE 0 END), 0) AS warning_count_24h,
+      COALESCE(SUM(CASE WHEN created_at >= ? AND level IN ('critical', 'error', 'warning') THEN 1 ELSE 0 END), 0) AS attention_count_7d,
+      MAX(created_at) AS last_activity_at
+    FROM organization_activity_logs
+    WHERE router_id = ?
+  `),
+  listAdminRouterTicketSyncCounts: db.prepare(`
+    SELECT sync_status AS status, COUNT(*) AS count
+    FROM organization_tickets
+    WHERE router_id = ? AND deleted_at IS NULL
+    GROUP BY sync_status
+    ORDER BY count DESC, sync_status COLLATE NOCASE
+  `),
+  listAdminRouterBatchSyncCounts: db.prepare(`
+    SELECT sync_status AS status, COUNT(*) AS count
+    FROM organization_ticket_batches
+    WHERE router_id = ?
+    GROUP BY sync_status
+    ORDER BY count DESC, sync_status COLLATE NOCASE
+  `),
+  listAdminRouterInterventions: db.prepare(`
+    SELECT id, organization_id, router_id, action, message,
+      previous_support_status, support_status, created_by_label, created_at
+    FROM organization_router_admin_interventions
+    WHERE router_id = ?
+    ORDER BY created_at DESC
+    LIMIT ?
+  `),
+  insertAdminRouterIntervention: db.prepare(`
+    INSERT INTO organization_router_admin_interventions (
+      id, organization_id, router_id, action, message,
+      previous_support_status, support_status, created_by_admin_id,
+      created_by_label, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  setRouterSupportStatus: db.prepare(`
+    UPDATE organization_routers
+    SET support_status = ?, support_updated_at = ?, updated_at = ?
+    WHERE id = ? AND deleted_at IS NULL
+  `),
+
   updateOrganizationMember: db.prepare(`
     UPDATE organization_users
     SET name = ?, app_role = ?, router_access_mode = ?, status = ?, updated_at = ?
@@ -1531,6 +1650,94 @@ const statements = {
     SELECT 1 AS found FROM organization_subscriptions
     WHERE organization_id = ? AND plan_id <> ?
     LIMIT 1
+  `),
+  findOrganizationSubscriptionById: db.prepare(`
+    SELECT * FROM organization_subscriptions WHERE id = ? LIMIT 1
+  `),
+  extendOrganizationSubscription: db.prepare(`
+    UPDATE organization_subscriptions SET current_period_end = ?, updated_at = ?
+    WHERE id = ? AND status = 'active'
+  `),
+  setOrganizationSubscriptionAdminStatus: db.prepare(`
+    UPDATE organization_subscriptions SET admin_status = ?, updated_at = ?
+    WHERE id = ? AND status = 'active'
+  `),
+  cancelOrganizationSubscription: db.prepare(`
+    UPDATE organization_subscriptions
+    SET status = 'cancelled', admin_status = 'active', updated_at = ?
+    WHERE id = ? AND status = 'active'
+  `),
+  insertOrganizationSubscriptionSchedule: db.prepare(`
+    INSERT INTO organization_subscription_schedules (
+      id, organization_id, plan_id, plan_code, plan_name, router_limit,
+      max_devices, device_limit_mode, duration_days, source, status,
+      effective_at, reason, created_by_admin_id, created_by_label,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+  `),
+  findOrganizationSubscriptionScheduleById: db.prepare(`
+    SELECT * FROM organization_subscription_schedules WHERE id = ? LIMIT 1
+  `),
+  findPendingOrganizationSubscriptionSchedule: db.prepare(`
+    SELECT * FROM organization_subscription_schedules
+    WHERE organization_id = ? AND status = 'pending'
+    ORDER BY created_at DESC LIMIT 1
+  `),
+  listDueOrganizationSubscriptionSchedules: db.prepare(`
+    SELECT * FROM organization_subscription_schedules
+    WHERE status = 'pending' AND effective_at <= ?
+    ORDER BY effective_at ASC
+  `),
+  cancelPendingOrganizationSubscriptionSchedules: db.prepare(`
+    UPDATE organization_subscription_schedules
+    SET status = 'cancelled', cancelled_at = ?, updated_at = ?
+    WHERE organization_id = ? AND status = 'pending'
+  `),
+  cancelOrganizationSubscriptionScheduleById: db.prepare(`
+    UPDATE organization_subscription_schedules
+    SET status = 'cancelled', cancelled_at = ?, updated_at = ?
+    WHERE id = ? AND status = 'pending'
+  `),
+  applyOrganizationSubscriptionSchedule: db.prepare(`
+    UPDATE organization_subscription_schedules
+    SET status = 'applied', applied_subscription_id = ?, applied_at = ?, updated_at = ?
+    WHERE id = ? AND status = 'pending'
+  `),
+  listAdminUserSubscriptionSchedules: db.prepare(`
+    SELECT schedule.*, organization.name AS organization_name
+    FROM organization_subscription_schedules AS schedule
+    JOIN organizations AS organization ON organization.id = schedule.organization_id
+    WHERE schedule.organization_id IN (
+      SELECT organization_id FROM organization_memberships WHERE user_id = ?
+      UNION
+      SELECT organization_id FROM organization_users WHERE id = ?
+    )
+    ORDER BY CASE schedule.status WHEN 'pending' THEN 0 ELSE 1 END,
+      schedule.effective_at DESC
+    LIMIT 100
+  `),
+  insertOrganizationSubscriptionAdminAction: db.prepare(`
+    INSERT INTO organization_subscription_admin_actions (
+      id, organization_id, subscription_id, schedule_id, action, reason,
+      created_by_admin_id, created_by_label, details_json, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  listAdminUserSubscriptionActions: db.prepare(`
+    SELECT action.*, organization.name AS organization_name
+    FROM organization_subscription_admin_actions AS action
+    JOIN organizations AS organization ON organization.id = action.organization_id
+    WHERE action.organization_id IN (
+      SELECT organization_id FROM organization_memberships WHERE user_id = ?
+      UNION
+      SELECT organization_id FROM organization_users WHERE id = ?
+    )
+    ORDER BY action.created_at DESC
+    LIMIT 200
+  `),
+  reschedulePendingOrganizationSubscription: db.prepare(`
+    UPDATE organization_subscription_schedules
+    SET effective_at = ?, updated_at = ?
+    WHERE organization_id = ? AND status = 'pending'
   `),
   findOrganizationDeviceByInstallation: db.prepare(`
     SELECT * FROM organization_devices
@@ -2096,6 +2303,46 @@ const statements = {
       created_at, paid_at, fulfilled_at, failure_reason
     FROM payment_orders WHERE reseller_id = ? ORDER BY created_at DESC LIMIT ?
   `),
+  adminDashboardPlanStats: db.prepare(`
+    SELECT
+      COALESCE(SUM(CASE WHEN deleted_at IS NULL AND is_active = 1 THEN 1 ELSE 0 END), 0) AS active_count,
+      COALESCE(SUM(CASE WHEN deleted_at IS NULL AND is_active = 0 THEN 1 ELSE 0 END), 0) AS inactive_count,
+      COALESCE(SUM(CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS archived_count
+    FROM plans
+    WHERE is_reseller = 0
+  `),
+  adminDashboardUserStats: db.prepare(`
+    SELECT COUNT(*) AS total_count,
+      COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0) AS active_count,
+      COALESCE(SUM(CASE WHEN status = 'disabled' THEN 1 ELSE 0 END), 0) AS disabled_count,
+      COALESCE(SUM(CASE WHEN invitation_pending = 1 THEN 1 ELSE 0 END), 0) AS invitation_pending_count,
+      COALESCE(SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END), 0) AS new_30d_count
+    FROM organization_users
+  `),
+  adminDashboardOrganizationStats: db.prepare(`
+    SELECT COUNT(*) AS total_count,
+      COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0) AS active_count,
+      COALESCE(SUM(CASE WHEN status = 'pending_payment' THEN 1 ELSE 0 END), 0) AS pending_count,
+      COALESCE(SUM(CASE WHEN status = 'suspended' THEN 1 ELSE 0 END), 0) AS suspended_count
+    FROM organizations
+  `),
+  adminDashboardSubscriptionStats: db.prepare(`
+    SELECT
+      COALESCE(SUM(CASE WHEN status = 'active' AND current_period_end > ? AND COALESCE(admin_status, 'active') = 'active' THEN 1 ELSE 0 END), 0) AS active_count,
+      COALESCE(SUM(CASE WHEN status = 'active' AND COALESCE(admin_status, 'active') = 'suspended' THEN 1 ELSE 0 END), 0) AS suspended_count,
+      COALESCE(SUM(CASE WHEN status = 'active' AND current_period_end > ? AND current_period_end <= ? AND COALESCE(admin_status, 'active') = 'active' THEN 1 ELSE 0 END), 0) AS expiring_7d_count
+    FROM organization_subscriptions
+  `),
+  adminDashboardPaymentStats: db.prepare(`
+    SELECT
+      COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) AS pending_count,
+      COALESCE(SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END), 0) AS succeeded_count,
+      COALESCE(SUM(CASE WHEN status = 'succeeded' THEN amount ELSE 0 END), 0) AS confirmed_revenue,
+      COALESCE(SUM(CASE WHEN status = 'succeeded' AND created_at >= ? THEN 1 ELSE 0 END), 0) AS succeeded_30d_count,
+      COALESCE(SUM(CASE WHEN status = 'succeeded' AND created_at >= ? THEN amount ELSE 0 END), 0) AS revenue_30d
+    FROM payment_orders
+  `),
+
   listPayments: db.prepare(`
     SELECT id, transaction_id, purchaser_type, reseller_id, plan_id, plan_name,
       router_limit, amount, currency, msisdn, payment_type, status,
@@ -3097,6 +3344,7 @@ function createOrganizationSession(request, userId, membershipId = null, duratio
 
 function currentOrganizationSubscription(organizationId) {
   const timestamp = nowIso();
+  applyDueOrganizationSubscriptionSchedules(timestamp);
   statements.releaseStaleSubscriptionNotifications.run(
     new Date(Date.now() - 60 * 60_000).toISOString()
   );
@@ -3121,6 +3369,7 @@ function organizationSubscriptionLifecycle(subscription, nowMs = Date.now()) {
       graceEndsAt: null,
       inGrace: false,
       isActive: false,
+      isSuspended: false,
       isTrial: false
     };
   }
@@ -3131,13 +3380,15 @@ function organizationSubscriptionLifecycle(subscription, nowMs = Date.now()) {
     ? periodEndMs
     : periodEndMs + SAAS_PAID_GRACE_DAYS * DAY_MS;
   const persistedActive = subscription.status === "active";
+  const isSuspended = persistedActive && subscription.admin_status === "suspended";
   return {
     accessEndsAt: Number.isFinite(graceEndsMs) ? new Date(graceEndsMs).toISOString() : null,
     graceEndsAt: !isTrial && Number.isFinite(graceEndsMs)
       ? new Date(graceEndsMs).toISOString()
       : null,
-    inGrace: persistedActive && !isTrial && periodEndMs <= nowMs && nowMs < graceEndsMs,
-    isActive: persistedActive && nowMs < graceEndsMs,
+    inGrace: persistedActive && !isSuspended && !isTrial && periodEndMs <= nowMs && nowMs < graceEndsMs,
+    isActive: persistedActive && !isSuspended && nowMs < graceEndsMs,
+    isSuspended,
     isTrial
   };
 }
@@ -3146,6 +3397,7 @@ function organizationSubscriptionResponse(subscription) {
   if (!subscription) {
     return {
       status: "none",
+      admin_status: "active",
       is_active: false,
       router_limit: 0,
       device_limit_mode: "limited",
@@ -3166,11 +3418,14 @@ function organizationSubscriptionResponse(subscription) {
   const limitMode = deviceLimitMode(subscription);
   return {
     id: subscription.id,
-    status: lifecycle.inGrace
-      ? "grace_period"
-      : lifecycle.isActive
-        ? lifecycle.isTrial ? "trial" : "active"
-        : subscription.status === "cancelled" ? "cancelled" : "expired",
+    status: lifecycle.isSuspended
+      ? "suspended"
+      : lifecycle.inGrace
+        ? "grace_period"
+        : lifecycle.isActive
+          ? lifecycle.isTrial ? "trial" : "active"
+          : subscription.status === "cancelled" ? "cancelled" : "expired",
+    admin_status: subscription.admin_status ?? "active",
     is_active: lifecycle.isActive,
     router_limit: Number(subscription.router_limit),
     device_limit_mode: limitMode,
@@ -3188,6 +3443,140 @@ function organizationSubscriptionResponse(subscription) {
       price_cfa: Number(subscription.amount)
     }
   };
+}
+
+function organizationSubscriptionSource(paymentOrderId) {
+  const value = String(paymentOrderId ?? "");
+  if (value.startsWith("complimentary:")) return "complimentary";
+  if (value.startsWith("free:")) return "free";
+  if (value.startsWith("manual:")) return "manual";
+  if (value.startsWith("trial:")) return "trial";
+  if (value.startsWith("legacy-license:")) return "migration";
+  return "payment";
+}
+
+function organizationSubscriptionScheduleResponse(schedule) {
+  if (!schedule) return null;
+  return {
+    id: schedule.id,
+    organization_id: schedule.organization_id,
+    organization_name: schedule.organization_name ?? null,
+    status: schedule.status,
+    effective_at: schedule.effective_at,
+    duration_days: Number(schedule.duration_days),
+    source: schedule.source,
+    reason: schedule.reason,
+    created_by_label: schedule.created_by_label,
+    created_at: schedule.created_at,
+    cancelled_at: schedule.cancelled_at ?? null,
+    applied_at: schedule.applied_at ?? null,
+    applied_subscription_id: schedule.applied_subscription_id ?? null,
+    plan: {
+      id: schedule.plan_id,
+      code: schedule.plan_code,
+      name: schedule.plan_name,
+      router_limit: Number(schedule.router_limit),
+      device_limit_mode: deviceLimitMode(schedule),
+      max_devices: deviceLimitMode(schedule) === "unlimited"
+        ? null
+        : Number(schedule.max_devices ?? 1)
+    }
+  };
+}
+
+function recordOrganizationSubscriptionAdminAction({
+  organizationId,
+  subscriptionId = null,
+  scheduleId = null,
+  action,
+  reason,
+  admin,
+  details = {},
+  createdAt = nowIso()
+}) {
+  statements.insertOrganizationSubscriptionAdminAction.run(
+    crypto.randomUUID(),
+    organizationId,
+    subscriptionId,
+    scheduleId,
+    action,
+    reason,
+    admin?.id ?? null,
+    admin?.name ?? admin?.email ?? "Administration TicketPro",
+    JSON.stringify(details),
+    createdAt
+  );
+}
+
+function requireAdminUserSubscription(body) {
+  const userId = requireText(body, "user_id", 128);
+  const user = statements.findOrganizationUserById.get(userId);
+  if (!user) throw new HttpError(404, "Utilisateur introuvable.");
+  const subscription = statements.findOrganizationSubscriptionById.get(
+    requireText(body, "subscription_id", 128)
+  );
+  if (!subscription) throw new HttpError(404, "Abonnement introuvable.");
+  const membership = statements.findOrganizationMembership.get(subscription.organization_id, userId);
+  if (!membership && subscription.organization_id !== user.organization_id) {
+    throw new HttpError(403, "Cet abonnement n'appartient pas à une organisation de cet utilisateur.");
+  }
+  return { userId, user, subscription };
+}
+
+function applyDueOrganizationSubscriptionSchedules(timestamp = nowIso()) {
+  let applied = 0;
+  for (const schedule of statements.listDueOrganizationSubscriptionSchedules.all(timestamp)) {
+    const subscriptionId = crypto.randomUUID();
+    const startMs = Date.parse(schedule.effective_at);
+    const endsAt = new Date(startMs + Number(schedule.duration_days) * DAY_MS).toISOString();
+    const existing = statements.findActiveOrganizationSubscription.get(schedule.organization_id);
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      if (existing) statements.expireOrganizationSubscriptionById.run(timestamp, existing.id);
+      statements.insertOrganizationSubscription.run(
+        subscriptionId,
+        schedule.organization_id,
+        schedule.plan_id,
+        schedule.plan_code,
+        schedule.plan_name,
+        Number(schedule.router_limit),
+        Number(schedule.max_devices ?? 1),
+        deviceLimitMode(schedule),
+        0,
+        schedule.effective_at,
+        endsAt,
+        `${schedule.source}:scheduled:${schedule.id}`,
+        timestamp,
+        timestamp
+      );
+      statements.applyOrganizationSubscriptionSchedule.run(
+        subscriptionId,
+        timestamp,
+        timestamp,
+        schedule.id
+      );
+      statements.activateOrganization.run(timestamp, schedule.organization_id);
+      recordOrganizationSubscriptionAdminAction({
+        organizationId: schedule.organization_id,
+        subscriptionId,
+        scheduleId: schedule.id,
+        action: "scheduled_plan_change_applied",
+        reason: schedule.reason,
+        admin: { id: schedule.created_by_admin_id, name: schedule.created_by_label },
+        details: {
+          plan_id: schedule.plan_id,
+          replaced_subscription_id: existing?.id ?? null
+        },
+        createdAt: timestamp
+      });
+      db.exec("COMMIT");
+      applied += 1;
+    } catch (error) {
+      db.exec("ROLLBACK");
+      console.error("Application d'un changement d'abonnement programmé impossible:", error.message);
+    }
+  }
+  return { applied };
 }
 
 function normalizeOrganizationAppRole(value) {
@@ -7474,6 +7863,53 @@ const handlers = [
     return { admin: adminResponse(target), ...reset };
   }),
 
+  route("POST", "/v1/admin/dashboard/overview", async (request) => {
+    requireAdmin(request, ["owner", "admin", "support"]);
+    applyDueOrganizationSubscriptionSchedules();
+    const observedAt = nowIso();
+    const cutoff30d = new Date(Date.now() - 30 * DAY_MS).toISOString();
+    const cutoff7d = new Date(Date.now() + 7 * DAY_MS).toISOString();
+    const planStats = statements.adminDashboardPlanStats.get();
+    const userStats = statements.adminDashboardUserStats.get(cutoff30d);
+    const organizationStats = statements.adminDashboardOrganizationStats.get();
+    const subscriptionStats = statements.adminDashboardSubscriptionStats.get(observedAt, observedAt, cutoff7d);
+    const paymentStats = statements.adminDashboardPaymentStats.get(cutoff30d, cutoff30d);
+    const recentUsers = statements.listAdminOrganizationUsers.all(5).map((user) => ({
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      status: user.status,
+      invitation_pending: Boolean(user.invitation_pending),
+      organization_id: user.organization_id,
+      organization_name: user.organization_name,
+      organization_status: user.organization_status,
+      plan_name: user.plan_name,
+      subscription_status: user.subscription_status,
+      created_at: user.created_at
+    }));
+    const recommendedPlan = statements.listAllPlans.all().find(
+      (plan) => Boolean(plan.is_active) && Boolean(plan.is_recommended)
+    );
+    const numberStats = (record) => Object.fromEntries(
+      Object.entries(record).map(([key, value]) => [key, Number(value)])
+    );
+    return {
+      observed_at: observedAt,
+      plan_stats: numberStats(planStats),
+      user_stats: numberStats(userStats),
+      organization_stats: numberStats(organizationStats),
+      subscription_stats: numberStats(subscriptionStats),
+      payment_stats: numberStats(paymentStats),
+      recommended_plan: recommendedPlan ? {
+        id: recommendedPlan.id,
+        name: recommendedPlan.name,
+        code: recommendedPlan.code
+      } : null,
+      recent_users: recentUsers,
+      recent_payments: statements.listPayments.all(5)
+    };
+  }),
+
   route("POST", "/v1/admin/users/list", async (request, body) => {
     requireAdmin(request, ["owner", "admin", "support"]);
     const limit = body.limit === undefined ? 500 : requireInteger(body, "limit", 1, 1000);
@@ -7490,6 +7926,7 @@ const handlers = [
 
   route("POST", "/v1/admin/users/detail", async (request, body) => {
     requireAdmin(request, ["owner", "admin", "support"]);
+    applyDueOrganizationSubscriptionSchedules();
     const userId = requireText(body, "user_id", 128);
     const user = statements.findOrganizationUserById.get(userId);
     if (!user) throw new HttpError(404, "Utilisateur introuvable.");
@@ -7514,11 +7951,7 @@ const handlers = [
       ...organizationSubscriptionResponse(item),
       organization_id: item.organization_id,
       organization_name: item.organization_name,
-      source: String(item.payment_order_id).startsWith("manual:")
-        ? "manual"
-        : String(item.payment_order_id).startsWith("trial:")
-          ? "trial"
-          : String(item.payment_order_id).startsWith("legacy-license:") ? "migration" : "payment",
+      source: organizationSubscriptionSource(item.payment_order_id),
       created_at: item.created_at
     }));
     const routers = statements.listAdminUserRouters.all(userId, userId).map((router) => ({
@@ -7529,6 +7962,20 @@ const handlers = [
       uploaded_bytes: Number(router.uploaded_bytes),
       batch_count: Number(router.batch_count),
       activity_count: Number(router.activity_count)
+    }));
+    const subscriptionSchedules = statements.listAdminUserSubscriptionSchedules.all(userId, userId)
+      .map(organizationSubscriptionScheduleResponse);
+    const subscriptionActions = statements.listAdminUserSubscriptionActions.all(userId, userId).map((action) => ({
+      id: action.id,
+      organization_id: action.organization_id,
+      organization_name: action.organization_name,
+      subscription_id: action.subscription_id,
+      schedule_id: action.schedule_id,
+      action: action.action,
+      reason: action.reason,
+      created_by_label: action.created_by_label,
+      details: JSON.parse(action.details_json),
+      created_at: action.created_at
     }));
     return {
       user: {
@@ -7547,6 +7994,8 @@ const handlers = [
       },
       memberships,
       subscriptions,
+      subscription_schedules: subscriptionSchedules,
+      subscription_actions: subscriptionActions,
       routers
     };
   }),
@@ -7835,6 +8284,424 @@ const handlers = [
     };
   }),
 
+  route("POST", "/v1/admin/users/subscriptions/change", async (request, body) => {
+    const currentAdmin = requireAdmin(request, ["owner", "admin"]);
+    const userId = requireText(body, "user_id", 128);
+    const user = statements.findOrganizationUserById.get(userId);
+    if (!user) throw new HttpError(404, "Utilisateur introuvable.");
+    const organizationId = body.organization_id
+      ? requireText(body, "organization_id", 128)
+      : user.organization_id;
+    const membership = statements.findOrganizationMembership.get(organizationId, userId);
+    if (!membership && organizationId !== user.organization_id) {
+      throw new HttpError(403, "Cet utilisateur n'appartient pas à cette organisation.");
+    }
+    const organization = statements.findOrganizationById.get(organizationId);
+    if (!organization) throw new HttpError(404, "Organisation introuvable.");
+    const plan = statements.findPlanById.get(requireText(body, "plan_id", 128));
+    if (!plan || Boolean(plan.is_reseller) || !Boolean(plan.is_active)) {
+      throw new HttpError(400, "Forfait SaaS actif introuvable.");
+    }
+    const timing = String(body.timing ?? "immediate");
+    if (!["immediate", "renewal"].includes(timing)) {
+      throw new HttpError(400, "Moment du changement invalide.");
+    }
+    const source = String(body.source ?? "manual");
+    if (!["manual", "complimentary", "free"].includes(source)) {
+      throw new HttpError(400, "Origine de l'attribution invalide.");
+    }
+    if (source === "free" && (plan.price_cfa === null || Number(plan.price_cfa) !== 0)) {
+      throw new HttpError(400, "L'origine « forfait gratuit » exige un forfait dont le prix est nul.");
+    }
+    const durationDays = body.duration_days === undefined
+      ? Number(plan.duration_days)
+      : requireInteger(body, "duration_days", 1, 3650);
+    const reason = requireText(body, "reason", 500);
+    const createdAt = nowIso();
+    const existing = statements.findActiveOrganizationSubscription.get(organizationId);
+
+    if (timing === "renewal") {
+      if (!existing || Date.parse(existing.current_period_end) <= Date.now()) {
+        throw new HttpError(400, "Aucun abonnement avec une prochaine échéance ne peut recevoir ce changement programmé.");
+      }
+      const scheduleId = crypto.randomUUID();
+      const replacedSchedule = statements.findPendingOrganizationSubscriptionSchedule.get(organizationId);
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        statements.cancelPendingOrganizationSubscriptionSchedules.run(createdAt, createdAt, organizationId);
+        statements.insertOrganizationSubscriptionSchedule.run(
+          scheduleId,
+          organizationId,
+          plan.id,
+          plan.code,
+          plan.name,
+          Number(plan.router_limit),
+          Number(plan.max_devices ?? 1),
+          deviceLimitMode(plan),
+          durationDays,
+          source,
+          existing.current_period_end,
+          reason,
+          currentAdmin.id,
+          currentAdmin.name ?? currentAdmin.email ?? "Administration TicketPro",
+          createdAt,
+          createdAt
+        );
+        recordOrganizationSubscriptionAdminAction({
+          organizationId,
+          subscriptionId: existing.id,
+          scheduleId,
+          action: "plan_change_scheduled",
+          reason,
+          admin: currentAdmin,
+          details: {
+            plan_id: plan.id,
+            duration_days: durationDays,
+            effective_at: existing.current_period_end,
+            source,
+            replaced_schedule_id: replacedSchedule?.id ?? null
+          },
+          createdAt
+        });
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+      logEvent(request, null, "organization_subscription_change_scheduled", organizationId, null, {
+        user_id: userId,
+        subscription_id: existing.id,
+        schedule_id: scheduleId,
+        plan_id: plan.id,
+        reason,
+        created_by: currentAdmin.id
+      });
+      return {
+        message: "Le changement de forfait est programmé à la prochaine échéance.",
+        schedule: organizationSubscriptionScheduleResponse({
+          ...statements.findOrganizationSubscriptionScheduleById.get(scheduleId),
+          organization_name: organization.name
+        })
+      };
+    }
+
+    const subscriptionId = crypto.randomUUID();
+    const endsAt = new Date(Date.now() + durationDays * DAY_MS).toISOString();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      statements.cancelPendingOrganizationSubscriptionSchedules.run(createdAt, createdAt, organizationId);
+      if (existing) statements.expireOrganizationSubscriptionById.run(createdAt, existing.id);
+      statements.insertOrganizationSubscription.run(
+        subscriptionId,
+        organizationId,
+        plan.id,
+        plan.code,
+        plan.name,
+        Number(plan.router_limit),
+        Number(plan.max_devices ?? 1),
+        deviceLimitMode(plan),
+        0,
+        createdAt,
+        endsAt,
+        `${source}:${subscriptionId}`,
+        createdAt,
+        createdAt
+      );
+      statements.activateOrganization.run(createdAt, organizationId);
+      recordOrganizationSubscriptionAdminAction({
+        organizationId,
+        subscriptionId,
+        action: existing ? "plan_changed_immediately" : "subscription_assigned",
+        reason,
+        admin: currentAdmin,
+        details: {
+          plan_id: plan.id,
+          duration_days: durationDays,
+          source,
+          replaced_subscription_id: existing?.id ?? null
+        },
+        createdAt
+      });
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    logEvent(request, null, existing ? "organization_subscription_plan_changed" : "organization_subscription_assigned", organizationId, null, {
+      user_id: userId,
+      subscription_id: subscriptionId,
+      replaced_subscription_id: existing?.id ?? null,
+      plan_id: plan.id,
+      duration_days: durationDays,
+      source,
+      reason,
+      created_by: currentAdmin.id
+    });
+    const subscription = statements.findOrganizationSubscriptionById.get(subscriptionId);
+    return {
+      message: existing
+        ? "Le forfait a été remplacé immédiatement."
+        : "L'abonnement a été attribué.",
+      subscription: {
+        ...organizationSubscriptionResponse(subscription),
+        organization_id: organizationId,
+        organization_name: organization.name,
+        source: organizationSubscriptionSource(subscription.payment_order_id),
+        created_at: subscription.created_at
+      }
+    };
+  }),
+
+  route("POST", "/v1/admin/users/subscriptions/extend", async (request, body) => {
+    const currentAdmin = requireAdmin(request, ["owner", "admin"]);
+    const { userId, subscription } = requireAdminUserSubscription(body);
+    if (subscription.status !== "active") {
+      throw new HttpError(400, "Seul un abonnement courant peut être prolongé.");
+    }
+    const durationDays = requireInteger(body, "duration_days", 1, 3650);
+    const reason = requireText(body, "reason", 500);
+    const updatedAt = nowIso();
+    const previousEnd = subscription.current_period_end;
+    const baseMs = Math.max(Date.parse(previousEnd), Date.now());
+    const nextEnd = new Date(baseMs + durationDays * DAY_MS).toISOString();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      statements.extendOrganizationSubscription.run(nextEnd, updatedAt, subscription.id);
+      statements.reschedulePendingOrganizationSubscription.run(
+        nextEnd,
+        updatedAt,
+        subscription.organization_id
+      );
+      recordOrganizationSubscriptionAdminAction({
+        organizationId: subscription.organization_id,
+        subscriptionId: subscription.id,
+        action: "subscription_extended",
+        reason,
+        admin: currentAdmin,
+        details: { duration_days: durationDays, previous_end: previousEnd, current_period_end: nextEnd },
+        createdAt: updatedAt
+      });
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    logEvent(request, null, "organization_subscription_extended", subscription.organization_id, null, {
+      user_id: userId,
+      subscription_id: subscription.id,
+      duration_days: durationDays,
+      previous_end: previousEnd,
+      current_period_end: nextEnd,
+      reason,
+      created_by: currentAdmin.id
+    });
+    const updated = statements.findOrganizationSubscriptionById.get(subscription.id);
+    return {
+      message: `L'abonnement a été prolongé de ${durationDays} jour(s).`,
+      subscription: {
+        ...organizationSubscriptionResponse(updated),
+        organization_id: updated.organization_id,
+        source: organizationSubscriptionSource(updated.payment_order_id),
+        created_at: updated.created_at
+      }
+    };
+  }),
+
+  route("POST", "/v1/admin/users/subscriptions/status", async (request, body) => {
+    const currentAdmin = requireAdmin(request, ["owner", "admin"]);
+    const { userId, subscription } = requireAdminUserSubscription(body);
+    if (subscription.status !== "active") {
+      throw new HttpError(400, "Cet abonnement n'est plus courant.");
+    }
+    const action = requireText(body, "action", 24);
+    if (!["suspend", "reactivate", "cancel"].includes(action)) {
+      throw new HttpError(400, "Action d'abonnement invalide.");
+    }
+    if (action === "suspend" && subscription.admin_status === "suspended") {
+      throw new HttpError(400, "Cet abonnement est déjà suspendu.");
+    }
+    if (action === "reactivate" && subscription.admin_status !== "suspended") {
+      throw new HttpError(400, "Cet abonnement n'est pas suspendu.");
+    }
+    const reason = requireText(body, "reason", 500);
+    const updatedAt = nowIso();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      if (action === "cancel") {
+        statements.cancelOrganizationSubscription.run(updatedAt, subscription.id);
+        statements.cancelPendingOrganizationSubscriptionSchedules.run(
+          updatedAt,
+          updatedAt,
+          subscription.organization_id
+        );
+      } else {
+        statements.setOrganizationSubscriptionAdminStatus.run(
+          action === "suspend" ? "suspended" : "active",
+          updatedAt,
+          subscription.id
+        );
+      }
+      recordOrganizationSubscriptionAdminAction({
+        organizationId: subscription.organization_id,
+        subscriptionId: subscription.id,
+        action: action === "suspend"
+          ? "subscription_suspended"
+          : action === "reactivate" ? "subscription_reactivated" : "subscription_cancelled",
+        reason,
+        admin: currentAdmin,
+        details: { previous_admin_status: subscription.admin_status ?? "active" },
+        createdAt: updatedAt
+      });
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    logEvent(request, null, `organization_subscription_${action}`, subscription.organization_id, null, {
+      user_id: userId,
+      subscription_id: subscription.id,
+      reason,
+      created_by: currentAdmin.id
+    });
+    const updated = statements.findOrganizationSubscriptionById.get(subscription.id);
+    const messages = {
+      suspend: "L'abonnement a été suspendu. L'accès est maintenant coupé.",
+      reactivate: "L'abonnement a été réactivé.",
+      cancel: "L'abonnement a été résilié immédiatement."
+    };
+    return {
+      message: messages[action],
+      subscription: {
+        ...organizationSubscriptionResponse(updated),
+        organization_id: updated.organization_id,
+        source: organizationSubscriptionSource(updated.payment_order_id),
+        created_at: updated.created_at
+      }
+    };
+  }),
+
+  route("POST", "/v1/admin/users/subscriptions/cancel-schedule", async (request, body) => {
+    const currentAdmin = requireAdmin(request, ["owner", "admin"]);
+    const userId = requireText(body, "user_id", 128);
+    const user = statements.findOrganizationUserById.get(userId);
+    if (!user) throw new HttpError(404, "Utilisateur introuvable.");
+    const schedule = statements.findOrganizationSubscriptionScheduleById.get(
+      requireText(body, "schedule_id", 128)
+    );
+    if (!schedule || schedule.status !== "pending") {
+      throw new HttpError(404, "Changement programmé introuvable.");
+    }
+    const membership = statements.findOrganizationMembership.get(schedule.organization_id, userId);
+    if (!membership && schedule.organization_id !== user.organization_id) {
+      throw new HttpError(403, "Ce changement ne concerne pas une organisation de cet utilisateur.");
+    }
+    const reason = requireText(body, "reason", 500);
+    const cancelledAt = nowIso();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      statements.cancelOrganizationSubscriptionScheduleById.run(cancelledAt, cancelledAt, schedule.id);
+      recordOrganizationSubscriptionAdminAction({
+        organizationId: schedule.organization_id,
+        scheduleId: schedule.id,
+        action: "scheduled_plan_change_cancelled",
+        reason,
+        admin: currentAdmin,
+        details: { plan_id: schedule.plan_id, effective_at: schedule.effective_at },
+        createdAt: cancelledAt
+      });
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    logEvent(request, null, "organization_subscription_schedule_cancelled", schedule.organization_id, null, {
+      user_id: userId,
+      schedule_id: schedule.id,
+      reason,
+      created_by: currentAdmin.id
+    });
+    return { message: "Le changement de forfait programmé a été annulé." };
+  }),
+
+  route("POST", "/v1/admin/users/router-intervention", async (request, body) => {
+    const currentAdmin = requireAdmin(request, ["owner", "admin", "support"]);
+    const userId = requireText(body, "user_id", 128);
+    if (!statements.findOrganizationUserById.get(userId)) {
+      throw new HttpError(404, "Utilisateur introuvable.");
+    }
+    const routerId = requireText(body, "router_id", 240);
+    const router = statements.findAdminUserRouter.get(routerId, userId, userId);
+    if (!router) throw new HttpError(404, "Routeur introuvable pour cet utilisateur.");
+    const requestedAction = requireText(body, "action", 32);
+    const actions = {
+      note: { auditAction: "note", status: router.support_status ?? "normal", message: "La note interne a été ajoutée." },
+      monitor: { auditAction: "monitoring_started", status: "monitoring", message: "Le routeur est maintenant sous surveillance." },
+      incident: { auditAction: "incident_opened", status: "incident", message: "Un incident de support a été ouvert." },
+      resolve: { auditAction: "incident_resolved", status: "normal", message: "Le suivi du routeur a été clôturé." }
+    };
+    const selected = actions[requestedAction];
+    if (!selected) throw new HttpError(400, "Action de support routeur invalide.");
+    const message = requireText(body, "message", 2_000);
+    if (message.length < 5) throw new HttpError(400, "Le compte rendu doit contenir au moins 5 caractères.");
+    const previousStatus = router.support_status ?? "normal";
+    if (requestedAction === "monitor" && previousStatus === "monitoring") {
+      throw new HttpError(400, "Ce routeur est déjà sous surveillance.");
+    }
+    if (requestedAction === "incident" && previousStatus === "incident") {
+      throw new HttpError(400, "Un incident est déjà ouvert pour ce routeur.");
+    }
+    if (requestedAction === "resolve" && previousStatus === "normal") {
+      throw new HttpError(400, "Ce routeur ne possède aucun suivi à clôturer.");
+    }
+    const interventionId = crypto.randomUUID();
+    const createdAt = nowIso();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      if (selected.status !== previousStatus) {
+        statements.setRouterSupportStatus.run(selected.status, createdAt, createdAt, router.id);
+      }
+      statements.insertAdminRouterIntervention.run(
+        interventionId,
+        router.organization_id,
+        router.id,
+        selected.auditAction,
+        message,
+        previousStatus,
+        selected.status,
+        currentAdmin.id,
+        currentAdmin.name ?? currentAdmin.email ?? "Administration TicketPro",
+        createdAt
+      );
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    logEvent(request, null, `admin_router_${selected.auditAction}`, router.organization_id, null, {
+      user_id: userId,
+      router_id: router.id,
+      previous_support_status: previousStatus,
+      support_status: selected.status,
+      message,
+      created_by: currentAdmin.id
+    });
+    return {
+      message: selected.message,
+      support_status: selected.status,
+      intervention: {
+        id: interventionId,
+        organization_id: router.organization_id,
+        router_id: router.id,
+        action: selected.auditAction,
+        message,
+        previous_support_status: previousStatus,
+        support_status: selected.status,
+        created_by_label: currentAdmin.name ?? currentAdmin.email ?? "Administration TicketPro",
+        created_at: createdAt
+      }
+    };
+  }),
+
   route("POST", "/v1/admin/users/router-detail", async (request, body) => {
     requireAdmin(request, ["owner", "admin", "support"]);
     const userId = requireText(body, "user_id", 128);
@@ -7845,6 +8712,10 @@ const handlers = [
     const router = statements.findAdminUserRouter.get(routerId, userId, userId);
     if (!router) throw new HttpError(404, "Routeur introuvable pour cet utilisateur.");
     const stats = statements.adminRouterTicketStats.get(routerId);
+    const cutoff24h = new Date(Date.now() - DAY_MS).toISOString();
+    const cutoff7d = new Date(Date.now() - 7 * DAY_MS).toISOString();
+    const activitySummary = statements.adminRouterActivitySummary.get(cutoff24h, cutoff24h, cutoff7d, routerId);
+    const interventions = statements.listAdminRouterInterventions.all(routerId, 100);
     return {
       router: { ...router, vpn_configured: Boolean(router.vpn_configured) },
       stats: {
@@ -7857,6 +8728,23 @@ const handlers = [
         uptime_seconds: Number(stats.uptime_seconds),
         last_ticket_sync_at: stats.last_ticket_sync_at
       },
+      diagnostics: {
+        observed_at: nowIso(),
+        activity: {
+          total_count: Number(activitySummary.total_count),
+          error_count_24h: Number(activitySummary.error_count_24h),
+          warning_count_24h: Number(activitySummary.warning_count_24h),
+          attention_count_7d: Number(activitySummary.attention_count_7d),
+          last_activity_at: activitySummary.last_activity_at
+        },
+        ticket_sync: statements.listAdminRouterTicketSyncCounts.all(routerId).map((item) => ({
+          status: item.status, count: Number(item.count)
+        })),
+        batch_sync: statements.listAdminRouterBatchSyncCounts.all(routerId).map((item) => ({
+          status: item.status, count: Number(item.count)
+        }))
+      },
+      interventions,
       recent_tickets: statements.listAdminRouterTickets.all(routerId, 50).map((ticket) => ({
         ...ticket,
         printed_count: Number(ticket.printed_count),
@@ -8874,6 +9762,7 @@ const handlers = [
     const isActive = body.is_active !== false;
     const isReseller = Boolean(body.is_reseller);
     const existing = statements.findPlanById.get(planId);
+    if (existing?.deleted_at) throw new HttpError(404, "Ce forfait a été supprimé du catalogue.");
     const offerCode = String(body.offer_code ?? existing?.offer_code ?? code)
       .trim()
       .toUpperCase();
@@ -8932,6 +9821,45 @@ const handlers = [
       statements.setOfferRecommended.run(body.is_recommended ? 1 : 0, now, offerCode);
     }
     return { plan: planResponse(statements.findPlanById.get(planId)) };
+  }),
+
+  route("POST", "/v1/admin/plans/delete", async (request, body) => {
+    const currentAdmin = requireAdmin(request, ["owner", "admin"]);
+    const planId = requireText(body, "plan_id", 128);
+    const plan = statements.findPlanById.get(planId);
+    if (!plan || plan.deleted_at || Boolean(plan.is_reseller)) {
+      throw new HttpError(404, "Forfait SaaS introuvable.");
+    }
+    if (Boolean(plan.is_active)) {
+      throw new HttpError(409, "Désactivez ce forfait avant de le supprimer.");
+    }
+    const reason = requireText(body, "reason", 500);
+    if (reason.length < 5) {
+      throw new HttpError(400, "Le motif de suppression doit contenir au moins 5 caractères.");
+    }
+    const deletedAt = nowIso();
+    const result = statements.softDeletePlan.run(
+      deletedAt,
+      currentAdmin.id,
+      reason,
+      deletedAt,
+      plan.id
+    );
+    if (Number(result.changes) !== 1) {
+      throw new HttpError(409, "Ce forfait ne peut plus être supprimé.");
+    }
+    logEvent(request, null, "admin_plan_soft_deleted", null, null, {
+      plan_id: plan.id,
+      plan_code: plan.code,
+      reason,
+      created_by: currentAdmin.id
+    });
+    return {
+      ok: true,
+      plan_id: plan.id,
+      deleted_at: deletedAt,
+      message: "Le forfait a été supprimé du catalogue. Son historique reste conservé."
+    };
   }),
 
   route("POST", "/v1/admin/plans/list", async (request) => {
@@ -9331,6 +10259,10 @@ const server = http.createServer(async (request, response) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`TicketPro License API écoute sur ${HOST}:${PORT}`);
+  const scheduledChanges = applyDueOrganizationSubscriptionSchedules();
+  if (scheduledChanges.applied > 0) {
+    console.log(`${scheduledChanges.applied} changement(s) d'abonnement programmé(s) appliqué(s).`);
+  }
   void processSubscriptionNotifications().catch((error) =>
     console.error("Traitement initial des relances d'abonnement impossible:", error)
   );
@@ -9345,6 +10277,11 @@ const subscriptionNotificationTimer = setInterval(() => {
   );
 }, SUBSCRIPTION_NOTIFICATION_INTERVAL_MS);
 subscriptionNotificationTimer.unref();
+
+const subscriptionScheduleTimer = setInterval(() => {
+  applyDueOrganizationSubscriptionSchedules();
+}, 60_000);
+subscriptionScheduleTimer.unref();
 
 const vpnReconciliationTimer = setInterval(() => {
   void reconcileOrganizationVpnPeers().catch((error) =>

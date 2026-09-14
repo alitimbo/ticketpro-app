@@ -2644,6 +2644,100 @@ test("authentification, licences, paiements iPay et crédits revendeur restent c
     1
   );
 
+  const softDeletePlanBody = {
+    id: "integration-soft-delete-plan",
+    code: "INTEGRATION-SOFT-DELETE",
+    offer_code: "SOFT-DELETE",
+    name: "Forfait à archiver",
+    description: "Forfait réservé au test de suppression logique.",
+    router_limit: 1,
+    max_devices: 1,
+    duration_days: 30,
+    price_cfa: 2500,
+    billing_period: "monthly",
+    purchase_mode: "online",
+    is_reseller: false,
+    is_active: true
+  };
+  const softDeletePlanCreation = await api("/v1/admin/plans", {
+    token: adminToken,
+    body: softDeletePlanBody
+  });
+  assert.equal(softDeletePlanCreation.status, 200);
+
+  const activePlanDeletion = await api("/v1/admin/plans/delete", {
+    token: adminToken,
+    body: { plan_id: softDeletePlanBody.id, reason: "Nettoyage du catalogue de test" }
+  });
+  assert.equal(activePlanDeletion.status, 409);
+
+  const softDeletePlanDeactivation = await api("/v1/admin/plans", {
+    token: adminToken,
+    body: { ...softDeletePlanBody, is_active: false }
+  });
+  assert.equal(softDeletePlanDeactivation.status, 200);
+  assert.equal(softDeletePlanDeactivation.payload.plan.is_active, false);
+
+  const softDeleteWithoutReason = await api("/v1/admin/plans/delete", {
+    token: adminToken,
+    body: { plan_id: softDeletePlanBody.id }
+  });
+  assert.equal(softDeleteWithoutReason.status, 400);
+
+  const softDeletePlanResult = await api("/v1/admin/plans/delete", {
+    token: adminToken,
+    body: { plan_id: softDeletePlanBody.id, reason: "Nettoyage du catalogue de test" }
+  });
+  assert.equal(softDeletePlanResult.status, 200);
+  assert.equal(softDeletePlanResult.payload.plan_id, softDeletePlanBody.id);
+
+  const plansAfterSoftDelete = await api("/v1/admin/plans/list", {
+    token: adminToken,
+    body: {}
+  });
+  assert.equal(
+    plansAfterSoftDelete.payload.plans.some((plan) => plan.id === softDeletePlanBody.id),
+    false
+  );
+  const publicCatalogAfterSoftDelete = await api("/v1/plans/catalog", { method: "GET" });
+  assert.equal(
+    publicCatalogAfterSoftDelete.payload.plans.some((plan) => plan.id === softDeletePlanBody.id),
+    false
+  );
+
+  const archivedPlanEdition = await api("/v1/admin/plans", {
+    token: adminToken,
+    body: { ...softDeletePlanBody, is_active: false }
+  });
+  assert.equal(archivedPlanEdition.status, 404);
+
+  const unauthorizedDashboardOverview = await api("/v1/admin/dashboard/overview", {
+    body: {}
+  });
+  assert.equal(unauthorizedDashboardOverview.status, 401);
+
+  const dashboardOverview = await api("/v1/admin/dashboard/overview", {
+    token: adminToken,
+    body: {}
+  });
+  assert.equal(dashboardOverview.status, 200);
+  assert.ok(Number.isInteger(dashboardOverview.payload.plan_stats.active_count));
+  assert.ok(dashboardOverview.payload.plan_stats.archived_count >= 1);
+  assert.ok(Number.isInteger(dashboardOverview.payload.user_stats.total_count));
+  assert.ok(Number.isInteger(dashboardOverview.payload.organization_stats.total_count));
+  assert.ok(Number.isInteger(dashboardOverview.payload.subscription_stats.active_count));
+  assert.ok(Number.isInteger(dashboardOverview.payload.payment_stats.confirmed_revenue));
+  assert.ok(Array.isArray(dashboardOverview.payload.recent_users));
+  assert.ok(dashboardOverview.payload.recent_users.length <= 5);
+  assert.ok(Array.isArray(dashboardOverview.payload.recent_payments));
+  assert.ok(dashboardOverview.payload.recent_payments.length <= 5);
+  for (let index = 1; index < dashboardOverview.payload.recent_users.length; index += 1) {
+    assert.ok(
+      Date.parse(dashboardOverview.payload.recent_users[index - 1].created_at)
+        >= Date.parse(dashboardOverview.payload.recent_users[index].created_at)
+    );
+  }
+
   const organizationLicense = await api("/v1/admin/licenses", {
     token: adminToken,
     body: {
@@ -3090,6 +3184,84 @@ test("authentification, licences, paiements iPay et crédits revendeur restent c
     assert.equal(routerDetail.status, 200);
     assert.equal("credential_ciphertext" in routerDetail.payload.router, false);
     assert.ok(Number.isInteger(routerDetail.payload.stats.ticket_count));
+    assert.ok(routerDetail.payload.diagnostics);
+    assert.ok(Array.isArray(routerDetail.payload.diagnostics.ticket_sync));
+    assert.ok(Array.isArray(routerDetail.payload.diagnostics.batch_sync));
+    assert.ok(Array.isArray(routerDetail.payload.interventions));
+
+    const missingRouterInterventionMessage = await api("/v1/admin/users/router-intervention", {
+      token: adminToken,
+      body: { user_id: managedUser.id, router_id: userDetail.payload.routers[0].id, action: "monitor" }
+    });
+    assert.equal(missingRouterInterventionMessage.status, 400);
+
+    const invalidRouterIntervention = await api("/v1/admin/users/router-intervention", {
+      token: adminToken,
+      body: {
+        user_id: managedUser.id,
+        router_id: userDetail.payload.routers[0].id,
+        action: "reboot",
+        message: "Action qui ne doit pas exister"
+      }
+    });
+    assert.equal(invalidRouterIntervention.status, 400);
+
+    const monitorRouter = await api("/v1/admin/users/router-intervention", {
+      token: adminToken,
+      body: {
+        user_id: managedUser.id,
+        router_id: userDetail.payload.routers[0].id,
+        action: "monitor",
+        message: "Surveillance ouverte après une remontée irrégulière"
+      }
+    });
+    assert.equal(monitorRouter.status, 200);
+    assert.equal(monitorRouter.payload.support_status, "monitoring");
+
+    const routerNote = await api("/v1/admin/users/router-intervention", {
+      token: adminToken,
+      body: {
+        user_id: managedUser.id,
+        router_id: userDetail.payload.routers[0].id,
+        action: "note",
+        message: "Le propriétaire a été contacté pour vérification locale"
+      }
+    });
+    assert.equal(routerNote.status, 200);
+    assert.equal(routerNote.payload.support_status, "monitoring");
+
+    const openRouterIncident = await api("/v1/admin/users/router-intervention", {
+      token: adminToken,
+      body: {
+        user_id: managedUser.id,
+        router_id: userDetail.payload.routers[0].id,
+        action: "incident",
+        message: "Incident confirmé pendant le contrôle de connectivité"
+      }
+    });
+    assert.equal(openRouterIncident.status, 200);
+    assert.equal(openRouterIncident.payload.support_status, "incident");
+
+    const resolveRouterIncident = await api("/v1/admin/users/router-intervention", {
+      token: adminToken,
+      body: {
+        user_id: managedUser.id,
+        router_id: userDetail.payload.routers[0].id,
+        action: "resolve",
+        message: "Connectivité rétablie et remontées de nouveau vérifiées"
+      }
+    });
+    assert.equal(resolveRouterIncident.status, 200);
+    assert.equal(resolveRouterIncident.payload.support_status, "normal");
+
+    const routerDetailAfterInterventions = await api("/v1/admin/users/router-detail", {
+      token: adminToken,
+      body: { user_id: managedUser.id, router_id: userDetail.payload.routers[0].id }
+    });
+    assert.equal(routerDetailAfterInterventions.status, 200);
+    assert.equal(routerDetailAfterInterventions.payload.router.support_status, "normal");
+    assert.ok(routerDetailAfterInterventions.payload.interventions.length >= 4);
+    assert.equal(routerDetailAfterInterventions.payload.interventions[0].action, "incident_resolved");
   }
 
   const manualSubscription = await api("/v1/admin/users/assign-subscription", {
@@ -3188,5 +3360,143 @@ test("authentification, licences, paiements iPay et crédits revendeur restent c
   assert.equal(resentByAdmin.status, 200);
   assert.ok(resentByAdmin.payload.invitation_token);
   assert.match(resentByAdmin.payload.invitation_url, /accept-invitation\?token=/);
+
+  const extendedSubscription = await api("/v1/admin/users/subscriptions/extend", {
+    token: adminToken,
+    body: {
+      user_id: managedUser.id,
+      subscription_id: manualSubscription.payload.subscription.id,
+      duration_days: 10,
+      reason: "Prolongation validée par le service commercial"
+    }
+  });
+  assert.equal(extendedSubscription.status, 200);
+  assert.ok(
+    Date.parse(extendedSubscription.payload.subscription.current_period_end)
+      > Date.parse(manualSubscription.payload.subscription.current_period_end)
+  );
+
+  const suspendedSubscription = await api("/v1/admin/users/subscriptions/status", {
+    token: adminToken,
+    body: {
+      user_id: managedUser.id,
+      subscription_id: manualSubscription.payload.subscription.id,
+      action: "suspend",
+      reason: "Suspension temporaire demandée pour contrôle"
+    }
+  });
+  assert.equal(suspendedSubscription.status, 200);
+  assert.equal(suspendedSubscription.payload.subscription.status, "suspended");
+  assert.equal(suspendedSubscription.payload.subscription.is_active, false);
+
+  const reactivatedSubscription = await api("/v1/admin/users/subscriptions/status", {
+    token: adminToken,
+    body: {
+      user_id: managedUser.id,
+      subscription_id: manualSubscription.payload.subscription.id,
+      action: "reactivate",
+      reason: "Contrôle terminé avec succès"
+    }
+  });
+  assert.equal(reactivatedSubscription.status, 200);
+  assert.equal(reactivatedSubscription.payload.subscription.status, "active");
+
+  const scheduledChange = await api("/v1/admin/users/subscriptions/change", {
+    token: adminToken,
+    body: {
+      user_id: managedUser.id,
+      organization_id: managedUser.organization_id,
+      plan_id: "integration-organization-2",
+      duration_days: 30,
+      timing: "renewal",
+      source: "complimentary",
+      reason: "Changement offert à la prochaine échéance"
+    }
+  });
+  assert.equal(scheduledChange.status, 200);
+  assert.equal(scheduledChange.payload.schedule.status, "pending");
+  assert.equal(scheduledChange.payload.schedule.source, "complimentary");
+  assert.equal(
+    scheduledChange.payload.schedule.effective_at,
+    extendedSubscription.payload.subscription.current_period_end
+  );
+
+  const detailWithSchedule = await api("/v1/admin/users/detail", {
+    token: adminToken,
+    body: { user_id: managedUser.id }
+  });
+  assert.ok(detailWithSchedule.payload.subscription_schedules.some(
+    (schedule) => schedule.id === scheduledChange.payload.schedule.id && schedule.status === "pending"
+  ));
+  assert.ok(detailWithSchedule.payload.subscription_actions.some(
+    (action) => action.action === "plan_change_scheduled"
+      && action.reason === "Changement offert à la prochaine échéance"
+  ));
+
+  const cancelledSchedule = await api("/v1/admin/users/subscriptions/cancel-schedule", {
+    token: adminToken,
+    body: {
+      user_id: managedUser.id,
+      schedule_id: scheduledChange.payload.schedule.id,
+      reason: "Le client conserve son forfait actuel"
+    }
+  });
+  assert.equal(cancelledSchedule.status, 200);
+
+  const immediateChange = await api("/v1/admin/users/subscriptions/change", {
+    token: adminToken,
+    body: {
+      user_id: managedUser.id,
+      organization_id: managedUser.organization_id,
+      plan_id: "integration-organization-2",
+      duration_days: 60,
+      timing: "immediate",
+      source: "complimentary",
+      reason: "Migration immédiate offerte après validation"
+    }
+  });
+  assert.equal(immediateChange.status, 200);
+  assert.equal(immediateChange.payload.subscription.source, "complimentary");
+  assert.equal(immediateChange.payload.subscription.plan.id, "integration-organization-2");
+
+  const cancelledSubscription = await api("/v1/admin/users/subscriptions/status", {
+    token: adminToken,
+    body: {
+      user_id: managedUser.id,
+      subscription_id: immediateChange.payload.subscription.id,
+      action: "cancel",
+      reason: "Résiliation de contrôle en fin de test"
+    }
+  });
+  assert.equal(cancelledSubscription.status, 200);
+  assert.equal(cancelledSubscription.payload.subscription.status, "cancelled");
+
+  const invalidFreeSource = await api("/v1/admin/users/subscriptions/change", {
+    token: adminToken,
+    body: {
+      user_id: managedUser.id,
+      organization_id: managedUser.organization_id,
+      plan_id: "integration-organization-2",
+      timing: "immediate",
+      source: "free",
+      reason: "Cette attribution doit être refusée"
+    }
+  });
+  assert.equal(invalidFreeSource.status, 400);
+
+  const restoredSubscription = await api("/v1/admin/users/subscriptions/change", {
+    token: adminToken,
+    body: {
+      user_id: managedUser.id,
+      organization_id: managedUser.organization_id,
+      plan_id: "subscription-starter-monthly",
+      duration_days: 30,
+      timing: "immediate",
+      source: "manual",
+      reason: "Restauration de l'abonnement après le scénario de test"
+    }
+  });
+  assert.equal(restoredSubscription.status, 200);
+  assert.equal(restoredSubscription.payload.subscription.status, "active");
 });
 
