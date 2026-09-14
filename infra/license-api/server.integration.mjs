@@ -2505,6 +2505,16 @@ test("authentification, licences, paiements iPay et crédits revendeur restent c
     ["alitimbo.pro11@gmail.com", "maitredoudos54@gmail.com"]
   );
 
+  const users = await api("/v1/admin/users/list", {
+    token: adminToken,
+    body: { limit: 1000 }
+  });
+  assert.equal(users.status, 200);
+  assert.ok(users.payload.users.length > 0);
+  assert.ok(users.payload.users.every((user) => typeof user.organization_name === "string"));
+  assert.ok(users.payload.users.every((user) => Number.isInteger(user.organization_count)));
+  assert.equal("password_hash" in users.payload.users[0], false);
+
   const organizationPlan = await api("/v1/admin/plans", {
     token: adminToken,
     body: {
@@ -3061,5 +3071,122 @@ test("authentification, licences, paiements iPay et crédits revendeur restent c
     }
   });
   assert.equal(childBStillValid.status, 200);
+  const managedUser = users.payload.users[0];
+  const userDetail = await api("/v1/admin/users/detail", {
+    token: adminToken,
+    body: { user_id: managedUser.id }
+  });
+  assert.equal(userDetail.status, 200);
+  assert.equal(userDetail.payload.user.email, managedUser.email);
+  assert.equal("password_hash" in userDetail.payload.user, false);
+  assert.ok(Array.isArray(userDetail.payload.subscriptions));
+  assert.ok(Array.isArray(userDetail.payload.routers));
+
+  if (userDetail.payload.routers.length > 0) {
+    const routerDetail = await api("/v1/admin/users/router-detail", {
+      token: adminToken,
+      body: { user_id: managedUser.id, router_id: userDetail.payload.routers[0].id }
+    });
+    assert.equal(routerDetail.status, 200);
+    assert.equal("credential_ciphertext" in routerDetail.payload.router, false);
+    assert.ok(Number.isInteger(routerDetail.payload.stats.ticket_count));
+  }
+
+  const manualSubscription = await api("/v1/admin/users/assign-subscription", {
+    token: adminToken,
+    body: {
+      user_id: managedUser.id,
+      organization_id: managedUser.organization_id,
+      plan_id: "subscription-starter-monthly",
+      duration_days: 45,
+      reason: "Validation du parcours administrateur"
+    }
+  });
+  assert.equal(manualSubscription.status, 200);
+  assert.equal(manualSubscription.payload.subscription.source, "manual");
+  assert.equal(manualSubscription.payload.subscription.plan.id, "subscription-starter-monthly");
+
+  const missingActionReason = await api("/v1/admin/users/force-logout", {
+    token: adminToken,
+    body: { user_id: managedUser.id }
+  });
+  assert.equal(missingActionReason.status, 400);
+
+  const passwordReset = await api("/v1/admin/users/password-reset", {
+    token: adminToken,
+    body: { user_id: managedUser.id, reason: "Assistance demandée par le client" }
+  });
+  assert.equal(passwordReset.status, 200);
+  assert.ok(passwordReset.payload.reset_token);
+  assert.match(passwordReset.payload.reset_url, /reset-password\?token=/);
+  assert.equal(passwordReset.payload.email_delivery, "not_sent");
+
+  const forcedLogout = await api("/v1/admin/users/force-logout", {
+    token: adminToken,
+    body: { user_id: managedUser.id, reason: "Fermeture de sécurité des sessions" }
+  });
+  assert.equal(forcedLogout.status, 200);
+  assert.ok(Number.isInteger(forcedLogout.payload.sessions_revoked));
+
+  const unlocked = await api("/v1/admin/users/unlock", {
+    token: adminToken,
+    body: { user_id: managedUser.id, reason: "Identité du client vérifiée" }
+  });
+  assert.equal(unlocked.status, 200);
+  const detailAfterUnlock = await api("/v1/admin/users/detail", {
+    token: adminToken,
+    body: { user_id: managedUser.id }
+  });
+  assert.equal(detailAfterUnlock.payload.user.failed_login_count, 0);
+  assert.equal(detailAfterUnlock.payload.user.locked_until, null);
+
+  const disabledUser = await api("/v1/admin/users/set-status", {
+    token: adminToken,
+    body: {
+      user_id: managedUser.id,
+      status: "disabled",
+      reason: "Suspension administrative de contrôle"
+    }
+  });
+  assert.equal(disabledUser.status, 200);
+  assert.equal(disabledUser.payload.status, "disabled");
+  const disabledDetail = await api("/v1/admin/users/detail", {
+    token: adminToken,
+    body: { user_id: managedUser.id }
+  });
+  assert.equal(disabledDetail.payload.user.status, "disabled");
+
+  const reactivatedUser = await api("/v1/admin/users/set-status", {
+    token: adminToken,
+    body: {
+      user_id: managedUser.id,
+      status: "active",
+      reason: "Contrôle administratif terminé"
+    }
+  });
+  assert.equal(reactivatedUser.status, 200);
+  assert.equal(reactivatedUser.payload.status, "active");
+
+  const pendingUser = users.payload.users.find((user) => user.invitation_pending);
+  assert.ok(pendingUser, "Une invitation en attente doit exister dans les fixtures");
+  const pendingUserDetail = await api("/v1/admin/users/detail", {
+    token: adminToken,
+    body: { user_id: pendingUser.id }
+  });
+  const pendingMembership = pendingUserDetail.payload.memberships.find(
+    (membership) => membership.invitation_status === "pending"
+  );
+  assert.ok(pendingMembership?.id, "L'appartenance invitée doit être identifiable");
+  const resentByAdmin = await api("/v1/admin/users/resend-invitation", {
+    token: adminToken,
+    body: {
+      user_id: pendingUser.id,
+      membership_id: pendingMembership.id,
+      reason: "Le destinataire n'a pas reçu le premier message"
+    }
+  });
+  assert.equal(resentByAdmin.status, 200);
+  assert.ok(resentByAdmin.payload.invitation_token);
+  assert.match(resentByAdmin.payload.invitation_url, /accept-invitation\?token=/);
 });
 

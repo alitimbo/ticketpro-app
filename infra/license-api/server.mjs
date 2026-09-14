@@ -1107,6 +1107,14 @@ const statements = {
   updateOrganizationUserProfile: db.prepare(`
     UPDATE organization_users SET name = ?, phone = ?, updated_at = ? WHERE id = ?
   `),
+  setOrganizationUserStatus: db.prepare(`
+    UPDATE organization_users SET status = ?, updated_at = ? WHERE id = ?
+  `),
+  unlockOrganizationUser: db.prepare(`
+    UPDATE organization_users
+    SET failed_login_count = 0, locked_until = NULL, updated_at = ?
+    WHERE id = ?
+  `),
   insertOrganizationMembership: db.prepare(`
     INSERT INTO organization_memberships (
       id, organization_id, user_id, authority_role, app_role, status,
@@ -1197,6 +1205,159 @@ const statements = {
     WHERE organization_id = ?
     ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END, name COLLATE NOCASE
   `),
+  listAdminOrganizationUsers: db.prepare(`
+    SELECT
+      user.id,
+      user.name,
+      user.email,
+      user.phone,
+      user.role,
+      COALESCE(membership.authority_role, user.role) AS authority_role,
+      COALESCE(membership.app_role, user.app_role) AS app_role,
+      CASE
+        WHEN user.status = 'active' AND COALESCE(membership.status, 'active') = 'active'
+        THEN 'active'
+        ELSE 'disabled'
+      END AS status,
+      user.invitation_pending,
+      user.failed_login_count,
+      user.locked_until,
+      user.created_at,
+      user.last_login_at,
+      organization.id AS organization_id,
+      organization.name AS organization_name,
+      organization.status AS organization_status,
+      subscription.plan_id,
+      subscription.plan_code,
+      subscription.plan_name,
+      subscription.status AS subscription_status,
+      subscription.current_period_end,
+      MAX(1, (
+        SELECT COUNT(*) FROM organization_memberships AS member_count
+        WHERE member_count.user_id = user.id AND member_count.status = 'active'
+      )) AS organization_count,
+      (
+        SELECT COUNT(*) FROM organization_devices AS device
+        WHERE device.registered_by_user_id = user.id AND device.status <> 'revoked'
+      ) AS device_count
+    FROM organization_users AS user
+    JOIN organizations AS organization ON organization.id = user.organization_id
+    LEFT JOIN organization_memberships AS membership
+      ON membership.organization_id = user.organization_id AND membership.user_id = user.id
+    LEFT JOIN organization_subscriptions AS subscription ON subscription.id = (
+      SELECT candidate.id FROM organization_subscriptions AS candidate
+      WHERE candidate.organization_id = user.organization_id
+      ORDER BY CASE candidate.status WHEN 'active' THEN 0 ELSE 1 END,
+        candidate.current_period_end DESC
+      LIMIT 1
+    )
+    ORDER BY user.created_at DESC
+    LIMIT ?
+  `),
+  listAdminUserMemberships: db.prepare(`
+    SELECT membership.id, membership.organization_id, membership.authority_role,
+      membership.app_role, membership.status, membership.router_access_mode,
+      membership.invitation_status, membership.created_at, membership.accepted_at,
+      organization.name AS organization_name, organization.status AS organization_status
+    FROM organization_memberships AS membership
+    JOIN organizations AS organization ON organization.id = membership.organization_id
+    WHERE membership.user_id = ?
+    ORDER BY CASE membership.authority_role WHEN 'owner' THEN 0 ELSE 1 END,
+      organization.name COLLATE NOCASE
+  `),
+  listAdminUserSubscriptions: db.prepare(`
+    SELECT subscription.*, organization.name AS organization_name
+    FROM organization_subscriptions AS subscription
+    JOIN organizations AS organization ON organization.id = subscription.organization_id
+    WHERE subscription.organization_id IN (
+      SELECT organization_id FROM organization_memberships WHERE user_id = ?
+      UNION
+      SELECT organization_id FROM organization_users WHERE id = ?
+    )
+    ORDER BY subscription.current_period_start DESC, subscription.created_at DESC
+  `),
+  listAdminUserRouters: db.prepare(`
+    SELECT router.id, router.organization_id, organization.name AS organization_name,
+      router.name, router.label, router.model, router.board_name, router.serial_number,
+      router.routeros_version, router.local_ip, router.hotspot_address,
+      router.connection_mode, router.status, router.last_seen_at, router.created_at,
+      router.updated_at, router.decommission_status,
+      (SELECT COUNT(*) FROM organization_tickets AS ticket
+        WHERE ticket.router_id = router.id AND ticket.deleted_at IS NULL) AS ticket_count,
+      (SELECT COUNT(*) FROM organization_tickets AS ticket
+        WHERE ticket.router_id = router.id AND ticket.activated_at IS NOT NULL
+          AND ticket.deleted_at IS NULL) AS activated_ticket_count,
+      (SELECT COALESCE(SUM(ticket.downloaded_bytes), 0) FROM organization_tickets AS ticket
+        WHERE ticket.router_id = router.id AND ticket.deleted_at IS NULL) AS downloaded_bytes,
+      (SELECT COALESCE(SUM(ticket.uploaded_bytes), 0) FROM organization_tickets AS ticket
+        WHERE ticket.router_id = router.id AND ticket.deleted_at IS NULL) AS uploaded_bytes,
+      (SELECT COUNT(*) FROM organization_ticket_batches AS batch
+        WHERE batch.router_id = router.id) AS batch_count,
+      (SELECT COUNT(*) FROM organization_activity_logs AS activity
+        WHERE activity.router_id = router.id) AS activity_count
+    FROM organization_routers AS router
+    JOIN organizations AS organization ON organization.id = router.organization_id
+    WHERE router.deleted_at IS NULL AND router.organization_id IN (
+      SELECT organization_id FROM organization_memberships WHERE user_id = ?
+      UNION
+      SELECT organization_id FROM organization_users WHERE id = ?
+    )
+    ORDER BY organization.name COLLATE NOCASE, router.label COLLATE NOCASE
+  `),
+  findAdminUserRouter: db.prepare(`
+    SELECT router.id, router.organization_id, organization.name AS organization_name,
+      router.name, router.label, router.model, router.board_name, router.serial_number,
+      router.routeros_version, router.local_ip, router.hotspot_address, router.notes,
+      router.api_port, router.api_ssl_port, router.connection_mode, router.status,
+      router.last_seen_at, router.decommission_status, router.decommission_requested_at,
+      router.decommission_error_code, router.created_at, router.updated_at,
+      CASE WHEN router.vpn_json IS NULL THEN 0 ELSE 1 END AS vpn_configured
+    FROM organization_routers AS router
+    JOIN organizations AS organization ON organization.id = router.organization_id
+    WHERE router.id = ? AND router.deleted_at IS NULL AND router.organization_id IN (
+      SELECT organization_id FROM organization_memberships WHERE user_id = ?
+      UNION
+      SELECT organization_id FROM organization_users WHERE id = ?
+    )
+    LIMIT 1
+  `),
+  adminRouterTicketStats: db.prepare(`
+    SELECT COUNT(*) AS ticket_count,
+      SUM(CASE WHEN activated_at IS NOT NULL THEN 1 ELSE 0 END) AS activated_ticket_count,
+      SUM(CASE WHEN completed_at IS NOT NULL THEN 1 ELSE 0 END) AS completed_ticket_count,
+      COALESCE(SUM(printed_count), 0) AS print_count,
+      COALESCE(SUM(downloaded_bytes), 0) AS downloaded_bytes,
+      COALESCE(SUM(uploaded_bytes), 0) AS uploaded_bytes,
+      COALESCE(SUM(uptime_seconds), 0) AS uptime_seconds,
+      MAX(last_router_sync_at) AS last_ticket_sync_at
+    FROM organization_tickets
+    WHERE router_id = ? AND deleted_at IS NULL
+  `),
+  listAdminRouterTickets: db.prepare(`
+    SELECT id, username, status, mac_address, ip_address, activated_at, completed_at,
+      expires_at, printed_count, downloaded_bytes, uploaded_bytes, uptime_seconds,
+      last_router_sync_at, sync_status, created_at
+    FROM organization_tickets
+    WHERE router_id = ? AND deleted_at IS NULL
+    ORDER BY COALESCE(last_router_sync_at, updated_at) DESC
+    LIMIT ?
+  `),
+  listAdminRouterBatches: db.prepare(`
+    SELECT id, plan_id, operator_profile, quantity, status, currency, price_snapshot,
+      sync_status, created_by_name, created_at
+    FROM organization_ticket_batches
+    WHERE router_id = ?
+    ORDER BY created_at DESC
+    LIMIT ?
+  `),
+  listAdminRouterActivity: db.prepare(`
+    SELECT id, level, category, user_message, technical_message, created_by_name,
+      created_by_email, created_by_role, created_at
+    FROM organization_activity_logs
+    WHERE router_id = ?
+    ORDER BY created_at DESC
+    LIMIT ?
+  `),
   updateOrganizationMember: db.prepare(`
     UPDATE organization_users
     SET name = ?, app_role = ?, router_access_mode = ?, status = ?, updated_at = ?
@@ -1263,6 +1424,10 @@ const statements = {
   `),
   consumeOrganizationPasswordReset: db.prepare(`
     UPDATE organization_password_reset_tokens SET used_at = ? WHERE id = ?
+  `),
+  consumePendingOrganizationPasswordResets: db.prepare(`
+    UPDATE organization_password_reset_tokens SET used_at = ?
+    WHERE user_id = ? AND used_at IS NULL
   `),
   findSaasRegistrationVerificationByEmail: db.prepare(`
     SELECT * FROM saas_registration_verifications WHERE email = ? LIMIT 1
@@ -7307,6 +7472,405 @@ const handlers = [
       created_by: currentAdmin.id
     });
     return { admin: adminResponse(target), ...reset };
+  }),
+
+  route("POST", "/v1/admin/users/list", async (request, body) => {
+    requireAdmin(request, ["owner", "admin", "support"]);
+    const limit = body.limit === undefined ? 500 : requireInteger(body, "limit", 1, 1000);
+    const users = statements.listAdminOrganizationUsers.all(limit).map((user) => ({
+      ...user,
+      invitation_pending: Boolean(user.invitation_pending),
+      failed_login_count: Number(user.failed_login_count),
+      organization_count: Number(user.organization_count),
+      device_count: Number(user.device_count),
+      is_locked: Boolean(user.locked_until && Date.parse(user.locked_until) > Date.now())
+    }));
+    return { users };
+  }),
+
+  route("POST", "/v1/admin/users/detail", async (request, body) => {
+    requireAdmin(request, ["owner", "admin", "support"]);
+    const userId = requireText(body, "user_id", 128);
+    const user = statements.findOrganizationUserById.get(userId);
+    if (!user) throw new HttpError(404, "Utilisateur introuvable.");
+    const organization = statements.findOrganizationById.get(user.organization_id);
+    const memberships = statements.listAdminUserMemberships.all(userId);
+    if (memberships.length === 0 && organization) {
+      memberships.push({
+        id: null,
+        organization_id: organization.id,
+        organization_name: organization.name,
+        organization_status: organization.status,
+        authority_role: user.role,
+        app_role: user.app_role,
+        status: user.status,
+        router_access_mode: user.router_access_mode,
+        invitation_status: user.invitation_pending ? "pending" : "accepted",
+        created_at: user.created_at,
+        accepted_at: user.invitation_pending ? null : user.created_at
+      });
+    }
+    const subscriptions = statements.listAdminUserSubscriptions.all(userId, userId).map((item) => ({
+      ...organizationSubscriptionResponse(item),
+      organization_id: item.organization_id,
+      organization_name: item.organization_name,
+      source: String(item.payment_order_id).startsWith("manual:")
+        ? "manual"
+        : String(item.payment_order_id).startsWith("trial:")
+          ? "trial"
+          : String(item.payment_order_id).startsWith("legacy-license:") ? "migration" : "payment",
+      created_at: item.created_at
+    }));
+    const routers = statements.listAdminUserRouters.all(userId, userId).map((router) => ({
+      ...router,
+      ticket_count: Number(router.ticket_count),
+      activated_ticket_count: Number(router.activated_ticket_count),
+      downloaded_bytes: Number(router.downloaded_bytes),
+      uploaded_bytes: Number(router.uploaded_bytes),
+      batch_count: Number(router.batch_count),
+      activity_count: Number(router.activity_count)
+    }));
+    return {
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+        app_role: user.app_role,
+        status: user.status,
+        invitation_pending: Boolean(user.invitation_pending),
+        failed_login_count: Number(user.failed_login_count),
+        locked_until: user.locked_until,
+        created_at: user.created_at,
+        last_login_at: user.last_login_at
+      },
+      memberships,
+      subscriptions,
+      routers
+    };
+  }),
+
+  route("POST", "/v1/admin/users/set-status", async (request, body) => {
+    const currentAdmin = requireAdmin(request, ["owner", "admin"]);
+    const userId = requireText(body, "user_id", 128);
+    const user = statements.findOrganizationUserById.get(userId);
+    if (!user) throw new HttpError(404, "Utilisateur introuvable.");
+    const status = requireText(body, "status", 16);
+    if (!["active", "disabled"].includes(status)) {
+      throw new HttpError(400, "Statut utilisateur invalide.");
+    }
+    const reason = requireText(body, "reason", 500);
+    const updatedAt = nowIso();
+    let revokedSessions = 0;
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      statements.setOrganizationUserStatus.run(status, updatedAt, userId);
+      if (status === "disabled") {
+        revokedSessions = Number(
+          statements.revokeOrganizationUserSessions.run(updatedAt, userId).changes
+        );
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    logEvent(request, null, `organization_user_${status}`, user.organization_id, null, {
+      user_id: userId,
+      previous_status: user.status,
+      reason,
+      sessions_revoked: revokedSessions,
+      created_by: currentAdmin.id
+    });
+    return {
+      ok: true,
+      status,
+      sessions_revoked: revokedSessions,
+      message: status === "active"
+        ? "Le compte utilisateur a été réactivé."
+        : "Le compte utilisateur a été désactivé et ses sessions ont été fermées."
+    };
+  }),
+
+  route("POST", "/v1/admin/users/unlock", async (request, body) => {
+    const currentAdmin = requireAdmin(request, ["owner", "admin"]);
+    const userId = requireText(body, "user_id", 128);
+    const user = statements.findOrganizationUserById.get(userId);
+    if (!user) throw new HttpError(404, "Utilisateur introuvable.");
+    const reason = requireText(body, "reason", 500);
+    const updatedAt = nowIso();
+    const wasLocked = Boolean(user.locked_until && Date.parse(user.locked_until) > Date.now());
+    statements.unlockOrganizationUser.run(updatedAt, userId);
+    logEvent(request, null, "organization_user_unlocked", user.organization_id, null, {
+      user_id: userId,
+      was_locked: wasLocked,
+      previous_failed_login_count: Number(user.failed_login_count),
+      reason,
+      created_by: currentAdmin.id
+    });
+    return {
+      ok: true,
+      was_locked: wasLocked,
+      message: wasLocked
+        ? "Le compte utilisateur a été déverrouillé."
+        : "Les échecs de connexion ont été remis à zéro."
+    };
+  }),
+
+  route("POST", "/v1/admin/users/force-logout", async (request, body) => {
+    const currentAdmin = requireAdmin(request, ["owner", "admin"]);
+    const userId = requireText(body, "user_id", 128);
+    const user = statements.findOrganizationUserById.get(userId);
+    if (!user) throw new HttpError(404, "Utilisateur introuvable.");
+    const reason = requireText(body, "reason", 500);
+    const revokedAt = nowIso();
+    const revokedSessions = Number(
+      statements.revokeOrganizationUserSessions.run(revokedAt, userId).changes
+    );
+    logEvent(request, null, "organization_user_sessions_revoked", user.organization_id, null, {
+      user_id: userId,
+      reason,
+      sessions_revoked: revokedSessions,
+      created_by: currentAdmin.id
+    });
+    return {
+      ok: true,
+      sessions_revoked: revokedSessions,
+      message: revokedSessions > 0
+        ? `${revokedSessions} session(s) utilisateur ont été fermées.`
+        : "Aucune session active n'était ouverte."
+    };
+  }),
+
+  route("POST", "/v1/admin/users/password-reset", async (request, body) => {
+    const currentAdmin = requireAdmin(request, ["owner", "admin"]);
+    const userId = requireText(body, "user_id", 128);
+    const user = statements.findOrganizationUserById.get(userId);
+    if (!user) throw new HttpError(404, "Utilisateur introuvable.");
+    const reason = requireText(body, "reason", 500);
+    const resetToken = randomToken(32);
+    const createdAt = nowIso();
+    const expiresAt = new Date(Date.now() + 30 * 60_000).toISOString();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      statements.consumePendingOrganizationPasswordResets.run(createdAt, userId);
+      statements.insertOrganizationPasswordReset.run(
+        crypto.randomUUID(),
+        userId,
+        hash(resetToken),
+        expiresAt,
+        createdAt
+      );
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    let emailDelivered = false;
+    try {
+      emailDelivered = await deliverOrganizationPasswordReset(user, resetToken, expiresAt);
+    } catch (error) {
+      console.error("Impossible d'envoyer la réinitialisation administrateur:", error.message);
+    }
+    const resetUrl = `${SAAS_PASSWORD_RESET_URL}?token=${encodeURIComponent(resetToken)}`;
+    logEvent(request, null, "organization_user_password_reset_issued", user.organization_id, null, {
+      user_id: userId,
+      reason,
+      email_delivery: emailDelivered ? "sent" : "not_sent",
+      created_by: currentAdmin.id
+    });
+    return {
+      ok: true,
+      reset_token: resetToken,
+      reset_url: resetUrl,
+      expires_at: expiresAt,
+      email_delivery: emailDelivered ? "sent" : "not_sent",
+      message: emailDelivered
+        ? "Le lien de réinitialisation a été envoyé par e-mail."
+        : "Le lien a été généré, mais l'e-mail n'a pas pu être envoyé."
+    };
+  }),
+
+  route("POST", "/v1/admin/users/resend-invitation", async (request, body) => {
+    const currentAdmin = requireAdmin(request, ["owner", "admin"]);
+    const userId = requireText(body, "user_id", 128);
+    const user = statements.findOrganizationUserById.get(userId);
+    if (!user) throw new HttpError(404, "Utilisateur introuvable.");
+    const membershipId = requireText(body, "membership_id", 128);
+    const membership = statements.findOrganizationMembershipById.get(membershipId);
+    if (!membership || membership.user_id !== userId) {
+      throw new HttpError(404, "Invitation utilisateur introuvable.");
+    }
+    if (membership.authority_role === "owner" || membership.invitation_status !== "pending") {
+      throw new HttpError(400, "Cette invitation n'est plus en attente.");
+    }
+    if (membership.status !== "active") {
+      throw new HttpError(400, "Réactivez cet accès avant de renvoyer l'invitation.");
+    }
+    const organization = statements.findOrganizationById.get(membership.organization_id);
+    if (!organization) throw new HttpError(404, "Organisation introuvable.");
+    const reason = requireText(body, "reason", 500);
+    const invitationToken = randomToken(32);
+    const createdAt = nowIso();
+    const expiresAt = new Date(Date.now() + SAAS_INVITATION_TTL_HOURS * 3_600_000).toISOString();
+    const requiresPassword = !user.last_login_at && Boolean(user.invitation_pending);
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      statements.consumePendingOrganizationInvitationTokens.run(createdAt, membership.id);
+      statements.insertOrganizationInvitationToken.run(
+        crypto.randomUUID(),
+        membership.id,
+        hash(invitationToken),
+        requiresPassword ? 1 : 0,
+        expiresAt,
+        createdAt
+      );
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    let emailDelivered = false;
+    try {
+      emailDelivered = await deliverOrganizationInvitation(
+        user,
+        organization,
+        invitationToken,
+        expiresAt,
+        requiresPassword
+      );
+    } catch (error) {
+      console.error("Impossible de renvoyer l'invitation administrateur:", error.message);
+    }
+    const invitationUrl = `${SAAS_INVITATION_URL}?token=${encodeURIComponent(invitationToken)}`;
+    logEvent(request, null, "organization_invitation_admin_resent", organization.id, null, {
+      user_id: userId,
+      membership_id: membership.id,
+      reason,
+      email_delivery: emailDelivered ? "sent" : "not_sent",
+      created_by: currentAdmin.id
+    });
+    return {
+      ok: true,
+      invitation_token: invitationToken,
+      invitation_url: invitationUrl,
+      expires_at: expiresAt,
+      email_delivery: emailDelivered ? "sent" : "not_sent",
+      message: emailDelivered
+        ? "L'invitation a été renvoyée par e-mail."
+        : "Un nouveau lien a été généré, mais l'e-mail n'a pas pu être envoyé."
+    };
+  }),
+
+  route("POST", "/v1/admin/users/assign-subscription", async (request, body) => {
+    const currentAdmin = requireAdmin(request, ["owner", "admin"]);
+    const userId = requireText(body, "user_id", 128);
+    const user = statements.findOrganizationUserById.get(userId);
+    if (!user) throw new HttpError(404, "Utilisateur introuvable.");
+    const organizationId = body.organization_id
+      ? requireText(body, "organization_id", 128)
+      : user.organization_id;
+    const membership = statements.findOrganizationMembership.get(organizationId, userId);
+    if (!membership && organizationId !== user.organization_id) {
+      throw new HttpError(403, "Cet utilisateur n'appartient pas à cette organisation.");
+    }
+    const organization = statements.findOrganizationById.get(organizationId);
+    if (!organization) throw new HttpError(404, "Organisation introuvable.");
+    const plan = statements.findPlanById.get(requireText(body, "plan_id", 128));
+    if (!plan || Boolean(plan.is_reseller) || !Boolean(plan.is_active)) {
+      throw new HttpError(400, "Forfait SaaS actif introuvable.");
+    }
+    const durationDays = body.duration_days === undefined
+      ? Number(plan.duration_days)
+      : requireInteger(body, "duration_days", 1, 3650);
+    const reason = requireText(body, "reason", 500);
+    const createdAt = nowIso();
+    const subscriptionId = crypto.randomUUID();
+    const endsAt = new Date(Date.now() + durationDays * DAY_MS).toISOString();
+    const existing = statements.findActiveOrganizationSubscription.get(organizationId);
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      if (existing) statements.expireOrganizationSubscriptionById.run(createdAt, existing.id);
+      statements.insertOrganizationSubscription.run(
+        subscriptionId,
+        organizationId,
+        plan.id,
+        plan.code,
+        plan.name,
+        Number(plan.router_limit),
+        Number(plan.max_devices ?? 1),
+        deviceLimitMode(plan),
+        0,
+        createdAt,
+        endsAt,
+        "manual:" + subscriptionId,
+        createdAt,
+        createdAt
+      );
+      statements.activateOrganization.run(createdAt, organizationId);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    logEvent(request, null, "manual_subscription_assigned", organizationId, null, {
+      organization_user_id: userId,
+      subscription_id: subscriptionId,
+      plan_id: plan.id,
+      duration_days: durationDays,
+      replaced_subscription_id: existing?.id ?? null,
+      reason,
+      created_by: currentAdmin.id
+    });
+    const subscription = statements.findLatestOrganizationSubscription.get(organizationId);
+    return {
+      subscription: {
+        ...organizationSubscriptionResponse(subscription),
+        organization_id: organizationId,
+        organization_name: organization.name,
+        source: "manual",
+        created_at: subscription.created_at
+      }
+    };
+  }),
+
+  route("POST", "/v1/admin/users/router-detail", async (request, body) => {
+    requireAdmin(request, ["owner", "admin", "support"]);
+    const userId = requireText(body, "user_id", 128);
+    if (!statements.findOrganizationUserById.get(userId)) {
+      throw new HttpError(404, "Utilisateur introuvable.");
+    }
+    const routerId = requireText(body, "router_id", 240);
+    const router = statements.findAdminUserRouter.get(routerId, userId, userId);
+    if (!router) throw new HttpError(404, "Routeur introuvable pour cet utilisateur.");
+    const stats = statements.adminRouterTicketStats.get(routerId);
+    return {
+      router: { ...router, vpn_configured: Boolean(router.vpn_configured) },
+      stats: {
+        ticket_count: Number(stats.ticket_count),
+        activated_ticket_count: Number(stats.activated_ticket_count),
+        completed_ticket_count: Number(stats.completed_ticket_count),
+        print_count: Number(stats.print_count),
+        downloaded_bytes: Number(stats.downloaded_bytes),
+        uploaded_bytes: Number(stats.uploaded_bytes),
+        uptime_seconds: Number(stats.uptime_seconds),
+        last_ticket_sync_at: stats.last_ticket_sync_at
+      },
+      recent_tickets: statements.listAdminRouterTickets.all(routerId, 50).map((ticket) => ({
+        ...ticket,
+        printed_count: Number(ticket.printed_count),
+        downloaded_bytes: Number(ticket.downloaded_bytes),
+        uploaded_bytes: Number(ticket.uploaded_bytes),
+        uptime_seconds: Number(ticket.uptime_seconds)
+      })),
+      recent_batches: statements.listAdminRouterBatches.all(routerId, 30).map((batch) => ({
+        ...batch,
+        quantity: Number(batch.quantity),
+        price_snapshot: batch.price_snapshot === null ? null : Number(batch.price_snapshot)
+      })),
+      activity: statements.listAdminRouterActivity.all(routerId, 100)
+    };
   }),
 
   route("POST", "/v1/admin/resellers/password-reset", async (request, body) => {
