@@ -396,6 +396,9 @@ export function GlobalSettingsPage() {
               <option value={120}>2 heures</option>
               <option value={240}>4 heures</option>
               <option value={480}>8 heures</option>
+              <option value={7 * 24 * 60}>1 semaine</option>
+              <option value={15 * 24 * 60}>15 jours</option>
+              <option value={30 * 24 * 60}>1 mois</option>
             </select>
           </label>
         </div>

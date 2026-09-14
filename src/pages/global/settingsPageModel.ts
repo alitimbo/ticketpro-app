@@ -5,7 +5,7 @@ export type AppSettings = {
 };
 
 export const defaultAppSettings: AppSettings = {
-  sessionTimeoutMinutes: 30
+  sessionTimeoutMinutes: 15 * 24 * 60
 };
 
 const appSettingsStorageKey = "hotspot:app_settings";
@@ -31,8 +31,8 @@ export function saveAppSettings(settings: AppSettings): void {
 }
 
 export function validateAppSettings(settings: AppSettings): string | null {
-  if (settings.sessionTimeoutMinutes < 5 || settings.sessionTimeoutMinutes > 480) {
-    return "Le délai de session doit être entre 5 et 480 minutes.";
+  if (settings.sessionTimeoutMinutes < 5 || settings.sessionTimeoutMinutes > 30 * 24 * 60) {
+    return "Le délai de session doit être entre 5 minutes et 1 mois.";
   }
 
   return null;

@@ -7288,3 +7288,195 @@ a {
 .batch-delete-progress small {
   color: var(--text-muted);
 }
+
+/* Inventaire routeurs : cartes compactes, pensées pour lire un parc dense. */
+.router-grid {
+  grid-template-columns: repeat(auto-fill, minmax(238px, 1fr));
+  gap: 10px;
+}
+
+.router-grid .router-card {
+  gap: 7px;
+  min-height: 0;
+  padding: 10px;
+  border-radius: 12px;
+  box-shadow: none;
+}
+
+.router-grid .router-card:hover {
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
+}
+
+.router-grid .router-card__header {
+  grid-template-columns: 12px 34px minmax(0, 1fr) 34px;
+  align-items: center;
+  gap: 7px;
+}
+
+.router-grid .router-card__status {
+  display: grid;
+  min-height: 34px;
+  place-items: center;
+}
+
+.router-grid .router-card__status .status-dot {
+  gap: 0;
+  font-size: 0;
+}
+
+.router-grid .router-card__status .status-dot::before {
+  width: 8px;
+  height: 8px;
+  box-shadow: 0 0 0 3px var(--dot-bg);
+}
+
+/* Le battement confirme un routeur joignable, sans déplacer ni recharger la carte. */
+.router-grid .router-card .status-dot--active::before {
+  animation: router-online-heartbeat 1.8s ease-in-out infinite;
+}
+
+@keyframes router-online-heartbeat {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 3px var(--dot-bg);
+  }
+
+  20% {
+    transform: scale(1.18);
+    box-shadow: 0 0 0 6px var(--color-success-soft);
+  }
+
+  38% {
+    transform: scale(1);
+    box-shadow: 0 0 0 3px var(--dot-bg);
+  }
+
+  54% {
+    transform: scale(1.1);
+    box-shadow: 0 0 0 5px var(--color-success-soft);
+  }
+
+  70% {
+    transform: scale(1);
+    box-shadow: 0 0 0 3px var(--dot-bg);
+  }
+}
+
+.router-grid .router-connection-indicator {
+  font-size: 0;
+}
+
+.router-grid .router-connection-indicator svg {
+  width: 13px;
+  height: 13px;
+}
+
+.router-grid .router-card__icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  color: var(--color-primary-strong);
+  background: var(--color-surface-muted);
+}
+
+.router-grid .router-card__icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.router-grid .router-card__identity {
+  display: grid;
+  gap: 1px;
+}
+
+.router-grid .router-card__zone-pill {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 1px 8px 2px;
+  border-radius: 999px;
+  color: var(--color-primary-strong);
+  background: var(--color-primary-soft);
+  font-size: 0.62rem;
+  font-weight: 820;
+  letter-spacing: 0.01em;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.router-grid .router-card__header h3 {
+  font-size: 0.86rem;
+  line-height: 1.2;
+}
+
+.router-grid .router-card__header p {
+  margin-top: 0;
+  font-size: 0.68rem;
+  line-height: 1.25;
+}
+
+.router-grid .action-menu__button {
+  width: 34px;
+  min-height: 34px;
+  padding: 0;
+}
+
+.router-grid .router-card__details--compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px 10px;
+  padding-top: 7px;
+  border-top: 1px solid var(--color-border);
+}
+
+.router-grid .router-card__details--compact div {
+  gap: 1px;
+}
+
+.router-grid .router-card__details--compact dt {
+  font-size: 0.61rem;
+  font-weight: 720;
+  letter-spacing: 0.01em;
+}
+
+.router-grid .router-card__details--compact dd {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.71rem;
+  font-weight: 760;
+  line-height: 1.2;
+}
+
+.router-grid .router-card__details--compact dd svg {
+  flex: 0 0 auto;
+  width: 11px;
+  height: 11px;
+  color: var(--color-primary);
+}
+
+@media (max-width: 520px) {
+  .router-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .router-grid .router-card__header {
+    grid-template-columns: 12px 34px minmax(0, 1fr) 34px;
+  }
+
+  .router-grid .router-card__status,
+  .router-grid .router-card__header > :last-child {
+    grid-column: auto;
+    grid-row: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .router-grid .router-card .status-dot--active::before {
+    animation: none;
+  }
+}

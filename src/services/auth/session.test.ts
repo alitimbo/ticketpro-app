@@ -52,4 +52,8 @@ describe("session", () => {
     expect(isSessionExpired(session, 600_000)).toBe(false);
     expect(isSessionExpired(session, 601_000)).toBe(true);
   });
+
+  it("utilise quinze jours lorsqu'aucune préférence n'est enregistrée", () => {
+    expect(getConfiguredSessionTimeoutMs()).toBe(15 * 24 * 60 * 60 * 1000);
+  });
 });

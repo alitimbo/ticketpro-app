@@ -42,7 +42,6 @@ import {
   StatusDot
 } from "../../shared/ui";
 import {
-  connectionModeLabel,
   createRouterFromForm,
   demoRouters,
   emptyRouterFormValues,
@@ -359,7 +358,11 @@ export function RoutersPage() {
   const testConnection = async (router: RouterCardData, options: { silent?: boolean } = {}) => {
     if (connectionAttemptsRef.current.has(router.id)) return;
     connectionAttemptsRef.current.add(router.id);
-    setConnectingRouterIds((current) => new Set(current).add(router.id));
+    // Les contrôles de santé périodiques actualisent l'état sans faire clignoter
+    // chaque carte. Le retour visuel reste réservé au test déclenché par l'utilisateur.
+    if (!options.silent) {
+      setConnectingRouterIds((current) => new Set(current).add(router.id));
+    }
     if (!options.silent) setMessage("Test de connexion en cours…");
 
     try {
@@ -421,11 +424,13 @@ export function RoutersPage() {
       if (!options.silent) setMessage(result.message);
     } finally {
       connectionAttemptsRef.current.delete(router.id);
-      setConnectingRouterIds((current) => {
-        const next = new Set(current);
-        next.delete(router.id);
-        return next;
-      });
+      if (!options.silent) {
+        setConnectingRouterIds((current) => {
+          const next = new Set(current);
+          next.delete(router.id);
+          return next;
+        });
+      }
     }
   };
 
@@ -1021,12 +1026,7 @@ function RouterCard({ canDelete, canEdit, isConnecting, onConfigureRemote, onDel
       onClick={onOpen}
     >
       <header className="router-card__header">
-        <div className="router-card__icon"><Router aria-hidden="true" /></div>
-        <div className="router-card__identity">
-          <h3 title={routerName}>{routerName}</h3>
-          <p title={`${router.model} · ${router.boardName}`}>{router.model} · {router.boardName}</p>
-        </div>
-        <div aria-live="polite" className="router-card__status">
+        <div aria-live="polite" className="router-card__status" title={statusLabels[router.status]}>
           {isConnecting ? (
             <span className="router-connection-indicator router-connection-indicator--connecting">
               <LoaderCircle aria-hidden="true" /> Connexion…
@@ -1040,43 +1040,21 @@ function RouterCard({ canDelete, canEdit, isConnecting, onConfigureRemote, onDel
             />
           )}
         </div>
+        <div className="router-card__icon"><Router aria-hidden="true" /></div>
+        <div className="router-card__identity">
+          <span className="router-card__zone-pill" title={router.hotspotAddress || zoneName}>{zoneName}</span>
+          <h3 title={routerName}>{routerName}</h3>
+          <p title={`${router.model} · ${router.boardName}`}>{router.model} · {router.boardName}</p>
+        </div>
         <ActionMenu items={menuItems} />
       </header>
 
-      <div className="router-card__zone" title={router.hotspotAddress || zoneName}>
-        <MapPin aria-hidden="true" />
-        <span>WiFi Zone</span>
-        <strong>{zoneName}</strong>
-        {router.hotspotAddress ? <small>{router.hotspotAddress}</small> : null}
-      </div>
-
-      <dl className="router-card__details">
-        <div><dt>Adresse IP</dt><dd title={router.ipAddress}>{router.ipAddress}</dd></div>
-        <div><dt>Dernière connexion</dt><dd title={router.lastSeenAt}>{lastSeenLabel}</dd></div>
+      <dl className="router-card__details router-card__details--compact">
+        <div><dt>Identifiant</dt><dd title={router.serialNumber}>{router.serialNumber || router.boardName}</dd></div>
+        <div><dt>Adresse</dt><dd title={router.ipAddress}><MapPin aria-hidden="true" />{router.ipAddress}</dd></div>
+        <div><dt>RouterOS</dt><dd>{router.routerOsVersion || "Non relevé"}</dd></div>
+        <div><dt>Dernière activité</dt><dd title={router.lastSeenAt}>{lastSeenLabel}</dd></div>
       </dl>
-
-      <footer className="router-card__footer">
-        <span className="router-card__mode">{connectionModeLabel(router.preferredMode)}</span>
-        <div className="router-card__quick-actions">
-          <button
-            disabled={isConnecting}
-            onClick={(event) => { event.stopPropagation(); onTest(); }}
-            title="Tester la connexion"
-            type="button"
-          >
-            {isConnecting ? <LoaderCircle aria-hidden="true" /> : <Search aria-hidden="true" />}
-            {isConnecting ? "Connexion…" : "Tester"}
-          </button>
-          <button
-            className="router-card__open"
-            onClick={(event) => { event.stopPropagation(); onOpen(); }}
-            title="Ouvrir le routeur"
-            type="button"
-          >
-            <Eye aria-hidden="true" /> Ouvrir
-          </button>
-        </div>
-      </footer>
     </article>
   );
 }

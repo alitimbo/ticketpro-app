@@ -2,7 +2,7 @@ import type { AuthSession, UserRole } from "../../domain/auth";
 import { permissionsByRole, roleLabels } from "./permissions";
 
 export const authSessionKey = "hotspot:auth_session";
-export const sessionTimeoutMs = 30 * 60 * 1000;
+export const sessionTimeoutMs = 15 * 24 * 60 * 60 * 1000;
 const appSettingsStorageKey = "hotspot:app_settings";
 const developmentMainAccountEmail = "doumacorporation@gmail.com";
 const developmentMainAccountId = "account-douma-demo";
@@ -24,7 +24,7 @@ export function getConfiguredSessionTimeoutMs(): number {
     };
     const minutes = Number(settings.sessionTimeoutMinutes);
 
-    if (!Number.isFinite(minutes) || minutes < 5 || minutes > 480) {
+    if (!Number.isFinite(minutes) || minutes < 5 || minutes > 30 * 24 * 60) {
       return sessionTimeoutMs;
     }
 
