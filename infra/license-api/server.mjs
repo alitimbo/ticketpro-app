@@ -440,7 +440,7 @@ db.exec(`
     registered_by_user_id TEXT REFERENCES organization_users(id) ON DELETE SET NULL,
     installation_id TEXT NOT NULL,
     name TEXT NOT NULL,
-    platform TEXT NOT NULL CHECK(platform IN ('windows', 'macos', 'linux')),
+    platform TEXT NOT NULL CHECK(platform IN ('windows', 'macos', 'linux', 'android', 'ios')),
     os_version TEXT,
     app_version TEXT NOT NULL,
     status TEXT NOT NULL CHECK(status IN ('active', 'offline', 'stale', 'revoked')),
@@ -448,6 +448,7 @@ db.exec(`
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     revoked_at TEXT,
+    key_rotation_requested_at TEXT,
     UNIQUE (organization_id, installation_id)
   );
 
@@ -839,6 +840,8 @@ ensureColumn("organization_generated_files", "print_archive_iv", "TEXT");
 ensureColumn("organization_generated_files", "print_archive_tag", "TEXT");
 ensureColumn("organization_generated_files", "print_archive_version", "INTEGER");
 ensureColumn("organization_generated_files", "print_archive_updated_at", "TEXT");
+ensureColumn("organization_devices", "key_rotation_requested_at", "TEXT");
+migrateOrganizationDevicesForMobilePlatforms();
 migrateOrganizationVpnPeersForSharedDevices();
 
 db.exec(`
@@ -1799,9 +1802,19 @@ const statements = {
       last_seen_at = ?, updated_at = ?
     WHERE organization_id = ? AND id = ?
   `),
+  requestOrganizationDeviceKeyRotation: db.prepare(`
+    UPDATE organization_devices
+    SET key_rotation_requested_at = ?, updated_at = ?
+    WHERE organization_id = ? AND id = ? AND status <> 'revoked'
+  `),
+  clearOrganizationDeviceKeyRotation: db.prepare(`
+    UPDATE organization_devices
+    SET key_rotation_requested_at = NULL, updated_at = ?
+    WHERE organization_id = ? AND id = ?
+  `),
   revokeOrganizationDevice: db.prepare(`
     UPDATE organization_devices
-    SET status = 'revoked', revoked_at = ?, updated_at = ?
+    SET status = 'revoked', revoked_at = ?, updated_at = ?, key_rotation_requested_at = NULL
     WHERE organization_id = ? AND id = ? AND status <> 'revoked'
   `),
   restoreOrganizationDevice: db.prepare(`
@@ -2395,6 +2408,62 @@ function ensureColumn(table, column, definition) {
 }
 
 /**
+ * SQLite cannot alter a CHECK constraint in place. Rebuild the device table
+ * once so native Android and iOS installations can use the same managed-device
+ * provisioning lifecycle as desktop installations.
+ */
+function migrateOrganizationDevicesForMobilePlatforms() {
+  const table = db.prepare(`
+    SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'organization_devices'
+  `).get();
+  const definition = String(table?.sql ?? "");
+  if (definition.includes("'android'") && definition.includes("'ios'")) return;
+
+  db.exec("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;");
+  try {
+    db.exec(`
+      CREATE TABLE organization_devices_mobile (
+        id TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+        registered_by_user_id TEXT REFERENCES organization_users(id) ON DELETE SET NULL,
+        installation_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        platform TEXT NOT NULL CHECK(platform IN ('windows', 'macos', 'linux', 'android', 'ios')),
+        os_version TEXT,
+        app_version TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('active', 'offline', 'stale', 'revoked')),
+        last_seen_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        revoked_at TEXT,
+        key_rotation_requested_at TEXT,
+        UNIQUE (organization_id, installation_id)
+      );
+      INSERT INTO organization_devices_mobile (
+        id, organization_id, registered_by_user_id, installation_id, name,
+        platform, os_version, app_version, status, last_seen_at, created_at,
+        updated_at, revoked_at, key_rotation_requested_at
+      )
+      SELECT
+        id, organization_id, registered_by_user_id, installation_id, name,
+        platform, os_version, app_version, status, last_seen_at, created_at,
+        updated_at, revoked_at, key_rotation_requested_at
+      FROM organization_devices;
+      DROP TABLE organization_devices;
+      ALTER TABLE organization_devices_mobile RENAME TO organization_devices;
+      CREATE INDEX idx_organization_devices_organization
+        ON organization_devices(organization_id, status, last_seen_at DESC);
+    `);
+    db.exec("COMMIT;");
+  } catch (error) {
+    db.exec("ROLLBACK;");
+    throw error;
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+
+/**
  * A Windows installation has one WireGuard identity, even when its user is a
  * member of several organizations. Older installations made public_key and
  * vpn_ip globally unique, preventing the same device from joining a second
@@ -2755,7 +2824,7 @@ function requireVpnPublicKey(body, field = "public_key") {
 
 function normalizeDevicePlatform(value) {
   const platform = String(value ?? "windows").trim().toLowerCase();
-  if (!['windows', 'macos', 'linux'].includes(platform)) {
+  if (!['windows', 'macos', 'linux', 'android', 'ios'].includes(platform)) {
     throw new HttpError(400, "Plateforme d'appareil invalide.", {
       code: "DEVICE_PLATFORM_INVALID"
     });
@@ -2785,6 +2854,7 @@ function organizationDeviceResponse(record) {
     last_seen_at: record.last_seen_at,
     created_at: record.created_at,
     revoked_at: record.revoked_at ?? null,
+    key_rotation_requested_at: record.key_rotation_requested_at ?? null,
     vpn: record.peer_id ? {
       gateway_id: record.gateway_id,
       assigned_address: record.vpn_ip ?? null,
@@ -9228,9 +9298,37 @@ const handlers = [
       ok: true,
       device_id: device.id,
       status: device.status,
+      key_rotation_required: Boolean(device.key_rotation_requested_at),
       vpn_access: device.status !== "revoked"
         && organizationSubscriptionLifecycle(subscription).isActive
     };
+  }),
+
+  route("POST", "/v1/saas/devices/request-key-rotation", async (request, body) => {
+    if (isRateLimited(request)) throw new HttpError(429, "Trop de tentatives. RÃ©essayez plus tard.");
+    const { organization, user, membership } = requireOrganizationPermission(request, "global.vpn");
+    const deviceId = requireText(body, "device_id", 200);
+    const device = statements.findOrganizationDeviceById.get(organization.id, deviceId);
+    if (!device || device.status === "revoked") {
+      throw new HttpError(404, "Appareil actif introuvable.", { code: "DEVICE_NOT_FOUND" });
+    }
+    if (!['android', 'ios'].includes(device.platform)) {
+      throw new HttpError(409, "La rotation distante est reservee aux appareils mobiles.", {
+        code: "DEVICE_REMOTE_ROTATION_UNSUPPORTED"
+      });
+    }
+    if (device.registered_by_user_id !== user.id && membership.authority_role !== "owner") {
+      throw new HttpError(403, "Seul le proprietaire peut demander la rotation d'un autre membre.", {
+        code: "DEVICE_KEY_ROTATION_FORBIDDEN"
+      });
+    }
+    const now = nowIso();
+    statements.requestOrganizationDeviceKeyRotation.run(now, now, organization.id, device.id);
+    logEvent(request, null, "saas_device_key_rotation_requested", organization.id, null, {
+      device_id: device.id,
+      organization_user_id: user.id
+    });
+    return { ok: true, device_id: device.id, key_rotation_requested_at: now };
   }),
 
   route("POST", "/v1/saas/devices/recover", async (request, body) => {
@@ -9530,6 +9628,7 @@ const handlers = [
       nowIso(),
       device.id
     );
+    statements.clearOrganizationDeviceKeyRotation.run(nowIso(), organization.id, device.id);
     vpnPeer = statements.findOrganizationVpnPeerByDevice.get(organization.id, device.id);
     const joinedDevice = statements.listOrganizationDevices
       .all(organization.id)
@@ -10291,4 +10390,3 @@ const vpnReconciliationTimer = setInterval(() => {
   ? VPN_RECONCILIATION_INTERVAL_MS
   : 60_000);
 vpnReconciliationTimer.unref();
-

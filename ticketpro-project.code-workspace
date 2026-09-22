@@ -8,6 +8,9 @@
 		},
 		{
 			"path": "../ticketprodashboard"
+		},
+		{
+			"path": "../ticketprowifi"
 		}
 	],
 	"settings": {}

@@ -32,6 +32,7 @@ export {
   registerSaasTrial,
   resendSaasEmailVerificationCode,
   requestSaasPasswordReset,
+  requestSaasDeviceKeyRotation,
   removeSaasTeamMember,
   prepareSaasRouterDecommission,
   removeSaasRouterRecoverySnapshot,

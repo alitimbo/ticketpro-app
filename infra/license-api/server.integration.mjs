@@ -2326,6 +2326,82 @@ test("le parcours SaaS simple crée le compte, active l'abonnement et ouvre une 
     null
   );
 
+  const androidDevice = await api("/v1/saas/devices/register", {
+    token: loginAfterReset.payload.session.token,
+    body: {
+      installation_id: "d23e4567-e89b-42d3-a456-426614174333",
+      public_key: `${"o".repeat(43)}=`,
+      name: "Pixel TicketPro",
+      platform: "android",
+      os_version: "16",
+      app_version: "1.0.0"
+    }
+  });
+  assert.equal(androidDevice.status, 200, JSON.stringify(androidDevice.payload));
+  assert.equal(androidDevice.payload.device.platform, "android");
+
+  const iosDevice = await api("/v1/saas/devices/register", {
+    token: loginAfterReset.payload.session.token,
+    body: {
+      installation_id: "e23e4567-e89b-42d3-a456-426614174444",
+      public_key: `${"p".repeat(43)}=`,
+      name: "iPhone TicketPro",
+      platform: "ios",
+      os_version: "20.0",
+      app_version: "1.0.0"
+    }
+  });
+  assert.equal(iosDevice.status, 200, JSON.stringify(iosDevice.payload));
+  assert.equal(iosDevice.payload.device.platform, "ios");
+  assert.equal(iosDevice.payload.active_device_count, 5);
+
+  const requestedAndroidRotation = await api("/v1/saas/devices/request-key-rotation", {
+    token: loginAfterReset.payload.session.token,
+    body: { device_id: androidDevice.payload.device.id }
+  });
+  assert.equal(requestedAndroidRotation.status, 200, JSON.stringify(requestedAndroidRotation.payload));
+
+  const androidHeartbeat = await api("/v1/saas/devices/heartbeat", {
+    token: loginAfterReset.payload.session.token,
+    body: {
+      installation_id: androidDevice.payload.device.installation_id,
+      app_version: "1.0.0"
+    }
+  });
+  assert.equal(androidHeartbeat.status, 200);
+  assert.equal(androidHeartbeat.payload.vpn_access, true);
+  assert.equal(androidHeartbeat.payload.key_rotation_required, true);
+
+  const rotatedAndroid = await api("/v1/saas/devices/rotate-key", {
+    token: loginAfterReset.payload.session.token,
+    body: {
+      installation_id: androidDevice.payload.device.installation_id,
+      previous_public_key: `${"o".repeat(43)}=`,
+      public_key: `${"q".repeat(43)}=`
+    }
+  });
+  assert.equal(rotatedAndroid.status, 200, JSON.stringify(rotatedAndroid.payload));
+  assert.equal(rotatedAndroid.payload.device.vpn.key_version, 2);
+
+  const heartbeatAfterRotation = await api("/v1/saas/devices/heartbeat", {
+    token: loginAfterReset.payload.session.token,
+    body: {
+      installation_id: androidDevice.payload.device.installation_id,
+      app_version: "1.0.0"
+    }
+  });
+  assert.equal(heartbeatAfterRotation.status, 200);
+  assert.equal(heartbeatAfterRotation.payload.key_rotation_required, false);
+
+  for (const device of [androidDevice.payload.device, iosDevice.payload.device]) {
+    const revoked = await api("/v1/saas/devices/revoke", {
+      token: loginAfterReset.payload.session.token,
+      body: { device_id: device.id }
+    });
+    assert.equal(revoked.status, 200, JSON.stringify(revoked.payload));
+    assert.equal(revoked.payload.status, "revoked");
+  }
+
   const integrationDb = new DatabaseSync(databasePath);
   integrationDb.prepare(`
     UPDATE organization_subscriptions
@@ -3499,4 +3575,3 @@ test("authentification, licences, paiements iPay et crédits revendeur restent c
   assert.equal(restoredSubscription.status, 200);
   assert.equal(restoredSubscription.payload.subscription.status, "active");
 });
-

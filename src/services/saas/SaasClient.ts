@@ -105,7 +105,7 @@ export type SaasDevice = {
   id: string;
   installation_id: string;
   name: string;
-  platform: "windows" | "macos" | "linux" | "unknown";
+  platform: "windows" | "macos" | "linux" | "android" | "ios" | "unknown";
   os_version: string | null;
   app_version: string;
   status: "active" | "offline" | "stale" | "revoked";
@@ -123,6 +123,7 @@ export type SaasDevice = {
   last_seen_at: string | null;
   created_at: string;
   revoked_at: string | null;
+  key_rotation_requested_at: string | null;
 };
 
 export type SaasDeviceRegistration = {
@@ -669,7 +670,7 @@ export async function registerSaasDevice(input: {
   installationId: string;
   publicKey: string;
   name: string;
-  platform: "windows" | "macos" | "linux";
+  platform: "windows" | "macos" | "linux" | "android" | "ios";
   osVersion?: string;
   appVersion: string;
   replacementDeviceId?: string;
@@ -693,7 +694,13 @@ export async function registerSaasDevice(input: {
 export async function heartbeatSaasDevice(input: {
   installationId: string;
   appVersion: string;
-}): Promise<{ ok: boolean; device_id: string; status: SaasDevice["status"]; vpn_access: boolean }> {
+}): Promise<{
+  ok: boolean;
+  device_id: string;
+  status: SaasDevice["status"];
+  vpn_access: boolean;
+  key_rotation_required: boolean;
+}> {
   const token = await requireSessionToken();
   return request(
     "/v1/saas/devices/heartbeat",
@@ -701,6 +708,19 @@ export async function heartbeatSaasDevice(input: {
       installation_id: input.installationId,
       app_version: input.appVersion
     },
+    token
+  );
+}
+
+export async function requestSaasDeviceKeyRotation(deviceId: string): Promise<{
+  ok: boolean;
+  device_id: string;
+  key_rotation_requested_at: string;
+}> {
+  const token = await requireSessionToken();
+  return request(
+    "/v1/saas/devices/request-key-rotation",
+    { device_id: deviceId },
     token
   );
 }

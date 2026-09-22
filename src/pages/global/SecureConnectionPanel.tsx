@@ -8,11 +8,13 @@ import {
   RotateCw,
   ShieldCheck,
   ShieldOff,
+  Smartphone,
   Wrench
 } from "lucide-react";
 import {
   getSaasDeviceInventory,
   recoverCurrentSaasDevice,
+  requestSaasDeviceKeyRotation,
   revokeSaasDevice,
   rotateCurrentSaasDeviceKey,
   type SaasDevice,
@@ -33,7 +35,7 @@ import {
 import { Badge, Button, Card, ConfirmDialog, EmptyState, PasswordField } from "../../shared/ui";
 import { useAuth } from "../../app/auth/AuthProvider";
 
-type Operation = "connect" | "refresh" | "repair" | "recover" | "revoke" | "replace" | "rotate";
+type Operation = "connect" | "refresh" | "repair" | "recover" | "request-rotation" | "revoke" | "replace" | "rotate";
 
 type SecureConnectionPanelProps = {
   onProviderChange?: (provider: VpnProviderStatus["provider"]) => void;
@@ -177,6 +179,23 @@ export function SecureConnectionPanel({ onProviderChange }: SecureConnectionPane
     }
   };
 
+  const requestMobileKeyRotation = async (device: SaasDevice) => {
+    setOperation("request-rotation");
+    setOperationDeviceId(device.id);
+    setError(null);
+    setMessage(null);
+    try {
+      await requestSaasDeviceKeyRotation(device.id);
+      await refresh();
+      setMessage(`Le renouvellement de la clÃ© a Ã©tÃ© demandÃ© Ã  ${device.name}. Il sera exÃ©cutÃ© automatiquement lorsque l'app mobile contactera TicketPro.`);
+    } catch (rotationError) {
+      setError(vpnErrorMessage(rotationError));
+    } finally {
+      setOperation(null);
+      setOperationDeviceId(null);
+    }
+  };
+
   const recoverCurrentDevice = async () => {
     const device = recoveryDevice;
     if (!device || !recoveryPassword) return;
@@ -308,16 +327,19 @@ export function SecureConnectionPanel({ onProviderChange }: SecureConnectionPane
               const isCurrent = device.installation_id === installationId;
               const busy = operationDeviceId === device.id;
               const state = devicePresentation(device);
+              const DeviceIcon = device.platform === "android" || device.platform === "ios"
+                ? Smartphone
+                : Laptop;
               return (
                 <article className={`device-inventory-row${isCurrent ? " device-inventory-row--current" : ""}`} key={device.id}>
-                  <div className="device-inventory-icon"><Laptop aria-hidden="true" /></div>
+                  <div className="device-inventory-icon"><DeviceIcon aria-hidden="true" /></div>
                   <div className="device-inventory-main">
                     <div className="device-inventory-title">
                       <strong>{device.name}</strong>
                       {isCurrent ? <Badge status="active">Cet appareil</Badge> : null}
                       <Badge status={state.badge}>{state.label}</Badge>
                     </div>
-                    <span>{device.platform === "windows" ? "Windows" : device.platform} · TicketPro {device.app_version}</span>
+                    <span>{devicePlatformLabel(device.platform)} · TicketPro {device.app_version}</span>
                     <small>Dernière activité : {formatDate(device.last_seen_at)}</small>
                   </div>
                   <div className="device-inventory-vpn">
@@ -325,6 +347,18 @@ export function SecureConnectionPanel({ onProviderChange }: SecureConnectionPane
                     <span>Clé version {device.vpn?.key_version ?? 1}</span>
                   </div>
                   <div className="device-inventory-actions">
+                    {!isCurrent
+                      && device.status !== "revoked"
+                      && (device.platform === "android" || device.platform === "ios") ? (
+                      <Button
+                        className={busy && operation === "request-rotation" ? "vpn-button--loading" : ""}
+                        disabled={Boolean(operation) || Boolean(device.key_rotation_requested_at)}
+                        icon={busy && operation === "request-rotation" ? LoaderCircle : RotateCw}
+                        onClick={() => void requestMobileKeyRotation(device)}
+                      >
+                        {device.key_rotation_requested_at ? "Rotation demandÃ©e" : "Nouvelle clÃ©"}
+                      </Button>
+                    ) : null}
                     {isCurrent && device.status !== "revoked" ? (
                       <Button
                         className={busy && operation === "rotate" ? "vpn-button--loading" : ""}
@@ -473,6 +507,18 @@ function devicePresentation(device: SaasDevice) {
   if (device.status === "active") return { badge: "success" as const, label: "En ligne" };
   if (device.status === "stale") return { badge: "warning" as const, label: "Inactif" };
   return { badge: "offline" as const, label: "Hors ligne" };
+}
+
+function devicePlatformLabel(platform: SaasDevice["platform"]): string {
+  const labels: Record<SaasDevice["platform"], string> = {
+    android: "Android",
+    ios: "iPhone / iPad",
+    linux: "Linux",
+    macos: "macOS",
+    unknown: "Plateforme inconnue",
+    windows: "Windows"
+  };
+  return labels[platform];
 }
 
 function vpnErrorMessage(error: unknown): string {
