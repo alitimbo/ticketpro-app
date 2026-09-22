@@ -4,6 +4,6 @@
   "version": "0.1.5",
   "type": "module",
   "dependencies": {
-    "nodemailer": "^9.0.3"
+    "nodemailer": "^9.1.0"
   }
 }
