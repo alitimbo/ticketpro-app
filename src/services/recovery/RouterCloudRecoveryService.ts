@@ -1,7 +1,8 @@
 import type {
   CreateHotspotPlanInput,
   CreateRouterConnectionInput,
-  CreateRouterInput
+  CreateRouterInput,
+  RouterRecord
 } from "../../domain/database";
 import {
   HotspotPlanRepository,
@@ -237,7 +238,8 @@ export class RouterCloudRecoveryService {
           if (this.organizationId && existing.organization_id !== this.organizationId) {
             await this.routers.setOrganizationId(this.accountId, existing.id, this.organizationId);
           }
-          await this.restoreMissingDependents(remote, existing.id, vpnNetwork);
+          const synchronizedRouter = await this.refreshExistingRouterMetadata(remote, existing);
+          await this.restoreMissingDependents(remote, synchronizedRouter.id, vpnNetwork);
           result.skippedRouterIds.push(remote.id);
           continue;
         }
@@ -283,30 +285,44 @@ export class RouterCloudRecoveryService {
     }
 
     const localPlans = await this.plans.listByRouter(localRouterId);
+    const localPlansById = new Map(localPlans.map((plan) => [plan.id, plan]));
+    const localPlansByProfile = new Map(
+      localPlans
+        .filter((plan) => plan.mikrotik_profile_name)
+        .map((plan) => [plan.mikrotik_profile_name!.trim().toLowerCase(), plan])
+    );
     for (const plan of remote.plans) {
-      const matchingLocal = localPlans.find((local) =>
-        local.id === plan.id
-        || (
-          local.mikrotik_profile_name
-          && local.mikrotik_profile_name === plan.mikrotik_profile_name
-        )
-      );
+      const profileKey = plan.mikrotik_profile_name?.trim().toLowerCase() ?? null;
+      const matchingLocal = localPlansById.get(plan.id)
+        ?? (profileKey ? localPlansByProfile.get(profileKey) : undefined);
       let localPlanId = matchingLocal?.id ?? plan.id;
       if (!matchingLocal) {
-        const occupiedPlan = await this.plans.findById(plan.id);
-        localPlanId = occupiedPlan && occupiedPlan.router_id !== localRouterId
-          ? `plan-${crypto.randomUUID()}`
-          : plan.id;
-        await this.plans.create(
-          planInputFromRecovery(localRouterId, localPlanId, plan),
-          {
-            action: "restored",
-            actorProfileId: this.internalProfileId,
-            source: "vps-recovery"
-          }
+        const occupiedPlan = await this.plans.findIncludingDeletedById(plan.id);
+        const planInput = planInputFromRecovery(
+          localRouterId,
+          occupiedPlan && occupiedPlan.router_id !== localRouterId
+            ? `plan-${crypto.randomUUID()}`
+            : plan.id,
+          plan
         );
+        const restoredPlan = occupiedPlan?.router_id === localRouterId
+          ? await this.plans.restore(planInput, {
+              action: "restored",
+              actorProfileId: this.internalProfileId,
+              source: "vps-recovery"
+            })
+          : await this.plans.create(planInput, {
+              action: "restored",
+              actorProfileId: this.internalProfileId,
+              source: "vps-recovery"
+            });
+        localPlanId = restoredPlan.id;
+        localPlansById.set(restoredPlan.id, restoredPlan);
+        if (restoredPlan.mikrotik_profile_name) {
+          localPlansByProfile.set(restoredPlan.mikrotik_profile_name.trim().toLowerCase(), restoredPlan);
+        }
       } else if ((plan.revision ?? 1) > matchingLocal.revision) {
-        await this.plans.update({
+        const updatedPlan = await this.plans.update({
           ...planInputFromRecovery(localRouterId, localPlanId, plan),
           sync_status: matchingLocal.sync_status
         }, {
@@ -314,6 +330,10 @@ export class RouterCloudRecoveryService {
           actorProfileId: this.internalProfileId,
           source: "vps-recovery-newer-revision"
         });
+        localPlansById.set(updatedPlan.id, updatedPlan);
+        if (updatedPlan.mikrotik_profile_name) {
+          localPlansByProfile.set(updatedPlan.mikrotik_profile_name.trim().toLowerCase(), updatedPlan);
+        }
       }
       if (plan.history?.length) {
         await this.plans.importHistory(plan.history.map((entry) => ({
@@ -349,6 +369,43 @@ export class RouterCloudRecoveryService {
         status: "draft"
       });
     }
+  }
+
+  private async refreshExistingRouterMetadata(
+    remote: SaasRouterRecoverySnapshot,
+    existing: RouterRecord
+  ): Promise<RouterRecord> {
+    if (!isRemoteSnapshotNewer(remote.updated_at, existing.updated_at)) {
+      return existing;
+    }
+
+    return this.routers.update({
+      account_id: existing.account_id,
+      api_port: remote.api_port,
+      api_ssl_port: remote.api_ssl_port,
+      board_name: remote.board_name,
+      cloud_router_id: remote.id,
+      connection_mode: remote.connection_mode,
+      created_by_profile_id: existing.created_by_profile_id,
+      encrypted_password: existing.encrypted_password,
+      hotspot_address: remote.hotspot_address,
+      id: existing.id,
+      label: remote.label,
+      last_seen_at: remote.last_seen_at,
+      local_ip: remote.local_ip,
+      model: remote.model,
+      name: remote.name,
+      notes: remote.notes ?? "",
+      organization_id: this.organizationId ?? existing.organization_id ?? null,
+      routeros_version: remote.routeros_version,
+      serial_number: remote.serial_number,
+      status: remote.status,
+      subscription_counted: existing.subscription_counted,
+      sync_status: "synced",
+      updated_at: remote.updated_at,
+      username: remote.username,
+      zone_id: existing.zone_id
+    });
   }
 
   private async ensureVpnNetwork() {
@@ -395,6 +452,14 @@ function unknownErrorMessage(error: unknown): string {
     }
   }
   return "erreur locale inconnue";
+}
+
+function isRemoteSnapshotNewer(remoteUpdatedAt: string | undefined, localUpdatedAt: string): boolean {
+  if (!remoteUpdatedAt) return false;
+  const remoteTimestamp = Date.parse(remoteUpdatedAt);
+  const localTimestamp = Date.parse(localUpdatedAt);
+  return Number.isFinite(remoteTimestamp)
+    && (!Number.isFinite(localTimestamp) || remoteTimestamp > localTimestamp);
 }
 
 function routerInputFromRecovery(

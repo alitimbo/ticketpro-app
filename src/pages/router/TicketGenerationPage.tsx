@@ -67,6 +67,7 @@ import {
   createInitialTicketGenerationState,
   defaultTicketGenerationOptions,
   findConfirmedVoucherBatchUsers,
+  formatDataLimit,
   getSelectedQuantity,
   getTicketSummary,
   inspectVoucherBatchIntegrity,
@@ -556,8 +557,11 @@ export function TicketGenerationPage() {
   const selectedPlanCurrency = normalizeCurrency(selectedPlan?.currency);
   const effectiveDisplaySettings = useMemo<TicketDisplaySettings>(() => ({
     ...displaySettings,
-    currency: selectedPlanCurrency
-  }), [displaySettings, selectedPlanCurrency]);
+    currency: selectedPlanCurrency,
+    // Une limite de données est une condition commerciale du voucher : elle
+    // doit figurer sur l'aperçu comme sur le document remis au client.
+    showDataLimit: displaySettings.showDataLimit || selectedPlan?.dataLimitMb !== null
+  }), [displaySettings, selectedPlan?.dataLimitMb, selectedPlanCurrency]);
   const selectedHotspotServer = hotspotServers.find((server) => server.name === state.selectedServerName) ?? null;
   const ticketHotspotAddress = state.selectedServerName === "all"
     ? selectedRouter?.hotspotAddress?.trim() || ""
@@ -2000,6 +2004,7 @@ function TicketCreationPreviewDialog({
             <aside className="ticket-creation-preview-settings">
               <TicketDisplaySettingsForm
                 companyName={companyName}
+                dataLimitRequired={plan.dataLimitMb !== null}
                 lockedCurrency={normalizeCurrency(plan.currency)}
                 onChange={onSettingsChange}
                 value={displaySettings}
@@ -2268,7 +2273,7 @@ function buildPrintTicketFromGeneratedTicket(
     contactLabel: displaySettings?.showContact
       ? displaySettings.contactNumber.trim() || ownerPhone?.trim() || undefined
       : undefined,
-    dataLimitLabel: plan.dataLimitMb ? `${plan.dataLimitMb} MB` : null,
+    dataLimitLabel: formatDataLimit(plan.dataLimitMb),
     durationLabel: plan.durationMinutes >= 60 && plan.durationMinutes % 60 === 0 ? `${plan.durationMinutes / 60} h` : `${plan.durationMinutes} min`,
     hotspotAddress: displaySettings?.showInstructions === false ? undefined : hotspotAddress?.trim() || undefined,
     id: ticket.id,
@@ -2303,7 +2308,7 @@ function buildCreationPreviewPdfInput(input: {
     createdByProfile: "preview",
     createdByProfileId: "preview",
     currency,
-    dataLimitLabel: input.plan.dataLimitMb ? `${input.plan.dataLimitMb} MB` : null,
+    dataLimitLabel: formatDataLimit(input.plan.dataLimitMb),
     displaySettings: input.displaySettings,
     durationLabel: formatPlanDurationLabel(input.plan.durationMinutes),
     fileName: "apercu-ticketpro.pdf",

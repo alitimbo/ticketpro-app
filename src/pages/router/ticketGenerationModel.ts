@@ -495,7 +495,7 @@ function formatDuration(minutes: number): string {
   return `${minutes} min`;
 }
 
-function formatDataLimit(megabytes: number | null): string | null {
+export function formatDataLimit(megabytes: number | null): string | null {
   if (megabytes === null) {
     return null;
   }
@@ -504,5 +504,5 @@ function formatDataLimit(megabytes: number | null): string | null {
     return `${megabytes / 1024} Go`;
   }
 
-  return `${megabytes} MB`;
+  return `${megabytes} Mo`;
 }

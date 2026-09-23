@@ -184,6 +184,64 @@ describe("RouterCloudRecoveryService", () => {
       .restoreMissingRouters()).rejects.toThrow("organisation");
   });
 
+  it("rejoue une restauration avec plan dupliqué ou archivé et adopte le nom cloud plus récent", async () => {
+    const database = new InMemoryDatabaseClient();
+    await database.initialize();
+    const baseSnapshot = recoverySnapshot();
+    const updatedSnapshot: SaasRouterRecoverySnapshot = {
+      ...baseSnapshot,
+      label: "IB WIFI ZONE",
+      name: "IB WIFI ZONE",
+      plans: [baseSnapshot.plans[0], { ...baseSnapshot.plans[0] }],
+      updated_at: "2099-01-01T00:00:00.000Z"
+    };
+    const cloud = {
+      bootstrapVpn: vi.fn(async () => ({
+        address_pool: "10.250.0.0/24",
+        server_endpoint: "vpn.ticketpro-ne.com",
+        server_port: 51820,
+        server_public_key: "server-public-key"
+      })),
+      getSnapshots: vi.fn(async () => [updatedSnapshot]),
+      saveSnapshot: vi.fn(async (router: SaasRouterRecoverySnapshot) => router)
+    };
+    const service = new RouterCloudRecoveryService(
+      database,
+      "account-recovery",
+      "account-recovery:profile-admin",
+      cloud,
+      "organization-recovery"
+    );
+
+    await expect(service.restoreMissingRouters()).resolves.toMatchObject({
+      restoredRouterIds: ["router-cloud-1"]
+    });
+
+    const routers = new RouterRepository(database);
+    const plans = new HotspotPlanRepository(database);
+    const restoredRouter = await routers.findById("router-cloud-1");
+    expect(await plans.listByRouter("router-cloud-1")).toHaveLength(1);
+
+    await routers.update({
+      ...restoredRouter!,
+      label: "Ancien nom local",
+      name: "Ancien nom local",
+      updated_at: "2026-01-01T00:00:00.000Z"
+    });
+    await plans.remove("plan-cloud-1");
+    expect(await plans.findById("plan-cloud-1")).toBeNull();
+
+    await expect(service.restoreMissingRouters()).resolves.toMatchObject({
+      skippedRouterIds: ["router-cloud-1"]
+    });
+    expect(await routers.findById("router-cloud-1")).toMatchObject({
+      label: "IB WIFI ZONE",
+      name: "IB WIFI ZONE"
+    });
+    await expect(plans.listByRouter("router-cloud-1")).resolves.toEqual([
+      expect.objectContaining({ id: "plan-cloud-1", deleted_at: null })
+    ]);
+  });
 });
 
 function recoverySnapshot(): SaasRouterRecoverySnapshot {

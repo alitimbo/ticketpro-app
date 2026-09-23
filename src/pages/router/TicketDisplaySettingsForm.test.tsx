@@ -33,4 +33,16 @@ describe("TicketDisplaySettingsForm", () => {
     fireEvent.change(screen.getByDisplayValue("CFA"), { target: { value: "XOF" } });
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ currency: "XOF" }));
   });
+  it("locks the data cap when the selected plan requires it", () => {
+    render(
+      <TicketDisplaySettingsForm
+        dataLimitRequired
+        onChange={vi.fn()}
+        value={{ ...defaultTicketDisplaySettings, showDataLimit: false }}
+      />
+    );
+
+    expect(screen.getByText("Volume de données obligatoire pour ce forfait")).toBeInTheDocument();
+    expect(screen.getByLabelText("Volume de données obligatoire pour ce forfait")).toBeDisabled();
+  });
 });

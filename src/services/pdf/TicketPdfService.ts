@@ -448,20 +448,38 @@ function drawEconomyGridTicket(
     ...(showNote && settings?.noteText ? [{ text: settings.noteText }] : [])
   ];
   const footerBottom = y + (showPoweredBy ? (compact ? 8 : 10) : compact ? 3 : 4);
-  const footerTop = y + (showQr ? cellHeight * 0.29 : cellHeight * 0.24);
+  // Le pied de voucher doit rester lisible sur une feuille A4 de 40 tickets :
+  // on lui réserve une zone légèrement plus haute que l'ancienne version.
+  const footerTop = y + (showQr ? cellHeight * 0.31 : cellHeight * 0.3);
   const footerGap = Math.max(
     compact ? 3.4 : 4.2,
     Math.min(compact ? 5.8 : 7, (footerTop - footerBottom) / Math.max(1, footerLines.length))
   );
-  const footerFontSize = footerLines.length > 3
-    ? { maximum: compact ? 3 : 4, minimum: compact ? 2.3 : 3 }
-    : { maximum: compact ? 3.7 : 4.8, minimum: compact ? 2.7 : 3.5 };
+  const footerFontSize = footerLines.length > 4
+    ? { maximum: compact ? 3.25 : 4.2, minimum: compact ? 2.8 : 3.5 }
+    : { maximum: compact ? 3.7 : 4.8, minimum: compact ? 3.1 : 3.8 };
+  // Toutes les informations du pied ont volontairement la même taille. La
+  // ligne la plus longue définit la taille commune : date, volume, portail et
+  // contact restent donc aussi lisibles que le prix, sans déborder du ticket.
+  const widestFooterLine = footerLines.reduce((widest, line) =>
+    estimateTextWidth(normalizePdfText(line.text), footerFontSize.maximum, true) >
+    estimateTextWidth(normalizePdfText(widest), footerFontSize.maximum, true)
+      ? line.text
+      : widest,
+    ""
+  );
+  const sharedFooterFontSize = fitTextSize(
+    widestFooterLine,
+    contentWidth,
+    footerFontSize.maximum,
+    footerFontSize.minimum
+  );
   let footerY = footerBottom + footerGap * Math.max(0, footerLines.length - 1);
   footerLines.forEach((line) => {
     page.text(line.text, centerX, footerY, {
       align: "center",
       font: line.bold ? "bold" : "regular",
-      size: fitTextSize(line.text, contentWidth, footerFontSize.maximum, footerFontSize.minimum)
+      size: sharedFooterFontSize
     });
     footerY -= footerGap;
   });

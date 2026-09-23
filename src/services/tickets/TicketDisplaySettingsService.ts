@@ -33,7 +33,7 @@ export const defaultTicketDisplaySettings: TicketDisplaySettings = {
   noteText: "Conservez ce ticket jusqu'à expiration",
   showContact: false,
   showCreatedAt: false,
-  showDataLimit: false,
+  showDataLimit: true,
   showDuration: true,
   showExpiresAt: true,
   showInstructions: true,

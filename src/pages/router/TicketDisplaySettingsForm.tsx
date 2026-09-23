@@ -5,11 +5,13 @@ import { formatInternationalPhone, normalizeInternationalPhone } from "../../sha
 
 export function TicketDisplaySettingsForm({
   companyName,
+  dataLimitRequired = false,
   lockedCurrency,
   onChange,
   value
 }: {
   companyName?: string | null;
+  dataLimitRequired?: boolean;
   lockedCurrency?: string | null;
   onChange: (value: TicketDisplaySettings) => void;
   value: TicketDisplaySettings;
@@ -62,7 +64,12 @@ export function TicketDisplaySettingsForm({
           <SettingToggle checked={value.showPrice} label="Afficher le prix" onChange={(showPrice) => update({ showPrice })} />
           <SettingToggle checked disabled label="Afficher la durée d'utilisation" onChange={() => undefined} />
           <SettingToggle checked disabled label="Afficher la durée de validité" onChange={() => undefined} />
-          <SettingToggle checked={value.showDataLimit} label="Afficher le volume de données" onChange={(showDataLimit) => update({ showDataLimit })} />
+          <SettingToggle
+            checked={dataLimitRequired || value.showDataLimit}
+            disabled={dataLimitRequired}
+            label={dataLimitRequired ? "Volume de données obligatoire pour ce forfait" : "Afficher le volume de données"}
+            onChange={(showDataLimit) => update({ showDataLimit })}
+          />
         </div>
         <label className="form-field ticket-settings-short-field">
           Devise

@@ -80,6 +80,80 @@ export class HotspotPlanRepository {
     return rows[0] ?? null;
   }
 
+  /**
+   * Recovery needs to distinguish an unknown plan from a locally archived
+   * copy with the same immutable identifier. Normal reads intentionally hide
+   * archived rows, so application screens never show them as active plans.
+   */
+  async findIncludingDeletedById(id: string): Promise<HotspotPlanRecord | null> {
+    const rows = await this.database.query<HotspotPlanRecord>(
+      "SELECT * FROM hotspot_plans WHERE id = ?1",
+      [id]
+    );
+    return rows[0] ?? null;
+  }
+
+  /** Restore an archived plan in place, preserving its immutable ID and audit trail. */
+  async restore(
+    input: CreateHotspotPlanInput,
+    context: HotspotPlanMutationContext = {}
+  ): Promise<HotspotPlanRecord> {
+    const existing = await this.findIncludingDeletedById(input.id);
+    if (!existing) return this.create(input, context);
+    if (existing.router_id !== input.router_id) {
+      throw new Error("L'identifiant du plan est déjà associé à un autre routeur local.");
+    }
+    if (!existing.deleted_at) return this.update(input, context);
+
+    const now = new Date().toISOString();
+    const currency = normalizePlanCurrency(input.currency ?? existing.currency);
+    const syncStatus = input.sync_status ?? existing.sync_status;
+    const createdBy = context.actorProfileId ?? input.created_by_profile_id ?? existing.created_by_profile_id;
+    const updatedBy = context.actorProfileId ?? input.updated_by_profile_id ?? existing.updated_by_profile_id;
+    const revision = Math.max(existing.revision + 1, input.revision ?? 1);
+    const updatedAt = input.updated_at ?? now;
+    const lastSyncedAt = input.last_synced_at
+      ?? (syncStatus === "synced" ? now : existing.last_synced_at);
+
+    await this.database.execute(
+      `UPDATE hotspot_plans SET
+        name = ?1, duration_minutes = ?2, validity_minutes = ?3, data_limit_mb = ?4,
+        download_limit = ?5, upload_limit = ?6, shared_users = ?7, price_hint = ?8,
+        currency = ?9, mikrotik_id = ?10, mikrotik_profile_name = ?11,
+        created_by_profile_id = ?12, updated_by_profile_id = ?13, revision = ?14,
+        last_synced_at = ?15, status = ?16, sync_status = ?17, updated_at = ?18,
+        deleted_at = NULL
+      WHERE id = ?19 AND router_id = ?20`,
+      [
+        input.name,
+        input.duration_minutes,
+        input.validity_minutes,
+        input.data_limit_mb,
+        input.download_limit,
+        input.upload_limit,
+        input.shared_users,
+        input.price_hint,
+        currency,
+        normalizeOptionalText(input.mikrotik_id),
+        normalizeOptionalText(input.mikrotik_profile_name),
+        createdBy,
+        updatedBy,
+        revision,
+        lastSyncedAt,
+        input.status,
+        syncStatus,
+        updatedAt,
+        input.id,
+        input.router_id
+      ]
+    );
+
+    const restored = await this.findById(input.id);
+    if (!restored) throw new Error("Le plan restauré est introuvable.");
+    await this.appendHistory(restored, context.action ?? "restored", context);
+    return restored;
+  }
+
   async listByRouter(routerId: string): Promise<HotspotPlanRecord[]> {
     return this.database.query<HotspotPlanRecord>(
       "SELECT * FROM hotspot_plans WHERE router_id = ?1 AND deleted_at IS NULL ORDER BY created_at DESC",

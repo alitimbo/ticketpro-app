@@ -8,8 +8,17 @@ import {
   ticketQrValue,
   type TicketPdfInput
 } from "./TicketPdfService";
+import { defaultTicketDisplaySettings } from "../tickets";
 
 describe("TicketPdfService", () => {
+  it("includes the data cap when ticket settings request it", () => {
+    const input = buildPdfInput(1);
+    input.displaySettings = { ...defaultTicketDisplaySettings, showDataLimit: true };
+    const text = new TextDecoder().decode(generateTicketPdf(input));
+
+    expect(text).toContain("(Volume : 2 Go)");
+  });
+
   it("génère un PDF A4 lisible avec 40 tickets par page", () => {
     const input = buildPdfInput(40);
     const pdf = generateTicketPdf(input);

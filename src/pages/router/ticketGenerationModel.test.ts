@@ -6,6 +6,7 @@ import {
   createInitialTicketGenerationState,
   defaultTicketGenerationOptions,
   findConfirmedVoucherBatchUsers,
+  formatDataLimit,
   getTicketSummary,
   inspectVoucherBatchIntegrity,
   validateTicketGeneration
@@ -42,6 +43,12 @@ const servers = [
 ];
 
 describe("ticketGenerationModel", () => {
+  it("formats commercial data volumes in Mo and Go", () => {
+    expect(formatDataLimit(500)).toBe("500 Mo");
+    expect(formatDataLimit(2048)).toBe("2 Go");
+    expect(formatDataLimit(null)).toBeNull();
+  });
+
   it("nomme le PDF avec le routeur, le plan, le prix et la quantité", () => {
     expect(buildFileName({
       batchId: "batch-a1b2c3d4-e5f6",
