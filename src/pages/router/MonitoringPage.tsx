@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import {
   Activity,
@@ -20,7 +20,6 @@ import {
 import {
   FakeRouterAdapter,
   RouterService,
-  RouterServiceError,
   createPersistedRouterService,
   type RouterActionLog
 } from "../../services/router";
@@ -52,13 +51,16 @@ export function MonitoringPage() {
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [showTechnicalLogs, setShowTechnicalLogs] = useState(false);
+  const requestSequence = useRef(0);
+  const activeRequest = useRef<number | null>(null);
+  const activeTimeout = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
   const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
   const snapshotRepository = useMemo(() => new RouterSnapshotRepository(database), [database]);
   const activeSessionCacheRepository = useMemo(() => new ActiveSessionCacheRepository(database), [database]);
 
-  const createService = async () => {
+  const createService = useCallback(async () => {
     if (!isPersistent) {
       return new RouterService({
         adapter: new FakeRouterAdapter({ latencyMs: 0 }),
@@ -81,82 +83,104 @@ export function MonitoringPage() {
       logger: new DatabaseRouterActionLogger(database),
       router
     });
-  };
+  }, [connectionRepository, database, isInitialized, isPersistent, routerId, routerRepository, session]);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     if (isPersistent && (!isInitialized || !session)) {
       return;
     }
+    if (activeRequest.current !== null) {
+      return;
+    }
+    const requestId = ++requestSequence.current;
+    activeRequest.current = requestId;
+    const isCurrent = () => activeRequest.current === requestId;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
 
     setIsLoading(true);
-    setError(null);
 
     try {
-      const service = await createService();
-      const [connection, servers, health, traffic, dateTime, plans, ticketUsers, activeUsers] = await Promise.all([
-        service.testConnection(),
-        service.getHotspotServers(),
-        service.getRouterHealth(),
-        service.getInterfaceTraffic(),
-        service.getRouterDateTime(),
-        service.getHotspotPlans(),
-        service.listHotspotUsers(),
-        service.listActiveUsers()
-      ]);
+      const read = async () => {
+        const service = await createService();
+        if (!isCurrent()) return;
+        const [connection, servers, health, traffic, dateTime, plans, ticketUsers, activeUsers] = await Promise.all([
+          service.testConnection(),
+          service.getHotspotServers(),
+          service.getRouterHealth(),
+          service.getInterfaceTraffic(),
+          service.getRouterDateTime(),
+          service.getHotspotPlans(),
+          service.listHotspotUsers(),
+          service.listActiveUsers()
+        ]);
+        if (!isCurrent()) return;
 
-      const snapshots = isPersistent ? await snapshotRepository.listByRouter(routerId) : [];
+        const snapshots = isPersistent ? await snapshotRepository.listByRouter(routerId) : [];
+        if (!isCurrent()) return;
 
-      if (isPersistent && session && connection) {
-        const capturedAt = connection.checkedAt;
-        const router = await routerRepository.findById(routerId);
+        if (isPersistent && session && connection) {
+          const capturedAt = connection.checkedAt;
+          const router = await routerRepository.findById(routerId);
 
-        if (router) {
-          await Promise.all([
-            activeSessionCacheRepository.replaceForRouter(routerId, activeUsers, capturedAt),
-            snapshotRepository.create({
-              active_clients_count: activeUsers.length,
-              captured_at: capturedAt,
-              cpu_load: health.cpuLoad,
-              id: createId("snapshot"),
-              memory_total: health.memoryTotal,
-              memory_used: health.memoryUsed,
-              plans_count: plans.length,
-              router_id: routerId,
-              tickets_count: ticketUsers.length,
-              uptime: health.uptime
-            }),
-            routerRepository.recordConnectionTest({
-              accountId: session.account_id,
-              checkedAt: capturedAt,
-              errorMessage: null,
-              internalProfileId: session.internal_profile_id,
-              mode: router.connection_mode,
-              routerId,
-              status: "connected"
-            })
-          ]);
+          if (router && isCurrent()) {
+            await Promise.all([
+              activeSessionCacheRepository.replaceForRouter(routerId, activeUsers, capturedAt),
+              snapshotRepository.create({
+                active_clients_count: activeUsers.length,
+                captured_at: capturedAt,
+                cpu_load: health.cpuLoad,
+                id: createId("snapshot"),
+                memory_total: health.memoryTotal,
+                memory_used: health.memoryUsed,
+                plans_count: plans.length,
+                router_id: routerId,
+                tickets_count: ticketUsers.length,
+                uptime: health.uptime
+              }),
+              routerRepository.recordConnectionTest({
+                accountId: session.account_id,
+                checkedAt: capturedAt,
+                errorMessage: null,
+                internalProfileId: session.internal_profile_id,
+                mode: router.connection_mode,
+                routerId,
+                status: "connected"
+              })
+            ]);
+          }
         }
-      }
+        if (!isCurrent()) return;
 
-      setModel(
-        buildMonitoringViewModel({
-          activeUsers,
-          checkedAt: new Date(),
-          connection,
-          dateTime,
-          health,
-          plans,
-          snapshots,
-          servers,
-          ticketUsers,
-          traffic
+        setModel(
+          buildMonitoringViewModel({
+            activeUsers,
+            checkedAt: new Date(),
+            connection,
+            dateTime,
+            health,
+            plans,
+            snapshots,
+            servers,
+            ticketUsers,
+            traffic
+          })
+        );
+        setError(null);
+      };
+      await Promise.race([
+        read(),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("Le routeur n'a pas terminé sa réponse dans les 30 secondes. Réessayez dans un instant.")), 30_000);
+          activeTimeout.current = timeout;
         })
-      );
+      ]);
     } catch (caught) {
+      if (!isCurrent()) return;
       if (isPersistent && session) {
-        const router = await routerRepository.findById(routerId);
-        if (router) {
-          await routerRepository
+        // La persistance du diagnostic ne doit pas maintenir le chargement UI.
+        void routerRepository.findById(routerId).then(router => {
+          if (router && requestSequence.current === requestId) {
+            return routerRepository
             .recordConnectionTest({
               accountId: session.account_id,
               checkedAt: new Date().toISOString(),
@@ -167,17 +191,38 @@ export function MonitoringPage() {
               status: "offline"
             })
             .catch(() => undefined);
-        }
+          }
+        }).catch(() => undefined);
       }
-      setError(caught instanceof RouterServiceError ? caught.message : "Impossible de lire l’état du routeur.");
+      setError(caught instanceof Error ? caught.message : "Impossible de lire l’état du routeur.");
     } finally {
-      setIsLoading(false);
+      clearTimeout(timeout);
+      if (isCurrent()) {
+        activeRequest.current = null;
+        setIsLoading(false);
+      }
     }
-  };
+  }, [activeSessionCacheRepository, createService, isInitialized, isPersistent, routerId, routerRepository, session, snapshotRepository]);
+
+  useEffect(() => {
+    setModel(null);
+    setError(null);
+    setLogs([]);
+    setIsLoading(true);
+  }, [routerId, session?.account_id, session?.internal_profile_id]);
 
   useEffect(() => {
     void refresh();
-  }, [activeSessionCacheRepository, connectionRepository, database, isInitialized, isPersistent, routerId, routerRepository, session, snapshotRepository]);
+    const interval = setInterval(() => {
+      if (document.visibilityState !== "hidden") void refresh();
+    }, 60_000);
+    return () => {
+      clearInterval(interval);
+      clearTimeout(activeTimeout.current);
+      ++requestSequence.current;
+      activeRequest.current = null;
+    };
+  }, [refresh]);
 
   return (
     <div className="page-stack">
@@ -192,7 +237,7 @@ export function MonitoringPage() {
         title="Monitoring"
       />
 
-      {isLoading ? (
+      {isLoading && !model ? (
         <AsyncStateCard
           description="TicketPro vérifie les services et les mesures directement sur le MikroTik."
           errorDescription="La lecture du routeur n’a pas pu être terminée."
@@ -202,7 +247,7 @@ export function MonitoringPage() {
           status="loading"
           title="Préparation de l’état réseau"
         />
-      ) : error ? (
+      ) : error && !model ? (
         <AsyncStateCard
           description="TicketPro doit relire le MikroTik pour afficher un état réseau fiable."
           errorDescription={error}
@@ -213,6 +258,12 @@ export function MonitoringPage() {
         />
       ) : model ? (
         <>
+          {error ? (
+            <div role="status">
+              <Badge status="warning">Actualisation interrompue</Badge>
+              <p>{error} Les dernières mesures restent affichées.</p>
+            </div>
+          ) : null}
           <Card className={`monitoring-health monitoring-health--${model.overallStatus}`}>
             <div className="monitoring-health__main">
               <StatusIcon status={model.overallStatus} />
