@@ -24,6 +24,27 @@ vi.mock("../saas", async (importOriginal) => {
 });
 
 describe("OrganizationTicketCatalogService outbox", () => {
+  it("conserve et reprend les observations d'un lot absent du nouveau PC", async () => {
+    const originalDatabase = await setupCatalog(1);
+    mocks.saveCatalog.mockResolvedValue({ batches: [], tickets: [] });
+    await new OrganizationTicketCatalogService(originalDatabase, "account-1", "profile-admin", "admin")
+      .publishBatch("router-1", "batch-cloud");
+    const source = mocks.saveCatalog.mock.calls[0][0] as Parameters<OrganizationTicketCatalogService["publishObservedCatalog"]>[1];
+    const snapshot = { batches: source.batches.map(batch => ({ ...batch, id: "remote-only-batch" })),
+      tickets: source.tickets.map(ticket => ({ ...ticket, batch_id: "remote-only-batch", uptime_seconds: 300 })) };
+    const newDatabase = await setupCatalog(0);
+    const service = new OrganizationTicketCatalogService(newDatabase, "account-1", "profile-admin", "admin");
+    mocks.saveCatalog.mockReset().mockRejectedValueOnce(new Error("cloud offline")).mockResolvedValue({ batches: [], tickets: [] });
+    await expect(service.publishObservedCatalog("router-1", snapshot)).rejects.toThrow("file de reprise");
+    const outbox = new SyncOutboxRepository(newDatabase);
+    const operation = (await outbox.listByAccount("account-1"))[0];
+    expect(operation.status).toBe("retry");
+    await outbox.markRetry(operation.id, "account-1", { code: "TEST", message: "retry", nextAttemptAt: "2026-01-01T00:00:00Z" });
+    await service.resumePending("router-1");
+    expect(mocks.saveCatalog).toHaveBeenLastCalledWith(expect.objectContaining({
+      tickets: expect.arrayContaining([expect.objectContaining({ batch_id: "remote-only-batch", uptime_seconds: 300 })])
+    }));
+  });
   it("coalesces overlapping catalogue pulls and permits a retry after failure", async () => {
     const database = await setupCatalog(0);
     let resolve!: (value: { batches: never[]; tickets: never[] }) => void;

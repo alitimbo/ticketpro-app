@@ -41,6 +41,8 @@ import type {
   RouterAdapter
 } from "./RouterAdapter";
 import { RouterAdapterError } from "./RouterAdapterError";
+import { readPlanQuotaMetadata, writePlanQuotaMetadata } from "./PlanQuotaMetadata";
+import { dataLimitMbToBytes, voucherQuotaMatches } from "../tickets/VoucherQuota";
 import {
   TauriRouterOsApiTransport,
   type RouterOsApiConfig,
@@ -789,13 +791,17 @@ export class MikroTikRouterAdapter implements RouterAdapter {
         plan.validityMinutes ?? plan.durationMinutes
       ),
       name: profileName,
-      "on-login": mergeVoucherLifecycleOnLogin(""),
+      "on-login": writePlanQuotaMetadata(mergeVoucherLifecycleOnLogin(""), plan.dataLimitMb),
       "rate-limit": buildRateLimit(plan),
       "session-timeout": minutesToRouterOsDuration(plan.durationMinutes),
       "shared-users": String(plan.sharedUsers)
     });
 
-    return this.findPlanByProfileName(profileName);
+    const created = await this.findPlanByProfileName(profileName);
+    if (created.dataLimitSource !== "routeros" || created.dataLimitMb !== plan.dataLimitMb) {
+      throw new RouterAdapterError("router_rejected", "RouterOS n'a pas confirmé le quota du plan.");
+    }
+    return created;
   }
 
   async updateHotspotPlan(planId: string, updates: Partial<HotspotPlanDraft>): Promise<HotspotPlan> {
@@ -823,18 +829,22 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       ),
       name: next.profileName,
       numbers: current.id,
-      "on-login": mergeVoucherLifecycleOnLogin(
+      "on-login": writePlanQuotaMetadata(mergeVoucherLifecycleOnLogin(
         pick(currentProfile ?? {}, "on-login") ?? "",
         new Set(
           systemScripts.map((script) => pick(script, "name")).filter((name): name is string => Boolean(name))
         )
-      ),
+      ), next.dataLimitMb),
       "rate-limit": buildRateLimit(next),
       "session-timeout": minutesToRouterOsDuration(next.durationMinutes),
       "shared-users": String(next.sharedUsers)
     });
 
-    return this.findPlanById(current.id);
+    const updated = await this.findPlanById(current.id);
+    if (updated.dataLimitSource !== "routeros" || updated.dataLimitMb !== next.dataLimitMb) {
+      throw new RouterAdapterError("router_rejected", "RouterOS n'a pas confirmé le quota du plan.");
+    }
+    return updated;
   }
 
   async deleteHotspotPlan(planId: string): Promise<void> {
@@ -921,7 +931,13 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       server: user.serverName?.trim() || "all"
     });
 
-    return this.findUserByName(user.username);
+    const created = await this.findUserByName(user.username);
+    if (!voucherQuotaMatches(created, user.limitBytesTotal)) {
+      await this.disableHotspotUser(user.username);
+      await this.disconnectActiveUser(user.username);
+      throw new RouterAdapterError("router_rejected", "Le quota relu sur RouterOS ne correspond pas au quota demandé. Le voucher est bloqué.");
+    }
+    return created;
   }
 
   async createHotspotUsersExactBatch(
@@ -1006,6 +1022,22 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     const finalUsers = await this.readRequestedUsers(usernames);
     finalUsers.forEach((user, username) => confirmed.set(username, user));
     onProgress?.({ completed: confirmed.size, phase: "verifying", total: users.length });
+
+    for (const entry of prepared) {
+      const observed = confirmed.get(entry.username);
+      if (observed && !voucherQuotaMatches(observed, entry.user.limitBytesTotal)) {
+        confirmed.delete(entry.username);
+        errors.set(entry.username, "Le quota relu sur RouterOS ne correspond pas au quota demandé.");
+        if (observed.comment === String(entry.command.params?.comment ?? "")) {
+          try {
+            await this.disableHotspotUser(entry.username);
+            await this.disconnectActiveUser(entry.username);
+          } catch {
+            errors.set(entry.username, "Quota incorrect et blocage non confirmé. Vérifiez le voucher sur le routeur.");
+          }
+        }
+      }
+    }
 
     return prepared.map(({ username }) => {
       const user = confirmed.get(username);
@@ -1217,7 +1249,13 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       profile: plan.profileName
     });
 
-    return this.findUserByName(username);
+    const updated = await this.findUserByName(username);
+    if (!voucherQuotaMatches(updated, limits.limitBytesTotal)) {
+      await this.disableHotspotUser(username);
+      await this.disconnectActiveUser(username);
+      throw new RouterAdapterError("router_rejected", "RouterOS n'a pas confirmé le nouveau quota du voucher. Le voucher est bloqué.");
+    }
+    return updated;
   }
 
   async createHotspotUsersBatch(batch: HotspotUsersBatchDraft): Promise<HotspotUser[]> {
@@ -2190,6 +2228,8 @@ export function normalizeMikroTikError(error: unknown): RouterAdapterError {
 
 function profileRowToPlan(row: RouterOsApiRow): HotspotPlan {
   const metadata = parsePlanComment(pick(row, "comment"));
+  const quota = readPlanQuotaMetadata(pick(row, "on-login"));
+  dataLimitMbToBytes(quota ? quota.dataLimitMb : metadata.dataLimitMb);
   const rateLimit = pick(row, "rate-limit");
   const [downloadLimit, uploadLimit] = splitRateLimit(rateLimit);
   const routerDurationMinutes = routerOsDurationToMinutes(pick(row, "session-timeout"));
@@ -2206,7 +2246,8 @@ function profileRowToPlan(row: RouterOsApiRow): HotspotPlan {
     : metadata.validityMinutes ?? durationMinutes;
 
   return {
-    dataLimitMb: metadata.dataLimitMb ?? null,
+    dataLimitMb: quota ? quota.dataLimitMb : metadata.dataLimitMb ?? null,
+    ...(quota || metadata.dataLimitMb !== undefined ? { dataLimitSource: "routeros" as const } : {}),
     downloadLimit,
     durationMinutes,
     id: pick(row, ".id") || pick(row, "id") || pick(row, "name") || "profile",

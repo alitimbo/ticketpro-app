@@ -1,4 +1,5 @@
 import type { HotspotPlanRecord } from "../../domain/database";
+import { dataLimitMbToBytes } from "../tickets/VoucherQuota";
 import type {
   HotspotPlanDraft,
   HotspotUserDraft,
@@ -38,8 +39,14 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
     return this.delegate.upsertHotspotDns(dnsName);
   }
 
-  getHotspotPlans() {
-    return this.delegate.getHotspotPlans();
+  async getHotspotPlans() {
+    const remote = await this.delegate.getHotspotPlans();
+    return remote.map(plan => {
+      const local = this.findPlan(plan.profileName);
+      return plan.dataLimitSource !== "routeros" && plan.dataLimitMb === null && local
+        ? { ...plan, dataLimitMb: local.data_limit_mb }
+        : plan;
+    });
   }
 
   ensureVoucherLifecycleEngine(options?: import("../../domain/router").VoucherLifecycleEngineOptions) {
@@ -128,7 +135,7 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
     const plan = this.findPlan(batch.planId);
     return this.delegate.createHotspotUsersBatch({
       ...batch,
-      limitBytesTotal: batch.limitBytesTotal ?? dataLimitMbToBytes(plan?.data_limit_mb),
+      limitBytesTotal: batch.limitBytesTotal !== undefined ? batch.limitBytesTotal : dataLimitMbToBytes(plan?.data_limit_mb),
       limitUptime: batch.limitUptime ?? durationMinutesToRouterOs(plan?.duration_minutes),
       validityMinutes: batch.validityMinutes ?? effectiveValidityMinutes(plan),
       planId: this.resolveProfileReference(batch.planId)
@@ -259,7 +266,7 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
     const plan = this.findPlan(user.planId);
     return {
       ...user,
-      limitBytesTotal: user.limitBytesTotal ?? dataLimitMbToBytes(plan?.data_limit_mb),
+      limitBytesTotal: user.limitBytesTotal !== undefined ? user.limitBytesTotal : dataLimitMbToBytes(plan?.data_limit_mb),
       limitUptime: user.limitUptime ?? durationMinutesToRouterOs(plan?.duration_minutes),
       validityMinutes: user.validityMinutes ?? effectiveValidityMinutes(plan),
       planId: this.resolveProfileReference(user.planId)
@@ -286,14 +293,6 @@ function effectiveValidityMinutes(
 ): number | null {
   const value = plan?.validity_minutes ?? plan?.duration_minutes;
   return value && value > 0 ? value : null;
-}
-
-function dataLimitMbToBytes(value: number | null | undefined): number | null {
-  if (!value || value <= 0) {
-    return null;
-  }
-
-  return Math.round(value * 1024 * 1024);
 }
 
 function durationMinutesToRouterOs(value: number | null | undefined): string | null {

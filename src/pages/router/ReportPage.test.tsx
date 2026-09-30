@@ -20,7 +20,12 @@ vi.mock("../../services/router", async original => ({ ...await original<typeof i
 vi.mock("../../services/recovery", () => ({ RouterCloudRecoveryService: class { restoreMissingRouters = mocks.restore; } }));
 vi.mock("../../services/sync", async original => {
   const actual = await original<typeof import("../../services/sync")>();
-  return { ...actual, OrganizationTicketCatalogService: class { publishRouter = mocks.publish; } };
+  return { ...actual, OrganizationTicketCatalogService: class {
+    publishRouter = mocks.publish;
+    publishBatch = mocks.publish;
+    publishObservedCatalog = mocks.publish;
+    resumePending = async () => undefined;
+  } };
 });
 
 describe("ReportPage invited reader", () => {
@@ -52,6 +57,31 @@ describe("ReportPage invited reader", () => {
   });
   afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); });
   const view = () => <MemoryRouter><ReportPage /></MemoryRouter>;
+
+  it("publishes changed observations of shared tickets only with synchronization permission", async () => {
+    const auth = mocks.auth as { session: ReturnType<typeof createSession> };
+    mocks.auth = { ...mocks.auth as object, session: { ...auth.session,
+      permissions: [...auth.session.permissions, "router.tickets.sync"] } };
+    mocks.catalog.mockResolvedValue({ router_id: "cloud-local-1", batches: [], tickets: [{
+      id: "cloud-ticket", batch_id: "cloud-batch", plan_id: "cloud-plan", username: "test-voucher",
+      created_by_role: "operator", created_by_user_id: "other", created_at: "2026-09-01T00:00:00Z",
+      activated_at: null, completed_at: null, expires_at: null, deleted_at: null,
+      downloaded_bytes: 0, uploaded_bytes: 0, printed_count: 0, uptime_seconds: 0,
+      status: "disponible", last_router_sync_at: null, duration_minutes_snapshot: 60,
+      validity_minutes_snapshot: 180
+    }] });
+    mocks.createRouter.mockResolvedValue({ listHotspotUsers: async () => [{
+      id: "*T", username: "test-voucher", planId: "cloud-plan", profileName: "cloud-plan",
+      status: "available", uptime: "00:05:00", limitUptime: "01:00:00", downloadedBytes: 123, uploadedBytes: 456
+    }], listActiveUsers: async () => [] });
+    mocks.publish.mockResolvedValue(undefined);
+    render(view());
+    await waitFor(() => expect(mocks.publish).toHaveBeenCalledWith("local-1", expect.objectContaining({
+      tickets: expect.arrayContaining([expect.objectContaining({
+        id: "cloud-ticket", status: "activé", uptime_seconds: 300, downloaded_bytes: 123, uploaded_bytes: 456
+      })])
+    })));
+  });
 
   it("finishes for a guest without restoring the entire park or publishing a catalogue", async () => {
     const rendered = render(view());

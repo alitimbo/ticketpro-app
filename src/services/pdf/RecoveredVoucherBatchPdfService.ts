@@ -135,7 +135,9 @@ export class RecoveredVoucherBatchPdfService {
     const validityMinutes = positiveMinutes(firstTicket.validity_minutes_snapshot)
       ?? positiveMinutes(plan.validity_minutes)
       ?? durationMinutes;
-    const dataLimitMb = firstTicket.data_limit_mb_snapshot ?? plan.data_limit_mb;
+    const dataLimitMb = firstTicket.data_limit_mb_snapshot !== undefined
+      ? firstTicket.data_limit_mb_snapshot
+      : plan.data_limit_mb;
     const ownerPhone = settings.showContact
       ? settings.contactNumber.trim() || account?.phone?.trim() || ""
       : "";

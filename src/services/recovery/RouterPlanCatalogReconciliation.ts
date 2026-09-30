@@ -48,7 +48,10 @@ export async function reconcileRouterPlanCatalog({
       if (local.mikrotik_id !== plan.id) identityUpdatedCount += 1;
       const updated = await repository.update({
         ...local,
-        data_limit_mb: plan.dataLimitMb,
+        // Profiles have no native data quota; absent metadata is not unlimited.
+        data_limit_mb: plan.dataLimitSource === "routeros" || plan.dataLimitMb !== null
+          ? plan.dataLimitMb
+          : local.data_limit_mb,
         download_limit: plan.downloadLimit,
         duration_minutes: plan.durationMinutes,
         currency: local.currency,

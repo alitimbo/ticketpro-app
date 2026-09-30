@@ -2,6 +2,7 @@ import type { TicketRecord } from "../../domain/database";
 import type { HotspotPlanDraft, HotspotUserLimits } from "../../domain/router";
 import type { RouterService } from "./RouterService";
 import { canApplyPlanChangeToVoucher } from "../tickets/TicketLifecyclePolicy";
+import { dataLimitMbToBytes } from "../tickets/VoucherQuota";
 
 type PlanVoucherRouterService = Pick<
   RouterService,
@@ -51,11 +52,6 @@ export async function synchronizePlanVouchers(input: {
     missingFromRouter: mutableTickets.length - targets.length,
     updatedRouterUsers: targets.length
   };
-}
-
-function dataLimitMbToBytes(value: number | null | undefined): number | null {
-  if (!value || value <= 0) return null;
-  return Math.round(value * 1024 * 1024);
 }
 
 function durationMinutesToRouterOs(value: number | null | undefined): string | null {

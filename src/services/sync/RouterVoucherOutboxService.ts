@@ -12,6 +12,7 @@ import { RouterServiceError, type RouterService } from "../router";
 import { recordActiveOutboxRetry } from "../performance/VoucherGenerationPerformance";
 import { buildVoucherBatchOwnershipComment, voucherBelongsToBatch } from "../tickets";
 import { SyncOutboxError, SyncOutboxService, type SyncOutboxDrainReport } from "./SyncOutboxService";
+import { dataLimitMbToBytes, voucherQuotaMatches } from "../tickets/VoucherQuota";
 
 export const ROUTER_VOUCHER_CREATE_OPERATION = "routeros.voucher.create";
 export const ROUTER_VOUCHER_MAX_ATTEMPTS = 10_000;
@@ -34,6 +35,7 @@ export class RouterVoucherOutboxService {
     database: DatabaseClient,
     private readonly accountId: string,
     private readonly routerService: Pick<RouterService, "createHotspotUser" | "findHotspotUser">
+      & Partial<Pick<RouterService, "disableHotspotUser" | "disconnectActiveUser">>
   ) {
     this.batches = new TicketBatchRepository(database);
     this.outbox = new SyncOutboxRepository(database);
@@ -239,9 +241,7 @@ export class RouterVoucherOutboxService {
     try {
       existing = await this.routerService.createHotspotUser({
         comment: buildVoucherBatchOwnershipComment(ticket.batch_id),
-        limitBytesTotal: ticket.data_limit_mb_snapshot === null || ticket.data_limit_mb_snapshot === undefined
-          ? null
-          : Math.round(ticket.data_limit_mb_snapshot * 1024 * 1024),
+        limitBytesTotal: dataLimitMbToBytes(ticket.data_limit_mb_snapshot),
         limitUptime: minutesToRouterOsDuration(ticket.duration_minutes_snapshot),
         passwordSecretRef: ticket.password_encrypted,
         planId: ticket.plan_id,
@@ -277,6 +277,17 @@ export class RouterVoucherOutboxService {
       throw new SyncOutboxError(
         `Le voucher ${ticket.username} existe avec le profil ${user.profileName}.`,
         "ROUTER_VOUCHER_PROFILE_CONFLICT",
+        "conflict"
+      );
+    }
+    if (!voucherQuotaMatches(user, dataLimitMbToBytes(ticket.data_limit_mb_snapshot))) {
+      // Do not reset/recreate an existing user. Block only our own voucher,
+      // whose ownership and profile were checked above, and retain the conflict.
+      await this.routerService.disableHotspotUser?.(ticket.username);
+      await this.routerService.disconnectActiveUser?.(ticket.username);
+      throw new SyncOutboxError(
+        "Le quota relu sur RouterOS ne correspond pas au volume du ticket. Vérifiez ce voucher avant de le distribuer.",
+        "ROUTER_VOUCHER_QUOTA_CONFLICT",
         "conflict"
       );
     }

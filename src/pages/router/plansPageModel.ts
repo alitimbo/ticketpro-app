@@ -230,7 +230,10 @@ export function validatePlanForm(values: PlanFormValues): string | null {
     return "Entrez une validité valide.";
   }
 
-  if (values.dataAmount && dataToMb(values.dataAmount, values.dataUnit) !== null && dataToMb(values.dataAmount, values.dataUnit)! < 0) {
+  if (values.dataAmount.trim() && (!Number.isFinite(Number(values.dataAmount))
+    || Number(values.dataAmount) <= 0
+    || !Number.isSafeInteger(Math.round(dataToMb(values.dataAmount, values.dataUnit)! * 1024 * 1024))
+    || Math.round(dataToMb(values.dataAmount, values.dataUnit)! * 1024 * 1024) < 1)) {
     return "Entrez un volume data valide.";
   }
 

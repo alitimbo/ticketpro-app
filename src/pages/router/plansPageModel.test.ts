@@ -11,6 +11,10 @@ import {
 } from "./plansPageModel";
 
 describe("plansPageModel", () => {
+  it.each(["0", "-1", "Infinity", "1e30", "invalid"])("refuse un quota ambigu ou non représentable %s", dataAmount => {
+    const values = applyTemplate(emptyPlanFormValues, quickPlanTemplates[1]);
+    expect(validatePlanForm({ ...values, dataAmount })).toBe("Entrez un volume data valide.");
+  });
   it("permet de créer un plan simple depuis un template sans champs avancés", () => {
     const values = applyTemplate(emptyPlanFormValues, quickPlanTemplates[1]);
     const draft = formValuesToPlanDraft(values);

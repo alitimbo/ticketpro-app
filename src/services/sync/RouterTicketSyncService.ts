@@ -1,5 +1,6 @@
 import type { ActiveHotspotUser, HotspotUser, HotspotUserDraft } from "../../domain/router";
 import { RouterServiceError, type RouterService } from "../router";
+import { dataLimitMbToBytes, voucherQuotaMatches } from "../tickets/VoucherQuota";
 import {
   canApplyPlanChangeToVoucher,
   resolveObservedTicketStatus
@@ -489,6 +490,7 @@ export function compareLocalAndRouterTickets(
       const automaticallyCleaned = !residualSession
         && isExpectedRouterCleanup(ticket, Date.parse(synchronizedAt));
       updates.push({
+        activatedAt: ticket.activatedAt ?? inferActivationAt(ticket.expiresAt ?? null, ticket.planValidityMinutes),
         archivedAt: automaticallyCleaned ? ticket.archivedAt ?? synchronizedAt : ticket.archivedAt,
         completedAt: automaticallyCleaned
           ? ticket.completedAt ?? ticket.expiresAt ?? synchronizedAt
@@ -519,13 +521,15 @@ export function compareLocalAndRouterTickets(
       ? ticket.planProfileName !== routerUser.profileName
       : Boolean(ticket.planId && routerUser.planId && ticket.planId !== routerUser.planId);
 
+    const hasQuotaConflict = ticket.dataLimitMb !== undefined
+      && !voucherQuotaMatches(routerUser, dataLimitMbToBytes(ticket.dataLimitMb));
     const usage = deriveTicketRuntime(routerUser, activeUser);
     const lifecycle = resolveObservedTicketStatus(ticket.status, usage.status);
     const routerLifecycleError = routerUser.status === "error";
     updates.push({
       archivedAt: ticket.archivedAt,
       activatedAt:
-        activeUser || routerOsDurationHasElapsed(routerUser.uptime)
+        activeUser || routerOsDurationHasElapsed(routerUser.uptime) || usage.expiresAt
           ? ticket.activatedAt ?? inferActivationAt(usage.expiresAt, ticket.planValidityMinutes) ?? new Date().toISOString()
           : ticket.activatedAt,
       completedAt:
@@ -555,7 +559,7 @@ export function compareLocalAndRouterTickets(
       status: lifecycle.status,
       syncStatus: routerLifecycleError
         ? "error"
-        : hasConflict || lifecycle.regression
+        : hasConflict || hasQuotaConflict || lifecycle.regression
           ? "conflict"
           : "router_synced",
       lastRouterSyncAt: new Date().toISOString(),
@@ -568,6 +572,13 @@ export function compareLocalAndRouterTickets(
       )
     });
 
+    if (hasQuotaConflict) {
+      logs.push({
+        level: "error",
+        message: "Le quota RouterOS ne correspond pas au volume fixé à la création du ticket. Synchronisation non confirmée.",
+        ticketCode: ticket.code
+      });
+    }
     if (hasConflict) {
       logs.push({
         level: "warning",
@@ -621,7 +632,7 @@ export function compareLocalAndRouterTickets(
 }
 
 function routerOsDurationHasElapsed(value: string | null | undefined): boolean {
-  return Boolean(value && value !== "0s" && value !== "0");
+  return routerOsDurationToSeconds(value) > 0;
 }
 
 function isExpectedRouterCleanup(ticket: SyncableLocalTicket, nowMs: number): boolean {
@@ -691,6 +702,12 @@ function deriveTicketRuntime(user: HotspotUser, active: ActiveHotspotUser | unde
 
 function routerOsDurationToSeconds(value: string | null | undefined): number {
   if (!value) return 0;
+  const clock = value.match(/^(?:(\d+)w)?(?:(\d+)d)?(\d+):(\d{2}):(\d{2})(?:\.(\d+))?$/);
+  if (clock) {
+    if (Number(clock[4]) >= 60 || Number(clock[5]) >= 60) return 0;
+    return Number(clock[1] ?? 0) * 604800 + Number(clock[2] ?? 0) * 86400
+      + Number(clock[3]) * 3600 + Number(clock[4]) * 60 + Number(clock[5]);
+  }
   const units: Record<string, number> = { w: 604800, d: 86400, h: 3600, m: 60, s: 1 };
   let seconds = 0;
   for (const match of value.matchAll(/(\d+)(w|d|h|m|s)/g)) {
@@ -739,9 +756,7 @@ export function syncStatusLabel(status: RouterTicketSyncStatus): string {
 function localTicketToDraft(ticket: SyncableLocalTicket): HotspotUserDraft {
   return {
     comment: `Resynchronisation lot ${ticket.batchId}`,
-    limitBytesTotal: ticket.dataLimitMb && ticket.dataLimitMb > 0
-      ? Math.round(ticket.dataLimitMb * 1024 * 1024)
-      : null,
+    limitBytesTotal: dataLimitMbToBytes(ticket.dataLimitMb),
     limitUptime: minutesToRouterOsDuration(ticket.planDurationMinutes),
     passwordSecretRef: ticket.passwordSecretRef,
     planId: ticket.planProfileName ?? ticket.planId,

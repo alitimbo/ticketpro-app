@@ -13,6 +13,8 @@ export type LocalTableName =
   | "internal_profiles"
   | "license_state"
   | "printers"
+  | "print_history"
+  | "ticket_state_history"
   | "router_connections"
   | "router_managed_resource_manifests"
   | "router_snapshots"
@@ -25,6 +27,8 @@ export type LocalTableName =
   | "vpn_peers";
 
 const tableColumns: Record<LocalTableName, string[]> = {
+  print_history: ["id", "account_id", "router_id", "batch_id", "printer_id", "printer_name", "mode", "format", "status", "ticket_count", "user_message", "created_by_profile", "created_by_profile_id", "created_at"],
+  ticket_state_history: ["id", "account_id", "ticket_id", "router_id", "previous_status", "next_status", "source", "message", "created_by_profile_id", "created_at"],
   active_sessions_cache: [
     "id",
     "router_id",

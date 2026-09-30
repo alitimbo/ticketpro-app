@@ -24,6 +24,17 @@ class MockRouterOsTransport implements RouterOsApiTransport {
 
   async call(request: RouterOsApiRequest): Promise<RouterOsApiRow[]> {
     this.calls.push(request);
+    if (request.command === "/ip/hotspot/user/profile/add") {
+      const rows = this.responses["/ip/hotspot/user/profile/print"] ??= [];
+      const existing = rows.find(row => row.name === request.params?.name);
+      if (existing) Object.assign(existing, stringParams(request.params));
+      else rows.push({ ".id": `*P${rows.length + 1}`, ...stringParams(request.params) });
+      return [];
+    }
+    if (request.command === "/ip/hotspot/user/profile/set" || request.command === "/ip/hotspot/user/set") {
+      mutateResponseRow(this.responses[request.command.replace(/\/set$/, "/print")] ?? [], request);
+      return [];
+    }
     const hotspotRemovalTargets: Record<string, string> = {
       "/ip/hotspot/active/remove": "/ip/hotspot/active/print",
       "/ip/hotspot/cookie/remove": "/ip/hotspot/cookie/print",
@@ -172,6 +183,44 @@ function createAdapter(transport: RouterOsApiTransport) {
 }
 
 describe("MikroTikRouterAdapter", () => {
+  it("enregistre puis relit un quota 2 Go sans perdre le script existant, et confirme le passage explicite à illimité", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/user/profile/print": [{ ".id": "*P1", name: "quota-plan", "on-login": ':log info "custom";', "session-timeout": "1h" }]
+    });
+    const adapter = createAdapter(transport);
+    const draft = { dataLimitMb: 2048, downloadLimit: null, uploadLimit: null, durationMinutes: 60, validityMinutes: 180, name: "Quota", profileName: "quota-plan", sharedUsers: 1, priceHint: null };
+    await expect(adapter.updateHotspotPlan("quota-plan", draft)).resolves.toMatchObject({ dataLimitMb: 2048, dataLimitSource: "routeros" });
+    const source = String(transport.calls.find(call => call.command === "/ip/hotspot/user/profile/set")?.params?.["on-login"]);
+    expect(source).toContain(':log info "custom";');
+    await expect(adapter.getHotspotPlans()).resolves.toEqual([expect.objectContaining({ dataLimitMb: 2048 })]);
+    await expect(adapter.updateHotspotPlan("quota-plan", { dataLimitMb: null })).resolves.toMatchObject({ dataLimitMb: null, dataLimitSource: "routeros" });
+    expect(transport.calls.every(call => !call.command.includes("reset-counters"))).toBe(true);
+  });
+
+  it("refuse un lot dont RouterOS relit un quota absent et bloque uniquement les vouchers incohérents", async () => {
+    const transport = new VoucherBatchRouterOsTransport();
+    const batchCall = transport.callBatch.bind(transport);
+    transport.callBatch = async request => {
+      const result = await batchCall(request);
+      transport.users[0]["limit-bytes-total"] = "0";
+      return result;
+    };
+    const results = await createAdapter(transport).createHotspotUsersExactBatch([
+      { username: "quota-a", comment: "TicketPro:batch:quota-test", planId: "plan-3h", passwordSecretRef: "secret://test/quota-a/password", limitBytesTotal: 2_147_483_648 },
+      { username: "quota-b", comment: "TicketPro:batch:quota-test", planId: "plan-3h", passwordSecretRef: "secret://test/quota-b/password", limitBytesTotal: 2_147_483_648 }
+    ]);
+    expect(results.map(result => result.status)).toEqual(["error", "confirmed"]);
+    expect(transport.calls.filter(call => call.command === "/ip/hotspot/user/disable")).toHaveLength(1);
+    expect(transport.calls.some(call => call.command.includes("reset-counters") || call.command.includes("user/remove"))).toBe(false);
+  });
+
+  it("refuse la réactivation lorsque téléchargement et envoi ont consommé le quota, même sans marqueur du scheduler", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/user/print": [{ ".id": "*Q1", name: "quota-exhausted", profile: "plan-3h", "limit-bytes-total": "10485760", "bytes-out": "8388608", "bytes-in": "2097152" }]
+    });
+    await expect(createAdapter(transport).enableHotspotUser("quota-exhausted")).rejects.toMatchObject({ code: "router_rejected" });
+    expect(transport.calls.some(call => call.command === "/ip/hotspot/user/enable")).toBe(false);
+  });
   it("bloque le provisionnement avant toute écriture lorsque Device Mode interdit le scheduler", async () => {
     const transport = new MockRouterOsTransport({
       "/system/device-mode/print": [{ flagged: "no", hotspot: "yes", scheduler: "no" }],
@@ -688,6 +737,7 @@ describe("MikroTikRouterAdapter", () => {
           ".id": "*U1",
           disabled: "false",
           name: "123456",
+          "limit-bytes-total": "2147483648",
           profile: "plan-3h"
         }
       ],

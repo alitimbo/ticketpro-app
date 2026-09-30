@@ -23,6 +23,7 @@ import {
   RouterConnectionRepository,
   RouterRepository,
   TicketBatchRepository,
+  TicketStateHistoryRepository,
   TicketRepository
 } from "../../services/database/repositories";
 import { TauriFileService } from "../../services/files";
@@ -31,6 +32,7 @@ import { generateReportPdf } from "../../services/pdf";
 import { createPersistedRouterService } from "../../services/router";
 import {
   OrganizationOperationsSyncService,
+  OrganizationTicketCatalogService,
   RouterTicketSyncService
 } from "../../services/sync";
 import { Badge, Button, Card, EmptyState, PageHeader, StatCard } from "../../shared/ui";
@@ -61,10 +63,10 @@ import {
   ticketStatusLabel,
   ticketStatusToBadge
 } from "./ticketsPageModel";
-import { getSaasRouterRecoveryState, getSaasRouterTicketCatalog, SaasRequestError } from "../../services/saas";
+import { getSaasRouterRecoveryState, getSaasRouterTicketCatalog, SaasRequestError, type SaasRouterTicketCatalog } from "../../services/saas";
 import { routerAccessPolicyCloudId } from "../../services/access/routerAccessPolicyIdentity";
-import { mergeTicketUpdate } from "./ticketSyncPersistence";
-import { cloudReportTickets, reportRead } from "./reportRead";
+import { hasTicketDataChanges, mergeTicketUpdate, persistTicketSyncReport } from "./ticketSyncPersistence";
+import { cloudReportTickets, mergeReportTickets, reportRead } from "./reportRead";
 
 type SelectedReportTickets = {
   title: string;
@@ -104,6 +106,7 @@ export function ReportPage() {
     session?.permissions, saasAccount?.organization.id, saasAccount?.user.id]);
 
   const ticketRepository = useMemo(() => new TicketRepository(database), [database]);
+  const ticketHistoryRepository = useMemo(() => new TicketStateHistoryRepository(database), [database]);
   const planRepository = useMemo(() => new HotspotPlanRepository(database), [database]);
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
   const routerConnectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
@@ -144,6 +147,7 @@ export function ReportPage() {
 
     try {
       let catalogError: string | null = null;
+      let sharedCatalog: SaasRouterTicketCatalog | null = null;
       if (!session.permissions.some(permission => permission === "router.report.read" || permission === "router.report.own")) {
         setTickets([]);
         throw new Error("Votre rôle n’autorise pas la consultation des rapports.");
@@ -201,8 +205,7 @@ export function ReportPage() {
 
       // Keep the latest persisted snapshot visible even while RouterOS is being read.
       if (latestTickets.current.length > 0) {
-        const cached = new Map(latestTickets.current.map(ticket => [ticket.code, ticket]));
-        reportTickets = [...cached.values(), ...reportTickets.filter(ticket => !cached.has(ticket.code))];
+        reportTickets = mergeReportTickets(latestTickets.current, reportTickets);
       }
       setTickets(reportTickets);
       setIsLoading(false);
@@ -225,11 +228,8 @@ export function ReportPage() {
           throw new SaasRequestError("Ce routeur n’est plus accessible dans cette organisation.", 403);
         }
         const shared = cloudReportTickets(catalog, session, saasAccount?.user.id, routerId, router.name, plans);
-        const localByCode = new Map(reportTickets.map(ticket => [ticket.code, ticket]));
-        const sharedByCode = new Map(shared.map(ticket => [ticket.code, {
-          ...ticket, printedAt: localByCode.get(ticket.code)?.printedAt ?? []
-        }]));
-        reportTickets = [...sharedByCode.values(), ...reportTickets.filter(ticket => !sharedByCode.has(ticket.code))];
+        sharedCatalog = catalog;
+        reportTickets = mergeReportTickets(reportTickets, shared);
         setTickets(reportTickets);
       } catch (error) {
         if (!current()) return;
@@ -244,6 +244,11 @@ export function ReportPage() {
         controller.signal.removeEventListener("abort", abortCloud);
       }
 
+      const localByCode = new Map(records.filter(record => record.router_id === routerId).map(record => [record.username, record]));
+      reportTickets = reportTickets.map(ticket => {
+        const local = localByCode.get(ticket.code);
+        return local ? { ...ticket, id: local.id, batchId: local.batch_id, planId: local.plan_id } : ticket;
+      });
       const routerService = await read("Connexion MikroTik", () => createPersistedRouterService({
         authSession: session,
         connections,
@@ -257,6 +262,7 @@ export function ReportPage() {
       ));
       if (!current()) return;
       const updates = new Map(syncReport.updates.map(update => [update.id, update]));
+      const beforeObservation = reportTickets;
       reportTickets = reportTickets.map(ticket => ({ ...ticket, ...mergeTicketUpdate(ticket, updates.get(ticket.id)) }));
 
       setTickets(reportTickets);
@@ -264,6 +270,58 @@ export function ReportPage() {
       setLastLiveSyncAt(new Date().toISOString());
       setLiveStatus(catalogError ? "degraded" : "live");
       setLiveError(catalogError ? `Lecture MikroTik réussie, mais les données entre PC peuvent être incomplètes : ${catalogError}` : null);
+      // A read-only collaborator never publishes or mutates the shared catalogue.
+      if (session.permissions.includes("router.tickets.sync")) {
+        const localIds = new Set(records.map(record => record.id));
+        const localTickets = beforeObservation.filter(ticket => localIds.has(ticket.id));
+        try {
+          await read("Conservation des observations", () => persistTicketSyncReport({
+            actorProfileId: session.internal_profile_id,
+            batchRepository: ticketBatchRepository,
+            report: { ...syncReport, updates: syncReport.updates.filter(update => localIds.has(update.id)) },
+            ticketHistoryRepository,
+            ticketRepository,
+            tickets: localTickets
+          }));
+          if (!current()) return;
+          const changedBatches = new Set(localTickets.filter(ticket =>
+            hasTicketDataChanges(ticket, mergeTicketUpdate(ticket, updates.get(ticket.id)))
+          ).map(ticket => ticket.batchId));
+          const publisher = new OrganizationTicketCatalogService(database, session.account_id,
+            session.internal_profile_id, session.internal_profile_role);
+          for (const batchId of changedBatches) {
+            await read("Partage des observations", () => publisher.publishBatch(routerId, batchId));
+            if (!current()) return;
+          }
+          if (sharedCatalog) {
+            const beforeByCode = new Map(beforeObservation.map(ticket => [ticket.code, ticket]));
+            const observedByCode = new Map(reportTickets.filter(ticket => !localIds.has(ticket.id)
+              && hasTicketDataChanges(beforeByCode.get(ticket.code)!, ticket)).map(ticket => [ticket.code, ticket]));
+            const snapshots = sharedCatalog.tickets.flatMap(remote => {
+              const observed = observedByCode.get(remote.username);
+              if (!observed) return [];
+              return [{ ...remote, activated_at: observed.activatedAt, completed_at: observed.completedAt,
+                expires_at: observed.expiresAt, archived_at: observed.archivedAt, router_deleted_at: observed.routerDeletedAt,
+                downloaded_bytes: observed.downloadedBytes, uploaded_bytes: observed.uploadedBytes,
+                uptime_seconds: observed.uptimeSeconds, remaining_seconds: observed.remainingSeconds,
+                data_remaining_bytes: observed.dataRemainingBytes, last_router_sync_at: observed.lastRouterSyncAt,
+                ip_address: observed.ipAddress, mac_address: observed.macAddress, mikrotik_id: observed.mikrotikId,
+                status: observed.status, sync_status: observed.syncStatus === "conflict" ? "conflict" : observed.syncStatus === "error" ? "error" : "synced",
+                updated_at: new Date().toISOString() }];
+            });
+            if (snapshots.length) {
+              await read("Partage des observations distantes", () => publisher.publishObservedCatalog(routerId,
+                { batches: sharedCatalog!.batches, tickets: snapshots }));
+              if (!current()) return;
+            }
+          }
+          if (!changedBatches.size) await read("Reprise du partage", () => publisher.resumePending(routerId));
+        } catch (error) {
+          if (!current()) return;
+          setLiveStatus("degraded");
+          setLiveError(`Lecture MikroTik réussie ; conservation ou partage en attente : ${error instanceof Error ? error.message : "erreur de synchronisation"}`);
+        }
+      }
     } catch (error) {
       if (!current()) return;
       const errorMessage = error instanceof Error ? error.message : "Le routeur ne répond pas.";
@@ -293,6 +351,7 @@ export function ReportPage() {
     saasAccount?.user.id,
     saasAccount?.organization.id,
     ticketBatchRepository,
+    ticketHistoryRepository,
     ticketRepository
   ]);
 
@@ -396,6 +455,7 @@ export function ReportPage() {
             <span>Actualisation</span>
             <strong>15 secondes</strong>
             {routerOnlyCount > 0 ? <small>{routerOnlyCount} ticket(s) présent(s) uniquement sur le routeur</small> : null}
+            {routerOnlyCount > 0 ? <small>Historique commercial incomplet : ces utilisateurs ne sont pas inclus dans les totaux TicketPro.</small> : null}
             {scopedTickets.some((ticket) => ticket.printedCount > 0 && ticket.printedAt.length === 0) ? (
               <small>Certaines impressions historiques sont sans date connue : elles figurent uniquement dans le total sans période.</small>
             ) : null}
@@ -433,13 +493,13 @@ export function ReportPage() {
 
       <div className="page-grid">
         <div className="span-4">
-          <StatCard icon={Ticket} label="Créés" value={String(summary.metrics.find((metric) => metric.id === "created")?.value ?? 0)} hint={formatCurrencyTotals(summary.createdTheoreticalByCurrency)} />
+          <StatCard icon={Ticket} label="Créés" value={liveStatus !== "live" && scopedTickets.length === 0 ? "—" : String(summary.metrics.find((metric) => metric.id === "created")?.value ?? 0)} hint={formatCurrencyTotals(summary.createdTheoreticalByCurrency)} />
         </div>
         <div className="span-4">
-          <StatCard icon={CheckCircle2} label="Activés" value={String(summary.metrics.find((metric) => metric.id === "activated")?.value ?? 0)} hint={formatCurrencyTotals(summary.activatedTheoreticalByCurrency)} />
+          <StatCard icon={CheckCircle2} label="Activés" value={liveStatus !== "live" && scopedTickets.length === 0 ? "—" : String(summary.metrics.find((metric) => metric.id === "activated")?.value ?? 0)} hint={formatCurrencyTotals(summary.activatedTheoreticalByCurrency)} />
         </div>
         <div className="span-4">
-          <StatCard icon={Trash2} label="Supprimés" value={String(summary.metrics.find((metric) => metric.id === "deleted")?.value ?? 0)} hint="Suppression contrôlée" />
+          <StatCard icon={Trash2} label="Supprimés" value={liveStatus !== "live" && scopedTickets.length === 0 ? "—" : String(summary.metrics.find((metric) => metric.id === "deleted")?.value ?? 0)} hint="Manuels ou nettoyés par RouterOS" />
         </div>
       </div>
 

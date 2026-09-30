@@ -3,6 +3,41 @@ import type { HotspotPlanRecord, TicketRecord } from "../../domain/database";
 import type { SaasRouterTicketCatalog } from "../../services/saas";
 import { ticketFromRecord } from "./ticketsPageModel";
 import type { ReportTicket } from "./reportPageModel";
+import { resolveSharedTicketStatus, ticketLifecyclePhase } from "../../services/tickets/TicketLifecyclePolicy";
+
+/** Keep commercial history and cumulative counters; prefer the newest native observation. */
+export function mergeReportTickets(previous: ReportTicket[], incoming: ReportTicket[]): ReportTicket[] {
+  const merged = new Map(previous.map(ticket => [ticket.code, ticket]));
+  for (const next of incoming) {
+    const old = merged.get(next.code);
+    if (!old) { merged.set(next.code, next); continue; }
+    const incomingNewer = Date.parse(next.lastRouterSyncAt ?? "") >= Date.parse(old.lastRouterSyncAt ?? "")
+      || !old.lastRouterSyncAt;
+    const fresh = incomingNewer ? next : old;
+    const status = resolveSharedTicketStatus(old.status, next.status);
+    const terminal = ["exhausted", "expired", "router_deleted", "archived"].includes(ticketLifecyclePhase(next.status) ?? "");
+    const earlier = (a: string | null, b: string | null) => !a ? b : !b ? a : Date.parse(a) <= Date.parse(b) ? a : b;
+    const minimum = (a: number | null, b: number | null) => a === null ? b : b === null ? a : Math.min(a, b);
+    merged.set(next.code, {
+      ...next, ...fresh, id: old.id,
+      status: status.regression ? old.status : incomingNewer || terminal ? status.status as ReportTicket["status"] : old.status,
+      activatedAt: earlier(old.activatedAt, next.activatedAt),
+      completedAt: earlier(old.completedAt, next.completedAt),
+      archivedAt: earlier(old.archivedAt, next.archivedAt),
+      routerDeletedAt: earlier(old.routerDeletedAt, next.routerDeletedAt),
+      deletedAt: earlier(old.deletedAt, next.deletedAt),
+      expiresAt: earlier(old.expiresAt, next.expiresAt),
+      printedAt: [...new Set([...old.printedAt, ...next.printedAt])].sort(),
+      printedCount: Math.max(old.printedCount, next.printedCount),
+      downloadedBytes: Math.max(old.downloadedBytes, next.downloadedBytes),
+      uploadedBytes: Math.max(old.uploadedBytes, next.uploadedBytes),
+      uptimeSeconds: Math.max(old.uptimeSeconds, next.uptimeSeconds),
+      remainingSeconds: minimum(old.remainingSeconds, next.remainingSeconds),
+      dataRemainingBytes: minimum(old.dataRemainingBytes, next.dataRemainingBytes)
+    });
+  }
+  return [...merged.values()];
+}
 
 /** Bound read-only work. Late native replies are ignored by the caller, not treated as cancellation. */
 export async function reportRead<T>(signal: AbortSignal, label: string, read: () => Promise<T>, timeoutMs = 20_000): Promise<T> {
@@ -41,6 +76,6 @@ export function cloudReportTickets(catalog: SaasRouterTicketCatalog, session: Au
         sync_status: "synced" };
       return { ...ticketFromRecord(record, plan, routerName),
         currency: batch?.currency ?? plan?.currency ?? "CFA", priceHint: batch ? batch.price_snapshot : plan?.price_hint ?? null,
-        printedAt: [], deletedAt: remote.deleted_at };
+        printedAt: remote.printed_at ?? [], deletedAt: remote.deleted_at };
     });
 }

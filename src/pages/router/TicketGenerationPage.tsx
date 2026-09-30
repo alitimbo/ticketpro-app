@@ -10,6 +10,7 @@ import type {
   SyncStatus
 } from "../../domain/database";
 import type { UserRole } from "../../domain/auth";
+import { dataLimitMbToBytes } from "../../services/tickets/VoucherQuota";
 import { useAuth } from "../../app/auth/AuthProvider";
 import { AuthorizationError, requireProfilePermission } from "../../services/auth";
 import {
@@ -926,9 +927,7 @@ export function TicketGenerationPage() {
 
       const voucherDrafts = generatedCredentials.map((credential) => ({
         comment: buildVoucherBatchOwnershipComment(batchId),
-        limitBytesTotal: selectedPlan.dataLimitMb === null
-          ? null
-          : Math.round(selectedPlan.dataLimitMb * 1024 * 1024),
+        limitBytesTotal: dataLimitMbToBytes(selectedPlan.dataLimitMb),
         limitUptime: minutesToRouterOsDuration(selectedPlan.durationMinutes),
         passwordSecretRef: credential.passwordSecretRef,
         planId: state.selectedPlanId,

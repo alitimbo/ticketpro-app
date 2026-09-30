@@ -11,6 +11,14 @@ import {
 import { normalizeTicketPrefix, secretRefForTicket, voucherBelongsToBatch } from "../../services/tickets";
 
 export { secretRefForTicket };
+import { dataLimitMbToBytes, voucherQuotaMatches } from "../../services/tickets/VoucherQuota";
+
+type VoucherQuotaSnapshot = Pick<CreateTicketInput, "username"> & Partial<Pick<CreateTicketInput, "data_limit_mb_snapshot">>;
+
+function matchesTicketQuota(user: HotspotUser, ticket: VoucherQuotaSnapshot): boolean {
+  return voucherQuotaMatches(user, ticket.data_limit_mb_snapshot === undefined
+    ? undefined : dataLimitMbToBytes(ticket.data_limit_mb_snapshot));
+}
 
 export type TicketGenerationStep = 1 | 2 | 3 | 4 | 5 | 6;
 
@@ -112,7 +120,7 @@ export function getSelectedQuantity(state: TicketGenerationState): number {
 
 export function findConfirmedVoucherBatchUsers(input: {
   batchId: string;
-  pendingTickets: Pick<CreateTicketInput, "username">[];
+  pendingTickets: VoucherQuotaSnapshot[];
   profileName: string;
   routerUsers: HotspotUser[];
 }): HotspotUser[] {
@@ -129,7 +137,10 @@ export function findConfirmedVoucherBatchUsers(input: {
   });
 
   return input.pendingTickets
-    .map((ticket) => usersByName.get(ticket.username))
+    .map((ticket) => {
+      const user = usersByName.get(ticket.username);
+      return user && matchesTicketQuota(user, ticket) ? user : undefined;
+    })
     .filter((user): user is HotspotUser => Boolean(user));
 }
 
@@ -140,16 +151,18 @@ export type VoucherBatchIntegrity = {
   managedQuantity: number;
   missingUsernames: string[];
   profileMismatchUsernames: string[];
+  quotaMismatchUsernames: string[];
   unexpectedUsernames: string[];
 };
 
 export function inspectVoucherBatchIntegrity(input: {
   batchId: string;
-  expectedTickets: Pick<CreateTicketInput, "username">[];
+  expectedTickets: VoucherQuotaSnapshot[];
   profileName: string;
   routerUsers: HotspotUser[];
 }): VoucherBatchIntegrity {
   const expectedUsernames = new Set(input.expectedTickets.map((ticket) => ticket.username));
+  const expectedByName = new Map(input.expectedTickets.map(ticket => [ticket.username, ticket]));
   const managedUsers = input.routerUsers.filter((user) => voucherBelongsToBatch(user.comment, input.batchId));
   const managedCounts = new Map<string, number>();
 
@@ -165,6 +178,10 @@ export function inspectVoucherBatchIntegrity(input: {
   const profileMismatchUsernames = managedUsers
     .filter((user) => expectedUsernames.has(user.username) && user.profileName !== input.profileName)
     .map((user) => user.username);
+  const quotaMismatchUsernames = managedUsers.filter(user => {
+    const ticket = expectedByName.get(user.username);
+    return ticket && !matchesTicketQuota(user, ticket);
+  }).map(user => user.username);
 
   return {
     duplicateUsernames,
@@ -175,10 +192,12 @@ export function inspectVoucherBatchIntegrity(input: {
       && duplicateUsernames.length === 0
       && missingUsernames.length === 0
       && unexpectedUsernames.length === 0
-      && profileMismatchUsernames.length === 0,
+      && profileMismatchUsernames.length === 0
+      && quotaMismatchUsernames.length === 0,
     managedQuantity: managedUsers.length,
     missingUsernames,
     profileMismatchUsernames,
+    quotaMismatchUsernames,
     unexpectedUsernames
   };
 }

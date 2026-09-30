@@ -16,6 +16,23 @@ import {
 } from "./RouterVoucherOutboxService";
 
 describe("RouterVoucherOutboxService", () => {
+  it("bloque un voucher possédé dont le quota relu est illimité au lieu de 2 Go sans recréer ni confirmer", async () => {
+    const input = { ...ticket("ticket-quota", "900001"), data_limit_mb_snapshot: 2048 };
+    const context = await setup([input]);
+    const existing = { ...routerUser({ username: input.username, planId: "plan-1", passwordSecretRef: "secret://test", comment: "TicketProBatch:batch-1" }, "*quota"), limitBytesTotal: null };
+    const createHotspotUser = vi.fn();
+    const disableHotspotUser = vi.fn();
+    const disconnectActiveUser = vi.fn();
+    const service = new RouterVoucherOutboxService(context.database, "account-1", {
+      createHotspotUser, disableHotspotUser, disconnectActiveUser, findHotspotUser: async () => existing
+    });
+    await service.enqueueTickets(context.inputs);
+    expect(await service.resume("router-1")).toMatchObject({ conflicts: 1, succeeded: 0 });
+    expect(createHotspotUser).not.toHaveBeenCalled();
+    expect(disableHotspotUser).toHaveBeenCalledWith(input.username);
+    expect(disconnectActiveUser).toHaveBeenCalledWith(input.username);
+    expect((await context.tickets.findById(input.id))?.sync_status).not.toBe("synced");
+  });
   it("crée chaque voucher une seule fois puis confirme la base locale", async () => {
     const context = await setup([ticket("ticket-1", "100001")]);
     const users: HotspotUser[] = [];
@@ -339,6 +356,8 @@ function routerUser(draft: HotspotUserDraft, id: string): HotspotUser {
     passwordSecretRef: draft.passwordSecretRef,
     planId: draft.planId,
     profileName: "plan-profile",
+    limitBytesTotal: draft.limitBytesTotal ?? null,
+    limitUptime: draft.limitUptime ?? null,
     serverName: draft.serverName,
     status: "available",
     username: draft.username

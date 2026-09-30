@@ -12,6 +12,18 @@ import type { RecoveredVoucherBatchFileStore } from "./RecoveredVoucherBatchPdfS
 import { RecoveredVoucherBatchPdfService } from "./RecoveredVoucherBatchPdfService";
 
 describe("RecoveredVoucherBatchPdfService", () => {
+  it("ne remplace pas le volume illimité du ticket par le nouveau quota du plan", async () => {
+    const context = await setupConfirmedBatch();
+    await context.database.execute("UPDATE hotspot_plans SET data_limit_mb = ?1 WHERE id = ?2", [2048, "plan-1"]);
+    const generatePdf = vi.fn(() => new Uint8Array([1]));
+    const service = new RecoveredVoucherBatchPdfService(context.database, memoryFileStore(), {
+      generatePdf,
+      resolvePassword: async () => "test-password"
+    });
+    await expect(service.recover("account-1", "batch-1")).resolves.toMatchObject({ status: "created" });
+    expect(generatePdf).toHaveBeenCalledWith(expect.objectContaining({ dataLimitLabel: null }));
+  });
+
   it("reconstruit une seule fois le PDF d'un lot exactement confirme", async () => {
     const context = await setupConfirmedBatch();
     const fileStore = memoryFileStore();

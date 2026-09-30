@@ -2,6 +2,7 @@ import type { UserRole } from "../../domain/auth";
 import type { CreateTicketBatchInput, CreateTicketInput, SyncStatus, TicketBatchRecord, TicketRecord } from "../../domain/database";
 import {
   HotspotPlanRepository,
+  PrintHistoryRepository,
   RouterRepository,
   SyncOutboxRepository,
   TicketBatchRepository,
@@ -34,9 +35,11 @@ export class OrganizationTicketCatalogService {
   private readonly tickets: TicketRepository;
   private readonly outbox: SyncOutboxRepository;
   private readonly outboxService: SyncOutboxService;
+  private readonly printHistory: PrintHistoryRepository;
 
   constructor(database: DatabaseClient, private readonly accountId: string, private readonly profileId: string, private readonly profileRole: UserRole) {
     this.batches = new TicketBatchRepository(database);
+    this.printHistory = new PrintHistoryRepository(database);
     this.plans = new HotspotPlanRepository(database);
     this.routers = new RouterRepository(database);
     this.tickets = new TicketRepository(database);
@@ -75,11 +78,36 @@ export class OrganizationTicketCatalogService {
     await this.requireOperationsSucceeded(operationIds);
   }
 
+  /** Persist native observations of shared tickets even if this PC never generated the batch. */
+  async publishObservedCatalog(routerId: string, snapshot: Omit<CloudTicketCatalogPayload, "router_id">): Promise<void> {
+    const router = await this.requireOwnedRouter(routerId);
+    const operationIds: string[] = [];
+    for (const tickets of chunk(snapshot.tickets, CLOUD_TICKET_CATALOG_CHUNK_SIZE)) {
+      const batchIds = new Set(tickets.map(ticket => ticket.batch_id));
+      const payload: CloudTicketCatalogPayload = { router_id: router.cloud_router_id ?? router.id,
+        batches: snapshot.batches.filter(batch => batchIds.has(batch.id)), tickets };
+      const version = stableHash(JSON.stringify(payload));
+      const operation = await this.outbox.enqueue({ account_id: this.accountId,
+        aggregate_id: routerId, aggregate_type: "ticket_batch", correlation_id: routerId,
+        idempotency_key: `cloud:ticket-observations:${payload.router_id}:${version}`, max_attempts: 8,
+        operation_type: CLOUD_TICKET_CATALOG_OPERATION, payload, priority: 60, router_id: routerId });
+      operationIds.push(operation.id);
+    }
+    await this.outboxService.drain({ accountId: this.accountId, routerId,
+      operationTypes: [CLOUD_TICKET_CATALOG_OPERATION], limit: Math.max(40, operationIds.length) });
+    await this.requireOperationsSucceeded(operationIds);
+  }
+
   private async enqueueBatch(routerId: string, batchId: string): Promise<string[]> {
     const router = await this.requireOwnedRouter(routerId);
     const batch = await this.batches.findById(batchId);
     if (!batch || batch.account_id !== this.accountId || batch.router_id !== routerId) throw new Error("Lot local introuvable pour la synchronisation de l’organisation.");
-    const tickets = (await this.tickets.listByBatch(batchId)).map(ticketToCloud);
+    const printDates = (await this.printHistory.listByAccount(this.accountId, batchId))
+      .filter(entry => entry.router_id === routerId && entry.status === "printed" && entry.mode !== "test")
+      .map(entry => entry.created_at);
+    const tickets = (await this.tickets.listByBatch(batchId)).map(ticket => ({
+      ...ticketToCloud(ticket), printed_at: ticket.printed_count > 0 ? [...new Set(printDates)].slice(-1000) : []
+    }));
     const groups = tickets.length === 0 ? [[]] : chunk(tickets, CLOUD_TICKET_CATALOG_CHUNK_SIZE);
     const operationIds: string[] = [];
     for (let index = 0; index < groups.length; index += 1) {

@@ -273,6 +273,8 @@ export class FakeRouterAdapter implements RouterAdapter {
       planId: user.planId,
       profileName: plan.profileName,
       serverName: user.serverName ?? "all",
+      limitBytesTotal: user.limitBytesTotal ?? null,
+      limitUptime: user.limitUptime ?? null,
       status: "available",
       username: user.username
     };
@@ -318,6 +320,8 @@ export class FakeRouterAdapter implements RouterAdapter {
         planId: batch.planId,
         profileName: plan.profileName,
         serverName: batch.serverName ?? "all",
+        limitBytesTotal: batch.limitBytesTotal ?? null,
+        limitUptime: batch.limitUptime ?? null,
         status: "available",
         username: generatedCode.username
       });

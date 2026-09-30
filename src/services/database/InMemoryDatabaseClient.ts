@@ -20,6 +20,8 @@ const tableNames: LocalTableName[] = [
   "internal_profiles",
   "license_state",
   "printers",
+  "print_history",
+  "ticket_state_history",
   "router_connections",
   "router_managed_resource_manifests",
   "router_snapshots",

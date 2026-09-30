@@ -272,6 +272,7 @@ export type SaasTicketSnapshot = {
   password_is_username: boolean;
   plan_id: string;
   printed_count: number;
+  printed_at?: string[];
   remaining_seconds: number | null;
   router_deleted_at: string | null;
   status: string;

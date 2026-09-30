@@ -89,6 +89,7 @@ describe("reconcileRouterPlanCatalog", () => {
         duration_minutes: 180,
         currency: "CFA",
         id: "commercial-3h",
+        data_limit_mb: 500,
         mikrotik_id: "routeros-3h",
         name: "Formule soirée",
         price_hint: 500,
@@ -101,5 +102,9 @@ describe("reconcileRouterPlanCatalog", () => {
     const visible = await repository.listByRouter("router-1");
     expect(visible.some((plan) => plan.id === "deleted-in-winbox")).toBe(false);
     expect(visible.some((plan) => plan.id === "pending-local")).toBe(true);
+    const unlimited = await reconcileRouterPlanCatalog({
+      plans: [livePlan({ dataLimitMb: null, dataLimitSource: "routeros" })], repository, routerId: "router-1"
+    });
+    expect(unlimited.liveRecords[0].data_limit_mb).toBeNull();
   });
 });

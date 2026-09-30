@@ -827,6 +827,7 @@ ensureColumn("organization_routers", "decommission_status", "TEXT NOT NULL DEFAU
 ensureColumn("organization_routers", "decommission_requested_at", "TEXT");
 ensureColumn("organization_routers", "decommission_error_code", "TEXT");
 ensureColumn("organization_routers", "decommission_report_json", "TEXT");
+ensureColumn("organization_tickets", "printed_at_json", "TEXT NOT NULL DEFAULT '[]'");
 ensureColumn("organization_routers", "support_status", "TEXT NOT NULL DEFAULT 'normal'");
 ensureColumn("organization_routers", "support_updated_at", "TEXT");
 ensureColumn("organization_tickets", "duration_minutes_snapshot", "INTEGER");
@@ -4304,6 +4305,7 @@ function normalizeOrganizationTicket(ticket) {
     password_is_username: ticket.password_is_username === true || ticket.password_is_username === 1,
     plan_id: requireSnapshotText(ticket, "plan_id", 200),
     printed_count: normalizeNonNegativeInteger(ticket.printed_count),
+    printed_at: normalizeTicketPrintDates(ticket.printed_at),
     remaining_seconds: normalizeOptionalNonNegativeInteger(ticket.remaining_seconds),
     router_deleted_at: normalizeOptionalIsoDate(ticket.router_deleted_at),
     shared_users_snapshot: normalizeOptionalNonNegativeInteger(ticket.shared_users_snapshot),
@@ -4316,6 +4318,15 @@ function normalizeOrganizationTicket(ticket) {
     username: requireSnapshotText(ticket, "username", 200),
     validity_minutes_snapshot: normalizeOptionalNonNegativeInteger(ticket.validity_minutes_snapshot)
   };
+}
+
+function normalizeTicketPrintDates(value) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > 1000) throw new HttpError(400, "Historique des dates d'impression invalide.");
+  return [...new Set(value.map(date => {
+    if (typeof date !== "string" || !Number.isFinite(Date.parse(date))) throw new HttpError(400, "Date d'impression invalide.");
+    return new Date(date).toISOString();
+  }))].sort();
 }
 
 function mergeOrganizationTicket(existing, incoming) {
@@ -4369,6 +4380,7 @@ function mergeOrganizationTicket(existing, incoming) {
     password_is_username: Number(existing.password_is_username) === 1,
     plan_id: commercialSnapshotMutable ? incoming.plan_id : existing.plan_id,
     printed_count: Math.max(Number(existing.printed_count), incoming.printed_count),
+    printed_at: [...new Set([...JSON.parse(existing.printed_at_json ?? "[]"), ...incoming.printed_at])].sort().slice(-1000),
     remaining_seconds: minimumKnownCounter(existing.remaining_seconds, incoming.remaining_seconds),
     router_deleted_at: existing.router_deleted_at ?? incoming.router_deleted_at,
     shared_users_snapshot: snapshotValue("shared_users_snapshot"),
@@ -4473,6 +4485,7 @@ function organizationTicketResponse(record) {
     password_is_username: Number(record.password_is_username) === 1,
     plan_id: record.plan_id,
     printed_count: Number(record.printed_count),
+    printed_at: JSON.parse(record.printed_at_json ?? "[]"),
     remaining_seconds: record.remaining_seconds === null ? null : Number(record.remaining_seconds),
     router_deleted_at: record.router_deleted_at,
     shared_users_snapshot: record.shared_users_snapshot === null ? null : Number(record.shared_users_snapshot),
@@ -7180,6 +7193,9 @@ const handlers = [
         existing?.created_at ?? merged.created_at,
         merged.updated_at
       );
+      db.prepare(`UPDATE organization_tickets SET printed_at_json = ?
+        WHERE organization_id = ? AND router_id = ? AND id = ? AND updated_at = ?`)
+        .run(JSON.stringify(merged.printed_at), context.organization.id, routerId, ticketId, merged.updated_at);
     }
 
     logEvent(request, null, "organization_ticket_catalog_synchronized", context.organization.id, null, {

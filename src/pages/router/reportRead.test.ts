@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSession } from "../../services/auth";
 import type { SaasRouterTicketCatalog, SaasTicketSnapshot } from "../../services/saas";
-import { cloudReportTickets, reportRead } from "./reportRead";
+import { cloudReportTickets, mergeReportTickets, reportRead } from "./reportRead";
 import { scopeReportTicketsForSession } from "./reportPageModel";
 
 export function reportCatalog(): SaasRouterTicketCatalog {
@@ -52,6 +52,26 @@ describe("bounded report reads", () => {
 });
 
 describe("cloud report projection", () => {
+  it("conserve les dates d'impression partagées sans les inventer", () => {
+    const catalog = reportCatalog();
+    catalog.tickets[0].printed_at = ["2026-09-02T12:00:00Z"];
+    const session = createSession("guest", "guest@example.test", Date.now());
+    expect(cloudReportTickets(catalog, session, "guest-id", "local-router", "Nova", [])[0].printedAt)
+      .toEqual(["2026-09-02T12:00:00Z"]);
+  });
+
+  it("fusionne le cache, SQLite et le cloud sans régression ni perte d'historique", () => {
+    const session = createSession("guest", "guest@example.test", Date.now());
+    const base = cloudReportTickets(reportCatalog(), session, "guest-id", "local-router", "Nova", [])[0];
+    const current = { ...base, status: "consommé" as const, lastRouterSyncAt: "2026-09-03T12:00:00Z",
+      uploadedBytes: 100, uptimeSeconds: 3600, printedAt: ["2026-09-02T12:00:00Z"], remainingSeconds: 0 };
+    const old = { ...base, id: "other-pc-id", lastRouterSyncAt: "2026-09-01T12:00:00Z", printedCount: 2 };
+    expect(mergeReportTickets([current], [old])[0]).toMatchObject({
+      id: current.id, status: "consommé", uploadedBytes: 100, uptimeSeconds: 3600,
+      printedAt: current.printedAt, printedCount: 2, remainingSeconds: 0, lastRouterSyncAt: current.lastRouterSyncAt
+    });
+    expect(mergeReportTickets([old], [current])[0].status).toBe("consommé");
+  });
   it("includes vouchers even without the local plan, keeping commercial snapshots", () => {
     const session = createSession("guest", "guest@example.test", Date.now());
     const rows = cloudReportTickets(reportCatalog(), session, "guest-id", "local-router", "Nova", []);

@@ -72,6 +72,28 @@ const activeUsers: ActiveHotspotUser[] = [
 ];
 
 describe("RouterTicketSyncService", () => {
+  it("lit les durées HH:MM:SS et ne considère pas zéro comme une activation", () => {
+    const idle = compareLocalAndRouterTickets([localTickets[0]], [{ ...routerUsers[0], uptime: "00:00:00", limitUptime: "01:00:00" }], []);
+    expect(idle.updates[0]).toMatchObject({ activatedAt: null, uptimeSeconds: 0, remainingSeconds: 3600 });
+    const deadline = "2026-09-01T13:00:00Z";
+    const firstLogin = compareLocalAndRouterTickets([{ ...localTickets[0], planValidityMinutes: 180 }],
+      [{ ...routerUsers[0], uptime: "00:00:00", comment: `TicketPro:v1;validity=180;expires=${Date.parse(deadline) * 1000000};state=active;` }], []);
+    expect(firstLogin.updates[0].activatedAt).toBe("2026-09-01T10:00:00.000Z");
+    const exhausted = compareLocalAndRouterTickets([localTickets[0]], [{ ...routerUsers[0], uptime: "01:00:00", limitUptime: "01:00:00" }], []);
+    expect(exhausted.updates[0]).toMatchObject({ status: "consommé", uptimeSeconds: 3600, remainingSeconds: 0 });
+  });
+  it("refuse de confirmer un quota perdu sans réinitialiser la consommation", () => {
+    const report = compareLocalAndRouterTickets(
+      [{ ...localTickets[0], dataLimitMb: 10, uploadedBytes: 50 }],
+      [{ ...routerUsers[0], limitBytesTotal: null, uploadedBytes: 50 }],
+      []
+    );
+    expect(report.updates[0]).toMatchObject({ syncStatus: "conflict", uploadedBytes: 50 });
+    expect(report.logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ level: "error", message: expect.stringContaining("quota RouterOS") })
+    ]));
+  });
+
   it("compare les tickets locaux et ceux du routeur", () => {
     const report = compareLocalAndRouterTickets(localTickets, routerUsers, activeUsers);
 

@@ -304,7 +304,7 @@ function resolveDataLimitBytes(
   routerLimit: number | null | undefined,
   planLimitMb: number | null | undefined
 ): number | null {
-  if (routerLimit && routerLimit > 0) return routerLimit;
+  if (routerLimit !== undefined) return routerLimit && routerLimit > 0 ? routerLimit : null;
   if (planLimitMb && planLimitMb > 0) return Math.round(planLimitMb * 1024 * 1024);
   return null;
 }

@@ -13,6 +13,14 @@ import {
 const agentSession = createSession("agent", "doumacorporation@gmail.com", Date.now());
 
 describe("reportPageModel", () => {
+  it("compte le nettoyage automatique confirmé sous son jour de suppression", () => {
+    const ticket = { ...createDemoReportTickets()[1], createdAt: "2026-07-01T08:00:00Z",
+      deletedAt: null, routerDeletedAt: "2026-07-12T10:00:00Z", archivedAt: "2026-07-12T10:00:00Z",
+      status: "archivé" as const };
+    const filters = { ...emptyReportFilters, dateFrom: "2026-07-12", dateTo: "2026-07-12" };
+    expect(buildReportSummary([ticket], filters).metrics.find(metric => metric.id === "deleted")?.value).toBe(1);
+    expect(buildReportSummary([{ ...ticket, routerDeletedAt: null }], filters).metrics.find(metric => metric.id === "deleted")?.value).toBe(0);
+  });
   it("calcule les tickets activés, complétés et supprimés sur une période", () => {
     const tickets = createDemoReportTickets();
     const filters = { ...emptyReportFilters, dateFrom: "2026-07-08", dateTo: "2026-07-08" };

@@ -142,7 +142,7 @@ export function buildReportSummary(tickets: ReportTicket[], filters: ReportFilte
     buildMetric("activated", "Tickets activés", "Utilisés par un client", filteredTickets, filters),
     buildMetric("completed", "Tickets complétés", "Sessions terminées", filteredTickets, filters),
     buildMetric("expired", "Tickets expirés", "Fin de validité atteinte", filteredTickets, filters),
-    buildMetric("deleted", "Tickets supprimés", "Suppression contrôlée", filteredTickets, filters),
+    buildMetric("deleted", "Tickets supprimés", "Suppression manuelle ou nettoyage RouterOS confirmé", filteredTickets, filters),
     buildMetric("available", "Tickets disponibles", "Encore non utilisés", filteredTickets, filters)
   ];
   const activatedTickets = getTicketsForMetric(filteredTickets, "activated", filters);
@@ -376,7 +376,8 @@ function getMetricDates(ticket: ReportTicket, metricId: ReportMetricId): string[
   }
 
   if (metricId === "deleted") {
-    return ticket.deletedAt ? [ticket.deletedAt] : [];
+    const deletedAt = ticket.routerDeletedAt ?? ticket.deletedAt;
+    return deletedAt ? [deletedAt] : [];
   }
 
   return (ticket.status === "disponible" || ticket.status === "imprimé")
@@ -392,6 +393,7 @@ function getTicketActivityDates(ticket: ReportTicket): string[] {
     ticket.activatedAt,
     ticket.completedAt,
     ticket.expiresAt,
+    ticket.routerDeletedAt,
     ticket.deletedAt
   ].filter((value): value is string => Boolean(value));
 }

@@ -43,6 +43,12 @@ const servers = [
 ];
 
 describe("ticketGenerationModel", () => {
+  it("refuse de confirmer et imprimer un voucher dont le quota 2 Go est absent sur RouterOS", () => {
+    const user = { username: "quota", id: "*Q", profileName: "quota-plan", planId: "quota-plan", passwordSecretRef: "secret://test", comment: "TicketPro:v1;batch=quota-batch;", createdAt: "2026-09-30", status: "available" as const, limitBytesTotal: null };
+    const tickets = [{ username: "quota", data_limit_mb_snapshot: 2048 }];
+    expect(findConfirmedVoucherBatchUsers({ batchId: "quota-batch", pendingTickets: tickets, profileName: "quota-plan", routerUsers: [user] })).toEqual([]);
+    expect(inspectVoucherBatchIntegrity({ batchId: "quota-batch", expectedTickets: tickets, profileName: "quota-plan", routerUsers: [user] })).toMatchObject({ isExact: false, quotaMismatchUsernames: ["quota"] });
+  });
   it("formats commercial data volumes in Mo and Go", () => {
     expect(formatDataLimit(500)).toBe("500 Mo");
     expect(formatDataLimit(2048)).toBe("2 Go");

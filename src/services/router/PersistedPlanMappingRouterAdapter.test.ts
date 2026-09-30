@@ -71,6 +71,19 @@ function createDelegate() {
 }
 
 describe("PersistedPlanMappingRouterAdapter", () => {
+  it("conserve un ancien quota local si la métadonnée RouterOS est absente, mais accepte un illimité explicitement enregistré", async () => {
+    const getHotspotPlans = vi.fn(async () => [{ dataLimitMb: null, profileName: plan.mikrotik_profile_name }]);
+    const adapter = new PersistedPlanMappingRouterAdapter({ getHotspotPlans } as unknown as RouterAdapter, [plan]);
+    expect((await adapter.getHotspotPlans())[0].dataLimitMb).toBe(2048);
+    getHotspotPlans.mockResolvedValueOnce([{ dataLimitMb: null, profileName: plan.mikrotik_profile_name, dataLimitSource: "routeros" } as never]);
+    expect((await adapter.getHotspotPlans())[0].dataLimitMb).toBeNull();
+  });
+  it("ne remplace pas un illimité explicite du ticket par le nouveau quota du plan", async () => {
+    const delegate = createDelegate();
+    const adapter = new PersistedPlanMappingRouterAdapter(delegate.adapter, [plan]);
+    await adapter.createHotspotUser({ username: "unlimited", planId: plan.id, passwordSecretRef: "secret://test", limitBytesTotal: null });
+    expect(delegate.createHotspotUser).toHaveBeenCalledWith(expect.objectContaining({ limitBytesTotal: null }));
+  });
   it("traduit l'identifiant SQLite en profil MikroTik et matérialise les limites", async () => {
     const delegate = createDelegate();
     const adapter = new PersistedPlanMappingRouterAdapter(delegate.adapter, [plan]);

@@ -994,6 +994,7 @@ test("les vouchers générés par un opérateur deviennent visibles par l'admini
         upload_limit_snapshot: "2M",
         uptime_seconds: 0,
         username: "482793",
+        printed_at: ["2026-08-13T18:15:00.000Z"],
         validity_minutes_snapshot: 180
       }]
     }
@@ -1007,6 +1008,7 @@ test("les vouchers générés par un opérateur deviennent visibles par l'admini
   assert.equal(ownerCatalog.status, 200);
   assert.equal(ownerCatalog.payload.tickets.length, 1);
   assert.equal(ownerCatalog.payload.tickets[0].username, "482793");
+  assert.deepEqual(ownerCatalog.payload.tickets[0].printed_at, ["2026-08-13T18:15:00.000Z"]);
   assert.equal(ownerCatalog.payload.tickets[0].created_by_email, "catalogue.operator@example.com");
   assert.equal(ownerCatalog.payload.tickets[0].password_is_username, true);
   assert.equal(ownerCatalog.payload.tickets[0].duration_minutes_snapshot, 60);
@@ -1076,6 +1078,7 @@ test("les vouchers générés par un opérateur deviennent visibles par l'admini
       tickets: [{
         ...exhausted,
         completed_at: null,
+        printed_at: [],
         data_limit_mb_snapshot: 999,
         data_remaining_bytes: 999,
         downloaded_bytes: 0,
@@ -1092,6 +1095,7 @@ test("les vouchers générés par un opérateur deviennent visibles par l'admini
   const protectedTicket = staleCatalog.payload.tickets.find((ticket) => ticket.username === "482793");
   assert.equal(protectedTicket.status, "consommÃ©");
   assert.equal(protectedTicket.sync_status, "conflict");
+  assert.deepEqual(protectedTicket.printed_at, ["2026-08-13T18:15:00.000Z"]);
   assert.equal(protectedTicket.uptime_seconds, 3600);
   assert.equal(protectedTicket.downloaded_bytes, 524_288_000);
   assert.equal(protectedTicket.duration_minutes_snapshot, 60);

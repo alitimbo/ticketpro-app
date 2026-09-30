@@ -84,7 +84,9 @@ export function ticketFromRecord(
     code: record.username,
     completedAt: record.completed_at,
     createdAt: record.created_at,
-    dataLimitMb: record.data_limit_mb_snapshot ?? plan?.data_limit_mb ?? null,
+    dataLimitMb: record.data_limit_mb_snapshot !== undefined
+      ? record.data_limit_mb_snapshot
+      : plan?.data_limit_mb ?? null,
     dataRemainingBytes: record.data_remaining_bytes ?? null,
     deletedAt: record.deleted_at,
     downloadedBytes: record.downloaded_bytes,

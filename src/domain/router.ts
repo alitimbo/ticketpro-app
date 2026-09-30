@@ -91,6 +91,8 @@ export type HotspotPlan = {
   durationMinutes: number;
   validityMinutes: number | null;
   dataLimitMb: number | null;
+  /** Explicit quota metadata read on RouterOS, including an explicit unlimited value. */
+  dataLimitSource?: "routeros";
   downloadLimit: string | null;
   uploadLimit: string | null;
   sharedUsers: number;
