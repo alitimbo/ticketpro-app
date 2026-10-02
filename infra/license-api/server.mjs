@@ -5,6 +5,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import nodemailer from "nodemailer";
 import { subscriptionNotificationEvent } from "./subscription-notification-policy.mjs";
+import { resolveOrganizationDeviceLimit, organizationHubOperatorLimit } from "./organization-device-limit.mjs";
 
 const PORT = Number(process.env.LICENSE_PORT ?? 8787);
 const HOST = process.env.LICENSE_BIND ?? "127.0.0.1";
@@ -282,6 +283,17 @@ db.exec(`
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     last_login_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS organization_device_limit_policies (
+    organization_id TEXT PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
+    mode TEXT NOT NULL CHECK(mode IN ('inherit', 'limited', 'unlimited')),
+    max_devices INTEGER,
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    updated_by_admin_id TEXT,
+    updated_at TEXT NOT NULL,
+    CHECK((mode = 'limited' AND typeof(max_devices) = 'integer' AND max_devices > 0)
+      OR (mode IN ('inherit', 'unlimited') AND max_devices IS NULL))
   );
 
   CREATE TABLE IF NOT EXISTS organization_sessions (
@@ -955,6 +967,14 @@ db.exec(`
 `);
 
 const statements = {
+  findOrganizationDeviceLimitPolicy: db.prepare("SELECT * FROM organization_device_limit_policies WHERE organization_id = ?"),
+  upsertOrganizationDeviceLimitPolicy: db.prepare(`
+    INSERT INTO organization_device_limit_policies (organization_id, mode, max_devices, revision, updated_by_admin_id, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(organization_id) DO UPDATE SET mode = excluded.mode,
+      max_devices = excluded.max_devices, revision = excluded.revision,
+      updated_by_admin_id = excluded.updated_by_admin_id, updated_at = excluded.updated_at
+  `),
   listPlans: db.prepare(`
     SELECT * FROM plans
     WHERE deleted_at IS NULL AND is_active = 1 AND is_reseller = 0 AND purchase_mode = 'online'
@@ -3191,7 +3211,7 @@ function organizationDeviceAccessScope(context) {
 
 function organizationDeviceLimitForContext(context) {
   return organizationDeviceAccessScope(context) === "owner"
-    ? deviceLimitValue(context.subscription)
+    ? organizationEffectiveDeviceLimit(context.organization.id, context.subscription).maxDevices
     : null;
 }
 
@@ -3213,9 +3233,35 @@ function organizationDeviceCountForContext(context) {
 // lui ont été attribués. Les postes invités sont donc ajoutés au plafond du hub
 // tout en restant des appareils indépendants, journalisés et révocables.
 function organizationOperatorLimitForHub(organizationId, subscription) {
-  const ownerLimit = deviceLimitForHub(subscription);
-  if (ownerLimit === null) return null;
-  return ownerLimit + Number(statements.countOrganizationMemberDevices.get(organizationId).count);
+  const ownerLimit = organizationEffectiveDeviceLimit(organizationId, subscription).maxDevices;
+  return organizationHubOperatorLimit(
+    ownerLimit,
+    Number(statements.countOrganizationOwnerDevices.get(organizationId).count),
+    Number(statements.countOrganizationMemberDevices.get(organizationId).count)
+  );
+}
+
+function organizationEffectiveDeviceLimit(organizationId, subscription) {
+  return resolveOrganizationDeviceLimit(statements.findOrganizationDeviceLimitPolicy.get(organizationId), subscription);
+}
+
+function organizationDeviceLimitPolicyResponse(organizationId, subscription = currentOrganizationSubscription(organizationId)) {
+  const policy = statements.findOrganizationDeviceLimitPolicy.get(organizationId);
+  const effective = resolveOrganizationDeviceLimit(policy, subscription);
+  const ownerCount = Number(statements.countOrganizationOwnerDevices.get(organizationId).count);
+  return {
+    mode: policy?.mode ?? "inherit",
+    max_devices: policy?.max_devices ?? null,
+    revision: Number(policy?.revision ?? 0),
+    updated_at: policy?.updated_at ?? null,
+    effective_device_limit_mode: effective.mode,
+    effective_max_devices: effective.maxDevices,
+    plan_device_limit_mode: deviceLimitMode(subscription),
+    plan_max_devices: subscription ? deviceLimitValue(subscription) : 0,
+    owner_count: ownerCount,
+    collaborator_count: Number(statements.countOrganizationMemberDevices.get(organizationId).count),
+    over_limit_count: effective.maxDevices === null ? 0 : Math.max(0, ownerCount - effective.maxDevices)
+  };
 }
 
 function planResponse(plan) {
@@ -3464,7 +3510,7 @@ function organizationSubscriptionLifecycle(subscription, nowMs = Date.now()) {
   };
 }
 
-function organizationSubscriptionResponse(subscription) {
+function organizationSubscriptionResponse(subscription, { applyDevicePolicy = true } = {}) {
   if (!subscription) {
     return {
       status: "none",
@@ -3487,6 +3533,9 @@ function organizationSubscriptionResponse(subscription) {
     ? Math.max(1, Math.ceil((Date.parse(lifecycle.graceEndsAt) - Date.now()) / DAY_MS))
     : 0;
   const limitMode = deviceLimitMode(subscription);
+  const effective = applyDevicePolicy
+    ? organizationEffectiveDeviceLimit(subscription.organization_id, subscription)
+    : resolveOrganizationDeviceLimit(null, subscription);
   return {
     id: subscription.id,
     status: lifecycle.isSuspended
@@ -3499,8 +3548,14 @@ function organizationSubscriptionResponse(subscription) {
     admin_status: subscription.admin_status ?? "active",
     is_active: lifecycle.isActive,
     router_limit: Number(subscription.router_limit),
-    device_limit_mode: limitMode,
-    max_devices: limitMode === "unlimited" ? null : Number(subscription.max_devices ?? 1),
+    device_limit_mode: effective.mode,
+    max_devices: effective.maxDevices,
+    device_limit_source: effective.source,
+    device_limit_policy_revision: applyDevicePolicy
+      ? Number(statements.findOrganizationDeviceLimitPolicy.get(subscription.organization_id)?.revision ?? 0)
+      : 0,
+    plan_device_limit_mode: limitMode,
+    plan_max_devices: limitMode === "unlimited" ? null : Number(subscription.max_devices ?? 1),
     current_period_start: subscription.current_period_start,
     current_period_end: subscription.current_period_end,
     access_ends_at: lifecycle.accessEndsAt,
@@ -7999,8 +8054,18 @@ const handlers = [
   route("POST", "/v1/admin/users/list", async (request, body) => {
     requireAdmin(request, ["owner", "admin", "support"]);
     const limit = body.limit === undefined ? 500 : requireInteger(body, "limit", 1, 1000);
+    const subscriptionViews = new Map();
+    const subscriptionView = (organizationId) => {
+      if (!subscriptionViews.has(organizationId)) {
+        subscriptionViews.set(organizationId, organizationSubscriptionResponse(currentOrganizationSubscription(organizationId)));
+      }
+      return subscriptionViews.get(organizationId);
+    };
     const users = statements.listAdminOrganizationUsers.all(limit).map((user) => ({
       ...user,
+      // Keep the persisted status for older clients; expose the same effective
+      // lifecycle as the SaaS API without changing subscription state.
+      effective_subscription_status: subscriptionView(user.organization_id).status,
       invitation_pending: Boolean(user.invitation_pending),
       failed_login_count: Number(user.failed_login_count),
       organization_count: Number(user.organization_count),
@@ -8033,8 +8098,17 @@ const handlers = [
         accepted_at: user.invitation_pending ? null : user.created_at
       });
     }
+    const membershipViews = memberships.map((membership) => ({
+      ...membership,
+      router_ids: organizationUserRouterAccess(membership).router_ids,
+      device_limit_policy: organizationDeviceLimitPolicyResponse(membership.organization_id),
+      device_usage: {
+        owner_count: Number(statements.countOrganizationOwnerDevices.get(membership.organization_id).count),
+        collaborator_count: Number(statements.countOrganizationMemberDevices.get(membership.organization_id).count)
+      }
+    }));
     const subscriptions = statements.listAdminUserSubscriptions.all(userId, userId).map((item) => ({
-      ...organizationSubscriptionResponse(item),
+      ...organizationSubscriptionResponse(item, { applyDevicePolicy: false }),
       organization_id: item.organization_id,
       organization_name: item.organization_name,
       source: organizationSubscriptionSource(item.payment_order_id),
@@ -8078,7 +8152,7 @@ const handlers = [
         created_at: user.created_at,
         last_login_at: user.last_login_at
       },
-      memberships,
+      memberships: membershipViews,
       subscriptions,
       subscription_schedules: subscriptionSchedules,
       subscription_actions: subscriptionActions,
@@ -8295,6 +8369,72 @@ const handlers = [
       message: emailDelivered
         ? "L'invitation a été renvoyée par e-mail."
         : "Un nouveau lien a été généré, mais l'e-mail n'a pas pu être envoyé."
+    };
+  }),
+
+  route("POST", "/v1/admin/organizations/device-limit", async (request, body) => {
+    const admin = requireAdmin(request, ["owner", "admin"]);
+    const organizationId = requireText(body, "organization_id", 128);
+    if (!statements.findOrganizationById.get(organizationId)) {
+      throw new HttpError(404, "Organisation introuvable.");
+    }
+    const mode = requireText(body, "mode", 24);
+    if (!["inherit", "limited", "unlimited"].includes(mode)) {
+      throw new HttpError(400, "Choisissez le forfait, une limite personnalisée ou le mode illimité.");
+    }
+    const maxDevices = mode === "limited" ? requireInteger(body, "max_devices", 1, 100_000) : null;
+    if (mode !== "limited" && body.max_devices != null) {
+      throw new HttpError(400, "Le nombre de postes doit être vide en mode forfait ou illimité.");
+    }
+    const revision = requireInteger(body, "expected_revision", 0, 1_000_000_000);
+    const reason = requireText(body, "reason", 500);
+    if (reason.length < 5) throw new HttpError(400, "Le motif doit contenir au moins 5 caractères.");
+    const subscription = currentOrganizationSubscription(organizationId);
+    const changedAt = nowIso();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const previous = organizationDeviceLimitPolicyResponse(organizationId, subscription);
+      if (previous.revision !== revision) {
+        throw new HttpError(409, "La limite a été modifiée par un autre administrateur. Actualisez la fiche avant de réessayer.", {
+          code: "DEVICE_LIMIT_POLICY_CONFLICT"
+        });
+      }
+      if (previous.mode !== mode || previous.max_devices !== maxDevices) {
+        statements.upsertOrganizationDeviceLimitPolicy.run(organizationId, mode, maxDevices, revision + 1, admin.id, changedAt);
+        recordOrganizationSubscriptionAdminAction({
+          organizationId, subscriptionId: subscription?.id ?? null,
+          action: "organization_device_limit_changed", reason, admin, createdAt: changedAt,
+          details: {
+            previous_mode: previous.mode, previous_max_devices: previous.max_devices,
+            mode, max_devices: maxDevices, revision: revision + 1,
+            scope: "owner", existing_devices_preserved: true
+          }
+        });
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    // Commit desired state first. A failed hub request must not lose the policy:
+    // the regular reconciliation retries the effective limit on every cycle.
+    let hubStatus = "not_applicable";
+    if (organizationSubscriptionLifecycle(subscription).isActive) {
+      try {
+        await vpnHubRequest("/v1/tenants", {
+          account_id: organizationId,
+          operator_limit: organizationOperatorLimitForHub(organizationId, subscription),
+          router_limit: Number(subscription.router_limit)
+        });
+        hubStatus = "applied";
+      } catch {
+        hubStatus = "pending";
+      }
+    }
+    return {
+      message: "Limite de postes propriétaire enregistrée pour cette organisation. Les postes existants sont conservés.",
+      policy: organizationDeviceLimitPolicyResponse(organizationId, subscription),
+      propagation: { hub_status: hubStatus, desktop: "next_refresh", existing_devices_preserved: true }
     };
   }),
 

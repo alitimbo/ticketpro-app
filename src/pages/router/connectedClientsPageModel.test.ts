@@ -128,19 +128,25 @@ describe("connectedClientsPageModel", () => {
         created_by_profile_id: "profile-1",
         deleted_at: null,
         downloaded_bytes: 0,
+        data_limit_mb_snapshot: 10,
+        download_limit_snapshot: "2M",
+        duration_minutes_snapshot: 180,
         expires_at: null,
         id: "ticket-1",
         ip_address: null,
         mac_address: null,
         mikrotik_id: "*U1",
+        mikrotik_profile_name: "voucher-3h",
         password_encrypted: "protected",
         plan_id: "plan-1h",
         printed_count: 0,
         router_id: "router-1",
         status: "désactivé",
         sync_status: "synced",
+        shared_users_snapshot: 2,
         updated_at: "2026-07-29T09:00:00.000Z",
         uploaded_bytes: 0,
+        upload_limit_snapshot: "1M",
         username: "voucher-1"
       }],
       [{
@@ -171,9 +177,16 @@ describe("connectedClientsPageModel", () => {
     );
 
     expect(clients[0]).toMatchObject({
+      dataLimitBytes: 10 * 1024 * 1024,
+      dataRemainingBytes: (10 * 1024 * 1024) - 5120,
+      downloadLimit: "2M",
       planName: "Forfait 1h",
+      profileName: "voucher-3h",
+      sessionTimeLeft: "2 h 50 min",
+      sharedUsers: 2,
       ticketStatus: "disabled",
       totalBytes: 5120,
+      uploadLimit: "1M",
       username: "voucher-1"
     });
   });

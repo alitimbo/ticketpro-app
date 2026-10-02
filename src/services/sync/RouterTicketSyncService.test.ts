@@ -94,6 +94,19 @@ describe("RouterTicketSyncService", () => {
     ]));
   });
 
+  it("refuse de confirmer une durée RouterOS qui ne correspond plus au contrat du ticket", () => {
+    const report = compareLocalAndRouterTickets(
+      [{ ...localTickets[0], planDurationMinutes: 60 }],
+      [{ ...routerUsers[0], limitUptime: "30m" }],
+      []
+    );
+
+    expect(report.updates[0]).toMatchObject({ syncStatus: "conflict" });
+    expect(report.logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ level: "error", message: expect.stringContaining("limite de temps RouterOS") })
+    ]));
+  });
+
   it("compare les tickets locaux et ceux du routeur", () => {
     const report = compareLocalAndRouterTickets(localTickets, routerUsers, activeUsers);
 

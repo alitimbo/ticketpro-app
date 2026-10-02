@@ -759,14 +759,16 @@ type PlanCardProps = {
 };
 
 function PlanCard({ canManage, onDelete, onDisable, onDuplicate, onEdit, onSync, onView, plan }: PlanCardProps) {
+  const isTicketProPlan = plan.ticketSettingsSource === "ticketpro" || plan.validityMinutes !== null;
+
   return (
     <article className="plan-card">
       <header className="plan-card__header">
         <div>
           <h3>{formatPlanDisplayName(plan.name)}</h3>
-          <p>
-            {formatPlanMinutes(plan.durationMinutes)} · validité {formatPlanMinutes(plan.validityMinutes ?? plan.durationMinutes)} · {plan.dataLimitMb ? `${plan.dataLimitMb} MB` : "Illimité"}
-          </p>
+          <p>{isTicketProPlan
+            ? `${formatPlanMinutes(plan.durationMinutes)} · validité ${formatPlanMinutes(plan.validityMinutes ?? plan.durationMinutes)} · ${plan.dataLimitMb ? `${plan.dataLimitMb} MB` : "Illimité"}`
+            : `Profil RouterOS natif · session ${formatRouterOsDuration(plan.profileSettings?.sessionTimeout)} · cookie MAC ${formatRouterOsDuration(plan.profileSettings?.macCookieTimeout)}`}</p>
         </div>
         <ActionMenu
           items={[
@@ -801,12 +803,12 @@ function PlanCard({ canManage, onDelete, onDisable, onDuplicate, onEdit, onSync,
 
       <dl className="plan-card__details">
         <div>
-          <dt>Durée</dt>
-          <dd>{formatPlanMinutes(plan.durationMinutes)}</dd>
+          <dt>{isTicketProPlan ? "Durée" : "Session maximale"}</dt>
+          <dd>{isTicketProPlan ? formatPlanMinutes(plan.durationMinutes) : formatRouterOsDuration(plan.profileSettings?.sessionTimeout)}</dd>
         </div>
         <div>
-          <dt>Validité</dt>
-          <dd>{formatPlanMinutes(plan.validityMinutes ?? plan.durationMinutes)}</dd>
+          <dt>{isTicketProPlan ? "Validité" : "Cookie MAC"}</dt>
+          <dd>{isTicketProPlan ? formatPlanMinutes(plan.validityMinutes ?? plan.durationMinutes) : formatRouterOsDuration(plan.profileSettings?.macCookieTimeout)}</dd>
         </div>
         <div>
           <dt>Débit</dt>
@@ -878,6 +880,28 @@ function PlanDetailDialog({
           <PlanDetailLine label="Tickets liés" value={String(plan.linkedTickets)} />
         </dl>
 
+        <section className="ticket-detail-section" aria-label="Paramètres natifs du profil RouterOS">
+          <h3>Paramètres natifs RouterOS</h3>
+          <p className="muted-inline">
+            {plan.ticketSettingsSource === "routeros"
+              ? "Ce profil est lu tel quel depuis RouterOS. Le cookie MAC ne représente pas la validité d'un ticket."
+              : "Les limites commerciales ci-dessus sont recopiées sur chaque voucher. Les réglages ci-dessous appartiennent au profil RouterOS."}
+          </p>
+          <dl className="client-detail-grid">
+            <PlanDetailLine label="Durée maximale d'une session" value={formatRouterOsDuration(plan.profileSettings?.sessionTimeout)} />
+            <PlanDetailLine label="Délai d'inactivité" value={formatRouterOsDuration(plan.profileSettings?.idleTimeout)} />
+            <PlanDetailLine label="Keepalive timeout" value={formatRouterOsDuration(plan.profileSettings?.keepaliveTimeout)} />
+            <PlanDetailLine label="MAC Cookie" value={formatRouterOsBoolean(plan.profileSettings?.addMacCookie)} />
+            <PlanDetailLine label="Durée MAC Cookie" value={plan.profileSettings === undefined ? "Non relue" : plan.profileSettings.addMacCookie ? formatRouterOsDuration(plan.profileSettings.macCookieTimeout) : "Non applicable"} />
+            <PlanDetailLine label="Address Pool" value={plan.profileSettings?.addressPool || "Par défaut"} />
+            <PlanDetailLine label="Address List" value={plan.profileSettings?.addressList || "Aucune"} />
+            <PlanDetailLine label="Status Auto Refresh" value={formatRouterOsDuration(plan.profileSettings?.statusAutorefresh)} />
+            <PlanDetailLine label="Transparent Proxy" value={formatRouterOsBoolean(plan.profileSettings?.transparentProxy)} />
+            <PlanDetailLine label="Scripts on-login / on-logout" value={plan.profileSettings?.onLogin || plan.profileSettings?.onLogout ? "Configurés" : "Aucun"} />
+            <PlanDetailLine label="Filtres / marques de paquets" value={hasPacketControls(plan) ? "Configurés" : "Aucun"} />
+          </dl>
+        </section>
+
         <div className="router-section-heading">
           <h3>Historique ({history.length})</h3>
         </div>
@@ -921,6 +945,21 @@ function formatPlanAuditDate(value: string | null): string {
   if (!value) return "Non disponible";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString("fr-FR");
+}
+
+function formatRouterOsDuration(value: string | null | undefined): string {
+  if (!value || value === "0" || value === "0s" || value === "none") return "Illimitée";
+  return value;
+}
+
+function formatRouterOsBoolean(value: boolean | undefined): string {
+  if (value === undefined) return "Non relu";
+  return value ? "Activé" : "Désactivé";
+}
+
+function hasPacketControls(plan: PlanViewModel): boolean {
+  const settings = plan.profileSettings;
+  return Boolean(settings?.incomingFilter || settings?.outgoingFilter || settings?.incomingPacketMark || settings?.outgoingPacketMark);
 }
 
 function formatPlanHistoryAction(action: HotspotPlanHistoryRecord["action"]): string {

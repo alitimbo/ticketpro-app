@@ -757,6 +757,8 @@ function ClientDetailDialog({
 
         <dl className="client-detail-grid">
           <DetailLine icon={ShieldCheck} label="Ticket" value={client.username} />
+          <DetailLine icon={Ticket} label="Profil RouterOS" value={client.profileName ?? "Non identifié"} />
+          <DetailLine icon={Ticket} label="Plan" value={client.planName} />
           <DetailLine icon={Router} label="Routeur" value={client.routerName} />
           <DetailLine icon={Smartphone} label="Adresse IP" value={client.ipAddress} />
           <DetailLine icon={Laptop} label="Adresse MAC" value={client.macAddress} />
@@ -771,6 +773,14 @@ function ClientDetailDialog({
             label="Volume restant"
             value={client.dataRemainingBytes === null ? "Illimité" : formatClientBytes(client.dataRemainingBytes)}
           />
+          <DetailLine
+            icon={Laptop}
+            label="Quota total du voucher"
+            value={client.dataLimitBytes === null ? "Illimité" : formatClientBytes(client.dataLimitBytes)}
+          />
+          <DetailLine icon={Download} label="Débit descendant du profil" value={client.downloadLimit ?? "Non défini"} />
+          <DetailLine icon={Upload} label="Débit montant du profil" value={client.uploadLimit ?? "Non défini"} />
+          <DetailLine icon={Smartphone} label="Appareils simultanés" value={client.sharedUsers === null ? "Non défini" : String(client.sharedUsers)} />
           <DetailLine
             icon={Clock}
             label="Expiration de validité"

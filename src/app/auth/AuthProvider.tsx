@@ -39,6 +39,7 @@ import {
 import { completeFirstLaunch, defaultFirstLaunchState } from "../../pages/auth/firstLaunchModel";
 import { disconnectEmbeddedVpn, getVpnProviderStatus } from "../../services/vpn";
 import { persistSaasSubscriptionSnapshot } from "../../services/subscriptions";
+import { startSaasSubscriptionRefresh } from "../../services/subscriptions/SaasSubscriptionRefreshService";
 
 type LoginResult = {
   ok: boolean;
@@ -175,6 +176,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const stored = readMainAccountSession();
     setAccountSession(stored);
   }, []);
+
+  useEffect(() => {
+    const current = saasAccount;
+    const accountId = accountSession?.accountId;
+    if (!current || !accountId) return;
+    const watcher = startSaasSubscriptionRefresh({
+      organizationId: current.organization.id,
+      membershipId: current.user.membership_id,
+      initialSubscription: current.subscription,
+      fetchAccount: getSaasAccount,
+      onSubscription: (subscription) => {
+        setSaasAccount((previous) => previous
+          && previous.organization.id === current.organization.id
+          && previous.user.membership_id === current.user.membership_id
+          ? { ...previous, subscription } : previous);
+        void cacheSaasSubscription({ ...current, subscription }, accountId);
+      }
+    });
+    const refresh = () => { void watcher.refresh(); };
+    window.addEventListener("online", refresh);
+    window.addEventListener("focus", refresh);
+    return () => {
+      watcher.stop();
+      window.removeEventListener("online", refresh);
+      window.removeEventListener("focus", refresh);
+    };
+    // Only restart on identity/scope changes, not each quota update.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountSession?.accountId, saasAccount?.organization.id, saasAccount?.user.membership_id, cacheSaasSubscription]);
 
   const selectOrganization = useCallback(async (membershipId: string): Promise<LoginResult> => {
     try {

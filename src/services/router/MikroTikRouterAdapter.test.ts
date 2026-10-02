@@ -9,6 +9,7 @@ import {
   normalizeMikroTikError,
   reconcileVoucherLifecycleComment
 } from "./MikroTikRouterAdapter";
+import { readPlanQuotaMetadata } from "./PlanQuotaMetadata";
 import type {
   RouterOsApiBatchCommand,
   RouterOsApiBatchResponse,
@@ -192,6 +193,7 @@ describe("MikroTikRouterAdapter", () => {
     await expect(adapter.updateHotspotPlan("quota-plan", draft)).resolves.toMatchObject({ dataLimitMb: 2048, dataLimitSource: "routeros" });
     const source = String(transport.calls.find(call => call.command === "/ip/hotspot/user/profile/set")?.params?.["on-login"]);
     expect(source).toContain(':log info "custom";');
+    expect(readPlanQuotaMetadata(source)).toMatchObject({ dataLimitMb: 2048, durationMinutes: 60, validityMinutes: 180 });
     await expect(adapter.getHotspotPlans()).resolves.toEqual([expect.objectContaining({ dataLimitMb: 2048 })]);
     await expect(adapter.updateHotspotPlan("quota-plan", { dataLimitMb: null })).resolves.toMatchObject({ dataLimitMb: null, dataLimitSource: "routeros" });
     expect(transport.calls.every(call => !call.command.includes("reset-counters"))).toBe(true);
@@ -686,7 +688,7 @@ describe("MikroTikRouterAdapter", () => {
     });
   });
 
-  it("convertit une durée RouterOS exprimée en semaines", async () => {
+  it("lit un profil RouterOS natif sans confondre session et validité commerciale", async () => {
     const adapter = createAdapter(new MockRouterOsTransport({
       "/ip/hotspot/user/profile/print": [{
         ".id": "*P7",
@@ -699,9 +701,34 @@ describe("MikroTikRouterAdapter", () => {
 
     await expect(adapter.getHotspotPlans()).resolves.toEqual([
       expect.objectContaining({
-        durationMinutes: 10_080,
+        durationMinutes: 0,
         profileName: "7-jours",
-        validityMinutes: 10_080
+        ticketSettingsSource: "routeros",
+        validityMinutes: null,
+        profileSettings: expect.objectContaining({ sessionTimeout: "1w" })
+      })
+    ]);
+  });
+
+  it("n'affiche jamais les 3 jours du cookie MAC du profil default comme une validité de ticket", async () => {
+    const adapter = createAdapter(new MockRouterOsTransport({
+      "/ip/hotspot/user/profile/print": [{
+        ".id": "*DEF",
+        "add-mac-cookie": "yes",
+        "mac-cookie-timeout": "3d",
+        name: "default",
+        "session-timeout": "0s",
+        "shared-users": "1"
+      }]
+    }));
+
+    await expect(adapter.getHotspotPlans()).resolves.toEqual([
+      expect.objectContaining({
+        durationMinutes: 0,
+        profileName: "default",
+        profileSettings: expect.objectContaining({ addMacCookie: true, macCookieTimeout: "3d" }),
+        ticketSettingsSource: "routeros",
+        validityMinutes: null
       })
     ]);
   });
@@ -736,6 +763,7 @@ describe("MikroTikRouterAdapter", () => {
         {
           ".id": "*U1",
           disabled: "false",
+          "limit-uptime": "3h",
           name: "123456",
           "limit-bytes-total": "2147483648",
           profile: "plan-3h"
@@ -1075,17 +1103,20 @@ describe("MikroTikRouterAdapter", () => {
     expect(addParams).toMatchObject({ name: "forfait-1h" });
     expect(addParams).toMatchObject({
       "add-mac-cookie": "yes",
-      "mac-cookie-timeout": "3h",
+      "mac-cookie-timeout": "3d",
       "rate-limit": "2M/5M"
     });
+    expect(String(addParams?.["on-login"])).toContain('"durationMinutes":60');
+    expect(String(addParams?.["on-login"])).toContain('"validityMinutes":180');
+    expect(addParams).not.toHaveProperty("session-timeout");
     expect(addParams).not.toHaveProperty("comment");
     expect(addParams).not.toHaveProperty("disabled");
     expect(updateParams).toMatchObject({
-      "add-mac-cookie": "yes",
-      "mac-cookie-timeout": "3h",
       numbers: "*P1",
       "rate-limit": "2M/5M"
     });
+    expect(updateParams).not.toHaveProperty("session-timeout");
+    expect(updateParams).not.toHaveProperty("mac-cookie-timeout");
     expect(updateParams).not.toHaveProperty("comment");
     expect(updateParams).not.toHaveProperty("disabled");
   });

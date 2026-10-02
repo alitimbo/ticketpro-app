@@ -20,6 +20,7 @@ export type ConnectedClientViewModel = {
   currentSessionUptime: string;
   dataLimitBytes: number | null;
   dataRemainingBytes: number | null;
+  downloadLimit: string | null;
   downloadedBytes: number;
   expiresAt: string | null;
   id: string;
@@ -27,13 +28,16 @@ export type ConnectedClientViewModel = {
   macAddress: string;
   planId: string | null;
   planName: string;
+  profileName: string | null;
   routerId: string;
   routerName: string;
   sessionTimeLeft: string;
   status: "active";
+  sharedUsers: number | null;
   ticketStatus: HotspotUser["status"] | "unknown";
   totalBytes: number;
   uploadedBytes: number;
+  uploadLimit: string | null;
   uptime: string;
   uptimeMinutes: number;
   username: string;
@@ -96,6 +100,7 @@ export function buildConnectedClientViewModels(
       currentSessionUptime: activeUser.uptime,
       dataLimitBytes,
       dataRemainingBytes: dataLimitBytes === null ? null : Math.max(0, dataLimitBytes - totalBytes),
+      downloadLimit: plan?.downloadLimit ?? null,
       downloadedBytes,
       expiresAt,
       id: activeUser.id,
@@ -103,12 +108,14 @@ export function buildConnectedClientViewModels(
       macAddress: activeUser.macAddress,
       planId: plan?.id ?? ticket?.planId ?? null,
       planName: plan?.name ?? ticket?.profileName ?? ticket?.planId ?? "Plan non identifié",
+      profileName: ticket?.profileName ?? plan?.profileName ?? null,
       routerId: router.id,
       routerName: router.name,
       sessionTimeLeft: durationLimitSeconds > 0
         ? formatClientDuration(Math.max(0, durationLimitSeconds - uptimeSeconds))
         : activeUser.sessionTimeLeft,
       status: "active",
+      sharedUsers: plan?.sharedUsers ?? null,
       ticketStatus: ticket
         ? ticket.status === "disabled" || ticket.status === "expired"
           ? ticket.status
@@ -120,6 +127,7 @@ export function buildConnectedClientViewModels(
         : "unknown",
       totalBytes,
       uploadedBytes,
+      uploadLimit: plan?.uploadLimit ?? null,
       uptime: formatClientDuration(uptimeSeconds),
       uptimeMinutes: Math.floor(uptimeSeconds / 60),
       username: activeUser.username
@@ -150,9 +158,11 @@ export function buildCachedConnectedClientViewModels(
       parseDurationToSeconds(cachedUser.uptime),
       ticket?.uptime_seconds ?? 0
     );
-    const durationLimitSeconds = Math.max(0, (plan?.duration_minutes ?? 0) * 60);
+    const durationLimitSeconds = Math.max(0, (ticket?.duration_minutes_snapshot ?? plan?.duration_minutes ?? 0) * 60);
     const totalBytes = downloadedBytes + uploadedBytes;
-    const dataLimitBytes = resolveDataLimitBytes(null, plan?.data_limit_mb);
+    const dataLimitBytes = ticket?.data_limit_mb_snapshot !== undefined
+      ? resolveDataLimitBytes(undefined, ticket.data_limit_mb_snapshot)
+      : resolveDataLimitBytes(undefined, plan?.data_limit_mb);
 
     return {
       consumptionPercent: calculateConsumptionPercent(
@@ -165,6 +175,7 @@ export function buildCachedConnectedClientViewModels(
       dataLimitBytes,
       dataRemainingBytes: ticket?.data_remaining_bytes
         ?? (dataLimitBytes === null ? null : Math.max(0, dataLimitBytes - totalBytes)),
+      downloadLimit: ticket?.download_limit_snapshot ?? plan?.download_limit ?? null,
       downloadedBytes,
       expiresAt: ticket?.expires_at ?? null,
       id: cachedUser.id,
@@ -172,6 +183,7 @@ export function buildCachedConnectedClientViewModels(
       macAddress: cachedUser.mac_address ?? "",
       planId: plan?.id ?? ticket?.plan_id ?? null,
       planName: plan?.name ?? ticket?.plan_id ?? "Plan non identifié",
+      profileName: ticket?.mikrotik_profile_name ?? plan?.mikrotik_profile_name ?? null,
       routerId: router.id,
       routerName: router.name,
       sessionTimeLeft: ticket?.remaining_seconds !== null && ticket?.remaining_seconds !== undefined
@@ -180,9 +192,11 @@ export function buildCachedConnectedClientViewModels(
           ? formatClientDuration(Math.max(0, durationLimitSeconds - uptimeSeconds))
           : cachedUser.session_time_left ?? "Non disponible",
       status: "active",
+      sharedUsers: ticket?.shared_users_snapshot ?? plan?.shared_users ?? null,
       ticketStatus: ticketStatusFromRecord(ticket),
       totalBytes,
       uploadedBytes,
+      uploadLimit: ticket?.upload_limit_snapshot ?? plan?.upload_limit ?? null,
       uptime: formatClientDuration(uptimeSeconds),
       uptimeMinutes: Math.floor(uptimeSeconds / 60),
       username: cachedUser.username

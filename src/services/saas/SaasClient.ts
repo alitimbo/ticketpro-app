@@ -16,12 +16,16 @@ const sessionStorageKey = "ticketpro:saas_session";
 
 export type SaasSubscription = {
   id?: string;
-  status: "active" | "trial" | "grace_period" | "expired" | "cancelled" | "none";
+  status: "active" | "trial" | "grace_period" | "suspended" | "expired" | "cancelled" | "none";
   is_active: boolean;
   is_trial: boolean;
   router_limit: number;
   device_limit_mode: "limited" | "unlimited";
   max_devices: number | null;
+  device_limit_source?: "plan" | "organization";
+  device_limit_policy_revision?: number;
+  plan_device_limit_mode?: "limited" | "unlimited";
+  plan_max_devices?: number | null;
   current_period_start: string | null;
   current_period_end: string | null;
   access_ends_at: string | null;
@@ -589,10 +593,10 @@ export async function removeSaasTeamMember(userId: string): Promise<{ ok: boolea
   return request("/v1/saas/team/members/remove", { user_id: userId }, token);
 }
 
-export async function getSaasAccount(): Promise<SaasAuthResult> {
+export async function getSaasAccount(signal?: AbortSignal): Promise<SaasAuthResult> {
   const token = await readSaasSession();
   if (!token) throw new Error("Session TicketPro absente.");
-  return request<SaasAuthResult>("/v1/saas/auth/me", undefined, token, "GET");
+  return request<SaasAuthResult>("/v1/saas/auth/me", undefined, token, "GET", signal);
 }
 
 export async function updateSaasAccountProfile(input: {

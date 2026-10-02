@@ -4,6 +4,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY server.mjs ./server.mjs
 COPY subscription-notification-policy.mjs ./subscription-notification-policy.mjs
+COPY organization-device-limit.mjs ./organization-device-limit.mjs
 COPY backup-db.mjs ./backup-db.mjs
 RUN mkdir -p /data
 ENV NODE_ENV=production

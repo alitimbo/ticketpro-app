@@ -18,6 +18,19 @@ describe("RouterOS plan quota metadata", () => {
     expect(readPlanQuotaMetadata(':log info "custom";')).toBeNull();
     expect(readPlanQuotaMetadata(writePlanQuotaMetadata("", null))).toEqual({ dataLimitMb: null });
   });
+  it("stores TicketPro duration and validity independently from native profile settings", () => {
+    const source = writePlanQuotaMetadata("", {
+      dataLimitMb: 2048,
+      durationMinutes: 60,
+      validityMinutes: 180
+    });
+
+    expect(readPlanQuotaMetadata(source)).toEqual({
+      dataLimitMb: 2048,
+      durationMinutes: 60,
+      validityMinutes: 180
+    });
+  });
   it.each(['{"dataLimitMb":-1}', '{"dataLimitMb":0}', '{"dataLimitMb":"2048"}', '{broken}', '{}'])(
     "refuses invalid quota metadata instead of granting unlimited access: %s", payload => {
       expect(() => readPlanQuotaMetadata(`# TICKETPRO-PLAN-QUOTA v1 ${payload}`)).toThrow();

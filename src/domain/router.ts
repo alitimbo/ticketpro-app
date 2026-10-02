@@ -99,6 +99,27 @@ export type HotspotPlan = {
   priceHint: number | null;
   profileName: string;
   status: "active" | "disabled";
+  /** Native RouterOS settings, read live. They are not a voucher contract. */
+  profileSettings?: HotspotUserProfileSettings;
+  ticketSettingsSource?: "ticketpro" | "routeros";
+};
+
+export type HotspotUserProfileSettings = {
+  addressList: string | null;
+  addressPool: string | null;
+  addMacCookie: boolean;
+  idleTimeout: string | null;
+  incomingFilter: string | null;
+  incomingPacketMark: string | null;
+  keepaliveTimeout: string | null;
+  macCookieTimeout: string | null;
+  onLogin: string | null;
+  onLogout: string | null;
+  outgoingFilter: string | null;
+  outgoingPacketMark: string | null;
+  sessionTimeout: string | null;
+  statusAutorefresh: string | null;
+  transparentProxy: boolean;
 };
 
 export type HotspotPlanDraft = Omit<HotspotPlan, "id" | "status"> & {

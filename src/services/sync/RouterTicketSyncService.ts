@@ -523,6 +523,8 @@ export function compareLocalAndRouterTickets(
 
     const hasQuotaConflict = ticket.dataLimitMb !== undefined
       && !voucherQuotaMatches(routerUser, dataLimitMbToBytes(ticket.dataLimitMb));
+    const hasUsageLimitConflict = ticket.planDurationMinutes !== undefined && ticket.planDurationMinutes > 0
+      && routerOsDurationToSeconds(routerUser.limitUptime) !== minutesToRouterOsSeconds(ticket.planDurationMinutes);
     const usage = deriveTicketRuntime(routerUser, activeUser);
     const lifecycle = resolveObservedTicketStatus(ticket.status, usage.status);
     const routerLifecycleError = routerUser.status === "error";
@@ -559,7 +561,7 @@ export function compareLocalAndRouterTickets(
       status: lifecycle.status,
       syncStatus: routerLifecycleError
         ? "error"
-        : hasConflict || hasQuotaConflict || lifecycle.regression
+        : hasConflict || hasQuotaConflict || hasUsageLimitConflict || lifecycle.regression
           ? "conflict"
           : "router_synced",
       lastRouterSyncAt: new Date().toISOString(),
@@ -576,6 +578,13 @@ export function compareLocalAndRouterTickets(
       logs.push({
         level: "error",
         message: "Le quota RouterOS ne correspond pas au volume fixé à la création du ticket. Synchronisation non confirmée.",
+        ticketCode: ticket.code
+      });
+    }
+    if (hasUsageLimitConflict) {
+      logs.push({
+        level: "error",
+        message: "La limite de temps RouterOS ne correspond pas à la durée fixée à la création du ticket. Synchronisation non confirmée.",
         ticketCode: ticket.code
       });
     }
@@ -714,6 +723,10 @@ function routerOsDurationToSeconds(value: string | null | undefined): number {
     seconds += Number(match[1]) * units[match[2]];
   }
   return seconds;
+}
+
+function minutesToRouterOsSeconds(minutes: number): number {
+  return Number.isFinite(minutes) && minutes > 0 ? Math.floor(minutes * 60) : 0;
 }
 
 function lifecycleExpirationIso(comment: string | null | undefined): string | null {

@@ -24,6 +24,7 @@ let ipayServer;
 let hubServer;
 const ipayPayments = new Map();
 const hubRequests = [];
+let hubUnavailable = false;
 const hubPeerAddresses = new Map();
 let nextHubOperatorAddress = 3;
 const verifiedRegistrationTokens = new Map();
@@ -145,6 +146,11 @@ before(async () => {
       return;
     }
     hubRequests.push({ body, url: request.url });
+    if (hubUnavailable) {
+      response.writeHead(503, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: "hub unavailable" }));
+      return;
+    }
     response.writeHead(200, { "content-type": "application/json" });
     if (request.url === "/v1/tenants") {
       response.end(JSON.stringify({
@@ -2535,6 +2541,125 @@ test("une inscription SaaS ne peut activer ni essai ni paiement avant la vérifi
   assert.equal(trial.payload.subscription.plan.code, "TRIAL-7D");
 });
 
+test("les limites PC par organisation se propagent sans modifier le forfait ni révoquer les postes", async () => {
+  const owner = await api("/v1/saas/register-trial", { body: {
+    organization_name: "Quota PC indépendant", name: "Propriétaire quota", email: "owner.quota@example.com",
+    password: "QuotaOwner123!", confirm_password: "QuotaOwner123!"
+  } });
+  assert.equal(owner.status, 200);
+  const orgId = owner.payload.organization.id;
+  const ownerToken = owner.payload.session.token;
+  const baseline = owner.payload.subscription;
+  const other = await api("/v1/saas/register-trial", { body: {
+    organization_name: "Quota organisation isolée", name: "Autre propriétaire", email: "other.quota@example.com",
+    password: "QuotaOther123!", confirm_password: "QuotaOther123!"
+  } });
+  assert.equal(other.status, 200);
+  const deviceInput = (index) => ({
+    installation_id: `e23e4567-e89b-42d3-a456-42661417400${index}`,
+    public_key: Buffer.alloc(32, 140 + index).toString("base64"), name: `Poste quota ${index}`,
+    platform: "windows", app_version: "0.4.8"
+  });
+  const register = (index, token = ownerToken) => api("/v1/saas/devices/register", { token, body: deviceInput(index) });
+  assert.equal((await register(1)).status, 200);
+  assert.equal((await register(2)).status, 409);
+  const body = { organization_id: orgId, mode: "limited", max_devices: 3, expected_revision: 0, reason: "Dérogation validée par le support" };
+  assert.equal((await api("/v1/admin/organizations/device-limit", { body })).status, 401);
+  assert.equal((await api("/v1/admin/organizations/device-limit", { token: ownerToken, body })).status, 401);
+  for (const invalid of [0, -1, 1.5, 100001]) {
+    assert.equal((await api("/v1/admin/organizations/device-limit", { token: masterToken, body: { ...body, max_devices: invalid } })).status, 400);
+  }
+  assert.equal((await api("/v1/admin/organizations/device-limit", { token: masterToken, body: { ...body, mode: "unlimited" } })).status, 400);
+  const changed = await api("/v1/admin/organizations/device-limit", { token: masterToken, body });
+  assert.equal(changed.status, 200);
+  assert.equal(changed.payload.policy.revision, 1);
+  assert.equal(changed.payload.policy.effective_max_devices, 3);
+  assert.equal(changed.payload.propagation.hub_status, "applied");
+  const samePolicy = await api("/v1/admin/organizations/device-limit", { token: masterToken, body: { ...body, expected_revision: 1 } });
+  assert.equal(samePolicy.status, 200);
+  assert.equal(samePolicy.payload.policy.revision, 1, "Un envoi identique ne crée pas une nouvelle révision");
+  assert.ok(hubRequests.some((call) => call.url === "/v1/tenants" && call.body.account_id === orgId && call.body.operator_limit === 3));
+  const me = await api("/v1/saas/auth/me", { method: "GET", token: ownerToken });
+  assert.equal(me.payload.subscription.max_devices, 3);
+  assert.equal(me.payload.subscription.device_limit_source, "organization");
+  assert.equal(me.payload.subscription.plan_max_devices, baseline.max_devices);
+  assert.equal(me.payload.subscription.router_limit, baseline.router_limit);
+  assert.equal(me.payload.subscription.current_period_end, baseline.current_period_end);
+  assert.equal(me.payload.subscription.plan.price_cfa, baseline.plan.price_cfa);
+  const second = await register(2);
+  assert.equal(second.status, 200);
+  assert.equal((await register(3)).status, 200);
+  assert.equal((await register(4)).status, 409);
+  const isolated = await api("/v1/saas/auth/me", { method: "GET", token: other.payload.session.token });
+  assert.equal(isolated.payload.subscription.max_devices, 1);
+  assert.equal(isolated.payload.subscription.device_limit_source, "plan");
+
+  const invitation = await api("/v1/saas/team/members", { token: ownerToken, body: {
+    name: "Collaborateur quota", email: "guest.quota@example.com", app_role: "operator",
+    router_access_mode: "selected", router_ids: ["quota-router"]
+  } });
+  assert.equal(invitation.status, 200);
+  assert.equal((await api("/v1/saas/invitations/accept", { body: {
+    invitation_token: invitation.payload.invitation_token, new_password: "QuotaGuest123!", confirm_password: "QuotaGuest123!"
+  } })).status, 200);
+  const guest = await api("/v1/saas/auth/login", { body: { email: "guest.quota@example.com", password: "QuotaGuest123!" } });
+  assert.equal(guest.status, 200);
+  const guestDevice = await register(9, guest.payload.session.token);
+  assert.equal(guestDevice.status, 200);
+  assert.equal(guestDevice.payload.max_devices, null);
+
+  const beforeLowering = hubRequests.length;
+  const lowered = await api("/v1/admin/organizations/device-limit", { token: masterToken, body: { ...body, max_devices: 1, expected_revision: 1 } });
+  assert.equal(lowered.status, 200);
+  assert.equal(lowered.payload.policy.over_limit_count, 2);
+  assert.equal(lowered.payload.policy.collaborator_count, 1);
+  assert.equal((await register(4)).status, 409);
+  assert.equal((await register(2)).status, 200, "Une baisse ne bloque pas la reconnexion d'un poste existant");
+  assert.ok(hubRequests.some((call) => call.url === "/v1/tenants" && call.body.account_id === orgId && call.body.operator_limit === 4));
+  assert.equal(hubRequests.slice(beforeLowering).some((call) => call.body.account_id === orgId
+    && String(call.body.resource_id).startsWith("device:")
+    && ["disable", "revoke"].includes(call.body.action)), false);
+  const inventory = await api("/v1/saas/devices", { method: "GET", token: ownerToken });
+  assert.equal(inventory.payload.max_devices, 1);
+  assert.equal(inventory.payload.active_count, 3);
+  assert.equal(inventory.payload.collaborator_device_count, 1);
+  const conflict = await api("/v1/admin/organizations/device-limit", { token: masterToken, body });
+  assert.equal(conflict.status, 409);
+  assert.equal(conflict.payload.details.code, "DEVICE_LIMIT_POLICY_CONFLICT");
+
+  const unlimited = await api("/v1/admin/organizations/device-limit", { token: masterToken, body: { ...body, mode: "unlimited", max_devices: null, expected_revision: 2 } });
+  assert.equal(unlimited.status, 200);
+  assert.equal(unlimited.payload.policy.effective_max_devices, null);
+  assert.ok(hubRequests.some((call) => call.url === "/v1/tenants" && call.body.account_id === orgId && call.body.operator_limit === null));
+  assert.equal((await register(4)).status, 200);
+  const renewed = await api("/v1/admin/users/subscriptions/change", { token: masterToken, body: {
+    user_id: owner.payload.user.id, organization_id: orgId, plan_id: "subscription-starter-monthly",
+    duration_days: 30, timing: "immediate", source: "manual", reason: "Renouvellement de contrôle quota"
+  } });
+  assert.equal(renewed.status, 200);
+  assert.equal(renewed.payload.subscription.max_devices, null, "La dérogation survit au changement de forfait");
+  const detail = await api("/v1/admin/users/detail", { token: masterToken, body: { user_id: owner.payload.user.id } });
+  assert.equal(detail.payload.memberships[0].device_limit_policy.mode, "unlimited");
+  assert.equal(detail.payload.subscriptions[0].device_limit_source, "plan", "L'historique conserve le quota du forfait");
+  assert.ok(detail.payload.subscription_actions.some((action) => action.action === "organization_device_limit_changed"));
+
+  // Database desired state survives a temporary hub outage and later reconciliation.
+  let pending;
+  hubUnavailable = true;
+  try {
+    pending = await api("/v1/admin/organizations/device-limit", { token: masterToken, body: { ...body, max_devices: 6, expected_revision: 3 } });
+  } finally { hubUnavailable = false; }
+  assert.equal(pending.status, 200);
+  assert.equal(pending.payload.propagation.hub_status, "pending");
+  assert.equal(pending.payload.policy.effective_max_devices, 6);
+  assert.equal((await api("/v1/admin/vpn/reconcile", { token: masterToken, body: {} })).status, 200);
+  assert.ok(hubRequests.some((call) => call.url === "/v1/tenants" && call.body.account_id === orgId && call.body.operator_limit === 7));
+  const reset = await api("/v1/admin/organizations/device-limit", { token: masterToken, body: { ...body, mode: "inherit", max_devices: null, expected_revision: 4 } });
+  assert.equal(reset.status, 200);
+  assert.equal(reset.payload.policy.effective_max_devices, renewed.payload.subscription.plan_max_devices);
+  assert.equal((await register(5)).status, 409);
+});
+
 test("authentification, licences, paiements iPay et crédits revendeur restent cohérents", async () => {
   const adminLogin = await api("/v1/admin/auth/login", {
     body: {
@@ -2593,6 +2718,7 @@ test("authentification, licences, paiements iPay et crédits revendeur restent c
   assert.ok(users.payload.users.length > 0);
   assert.ok(users.payload.users.every((user) => typeof user.organization_name === "string"));
   assert.ok(users.payload.users.every((user) => Number.isInteger(user.organization_count)));
+  assert.ok(users.payload.users.every((user) => ["active", "trial", "grace_period", "suspended", "expired", "cancelled", "none"].includes(user.effective_subscription_status)));
   assert.equal("password_hash" in users.payload.users[0], false);
 
   const organizationPlan = await api("/v1/admin/plans", {
@@ -3429,6 +3555,10 @@ test("authentification, licences, paiements iPay et crédits revendeur restent c
     (membership) => membership.invitation_status === "pending"
   );
   assert.ok(pendingMembership?.id, "L'appartenance invitée doit être identifiable");
+  assert.ok(Array.isArray(pendingMembership.router_ids));
+  assert.ok(Number.isInteger(pendingMembership.device_usage.owner_count));
+  assert.ok(Number.isInteger(pendingMembership.device_usage.collaborator_count));
+  assert.equal("private_key" in pendingMembership, false);
   const resentByAdmin = await api("/v1/admin/users/resend-invitation", {
     token: adminToken,
     body: {
@@ -3468,6 +3598,13 @@ test("authentification, licences, paiements iPay et crédits revendeur restent c
   assert.equal(suspendedSubscription.status, 200);
   assert.equal(suspendedSubscription.payload.subscription.status, "suspended");
   assert.equal(suspendedSubscription.payload.subscription.is_active, false);
+  const suspendedAdminList = await api("/v1/admin/users/list", {
+    token: adminToken, body: { limit: 1000 }
+  });
+  assert.equal(suspendedAdminList.status, 200);
+  const suspendedAdminUser = suspendedAdminList.payload.users.find((user) => user.id === managedUser.id);
+  assert.equal(suspendedAdminUser.subscription_status, "active", "Le statut persisté reste compatible avec les anciens clients");
+  assert.equal(suspendedAdminUser.effective_subscription_status, "suspended");
 
   const reactivatedSubscription = await api("/v1/admin/users/subscriptions/status", {
     token: adminToken,

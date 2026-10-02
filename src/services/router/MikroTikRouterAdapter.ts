@@ -7,6 +7,7 @@ import type {
   HotspotUser,
   HotspotUserDraft,
   HotspotUserLimits,
+  HotspotUserProfileSettings,
   HotspotUsersBatchDraft,
   InterfaceTraffic,
   RouterConnectionMode,
@@ -41,7 +42,7 @@ import type {
   RouterAdapter
 } from "./RouterAdapter";
 import { RouterAdapterError } from "./RouterAdapterError";
-import { readPlanQuotaMetadata, writePlanQuotaMetadata } from "./PlanQuotaMetadata";
+import { readPlanQuotaMetadata, writePlanQuotaMetadata, type TicketProProfileMetadata } from "./PlanQuotaMetadata";
 import { dataLimitMbToBytes, voucherQuotaMatches } from "../tickets/VoucherQuota";
 import {
   TauriRouterOsApiTransport,
@@ -787,13 +788,11 @@ export class MikroTikRouterAdapter implements RouterAdapter {
 
     await this.call("/ip/hotspot/user/profile/add", {
       "add-mac-cookie": "yes",
-      "mac-cookie-timeout": minutesToRouterOsDuration(
-        plan.validityMinutes ?? plan.durationMinutes
-      ),
+      // MAC Cookie is a reconnection preference, never TicketPro validity.
+      "mac-cookie-timeout": "3d",
       name: profileName,
-      "on-login": writePlanQuotaMetadata(mergeVoucherLifecycleOnLogin(""), plan.dataLimitMb),
+      "on-login": writePlanQuotaMetadata(mergeVoucherLifecycleOnLogin(""), planMetadata(plan)),
       "rate-limit": buildRateLimit(plan),
-      "session-timeout": minutesToRouterOsDuration(plan.durationMinutes),
       "shared-users": String(plan.sharedUsers)
     });
 
@@ -823,10 +822,6 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     );
 
     await this.call("/ip/hotspot/user/profile/set", {
-      "add-mac-cookie": "yes",
-      "mac-cookie-timeout": minutesToRouterOsDuration(
-        next.validityMinutes ?? next.durationMinutes
-      ),
       name: next.profileName,
       numbers: current.id,
       "on-login": writePlanQuotaMetadata(mergeVoucherLifecycleOnLogin(
@@ -834,9 +829,8 @@ export class MikroTikRouterAdapter implements RouterAdapter {
         new Set(
           systemScripts.map((script) => pick(script, "name")).filter((name): name is string => Boolean(name))
         )
-      ), next.dataLimitMb),
+      ), planMetadata(next)),
       "rate-limit": buildRateLimit(next),
-      "session-timeout": minutesToRouterOsDuration(next.durationMinutes),
       "shared-users": String(next.sharedUsers)
     });
 
@@ -932,7 +926,7 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     });
 
     const created = await this.findUserByName(user.username);
-    if (!voucherQuotaMatches(created, user.limitBytesTotal)) {
+    if (!voucherQuotaMatches(created, user.limitBytesTotal) || !voucherUsageLimitMatches(created, user.limitUptime)) {
       await this.disableHotspotUser(user.username);
       await this.disconnectActiveUser(user.username);
       throw new RouterAdapterError("router_rejected", "Le quota relu sur RouterOS ne correspond pas au quota demandé. Le voucher est bloqué.");
@@ -1025,7 +1019,8 @@ export class MikroTikRouterAdapter implements RouterAdapter {
 
     for (const entry of prepared) {
       const observed = confirmed.get(entry.username);
-      if (observed && !voucherQuotaMatches(observed, entry.user.limitBytesTotal)) {
+      if (observed && (!voucherQuotaMatches(observed, entry.user.limitBytesTotal)
+        || !voucherUsageLimitMatches(observed, entry.user.limitUptime))) {
         confirmed.delete(entry.username);
         errors.set(entry.username, "Le quota relu sur RouterOS ne correspond pas au quota demandé.");
         if (observed.comment === String(entry.command.params?.comment ?? "")) {
@@ -2232,18 +2227,21 @@ function profileRowToPlan(row: RouterOsApiRow): HotspotPlan {
   dataLimitMbToBytes(quota ? quota.dataLimitMb : metadata.dataLimitMb);
   const rateLimit = pick(row, "rate-limit");
   const [downloadLimit, uploadLimit] = splitRateLimit(rateLimit);
-  const routerDurationMinutes = routerOsDurationToMinutes(pick(row, "session-timeout"));
-  const routerValidityMinutes = routerOsDurationToMinutes(pick(row, "mac-cookie-timeout"));
-  // The live RouterOS fields are authoritative. Older TicketPro versions
-  // stored duration metadata in the profile comment; keeping that stale value
-  // ahead of session-timeout made a profile changed from 1h to 3h appear as 1h
-  // again during the next catalog refresh.
-  const durationMinutes = routerDurationMinutes > 0
-    ? routerDurationMinutes
-    : metadata.durationMinutes ?? 0;
-  const validityMinutes = routerValidityMinutes > 0
-    ? routerValidityMinutes
-    : metadata.validityMinutes ?? durationMinutes;
+  const onLogin = pick(row, "on-login") ?? "";
+  const isTicketProProfile = quota?.durationMinutes !== undefined
+    || quota?.validityMinutes !== undefined
+    || onLogin.includes(VOUCHER_PROFILE_HANDLER_BEGIN)
+    || metadata.durationMinutes !== undefined
+    || metadata.validityMinutes !== undefined;
+  // Previous TicketPro releases used session/mac-cookie timeout as commercial
+  // metadata. Preserve their read view once, but never treat a native profile's
+  // cookie lifetime as a ticket validity.
+  const durationMinutes = quota?.durationMinutes
+    ?? (isTicketProProfile ? routerOsDurationToMinutes(pick(row, "session-timeout")) || metadata.durationMinutes || 0 : 0);
+  const validityMinutes = quota?.validityMinutes
+    ?? (isTicketProProfile
+      ? routerOsDurationToMinutes(pick(row, "mac-cookie-timeout")) || metadata.validityMinutes || durationMinutes || null
+      : null);
 
   return {
     dataLimitMb: quota ? quota.dataLimitMb : metadata.dataLimitMb ?? null,
@@ -2256,6 +2254,8 @@ function profileRowToPlan(row: RouterOsApiRow): HotspotPlan {
     profileName: pick(row, "name") || "default",
     sharedUsers: parseInteger(pick(row, "shared-users")) || 1,
     status: metadata.status === "disabled" || isTruthy(pick(row, "disabled")) ? "disabled" : "active",
+    profileSettings: profileSettingsFromRow(row),
+    ticketSettingsSource: isTicketProProfile ? "ticketpro" : "routeros",
     uploadLimit,
     validityMinutes
   };
@@ -2457,6 +2457,44 @@ function parsePlanComment(comment: string | undefined): Partial<HotspotPlan> {
   } catch {
     return {};
   }
+}
+
+function planMetadata(plan: Pick<HotspotPlanDraft, "dataLimitMb" | "durationMinutes" | "validityMinutes">): TicketProProfileMetadata {
+  const durationMinutes = Number.isInteger(plan.durationMinutes) && plan.durationMinutes > 0
+    ? plan.durationMinutes
+    : undefined;
+  return {
+    dataLimitMb: plan.dataLimitMb,
+    ...(durationMinutes === undefined ? {} : { durationMinutes }),
+    ...(durationMinutes === undefined
+      ? {}
+      : { validityMinutes: plan.validityMinutes ?? durationMinutes })
+  };
+}
+
+function profileSettingsFromRow(row: RouterOsApiRow): HotspotUserProfileSettings {
+  return {
+    addressList: pick(row, "address-list") ?? null,
+    addressPool: pick(row, "address-pool") ?? null,
+    addMacCookie: isTruthy(pick(row, "add-mac-cookie")),
+    idleTimeout: pick(row, "idle-timeout") ?? null,
+    incomingFilter: pick(row, "incoming-filter") ?? null,
+    incomingPacketMark: pick(row, "incoming-packet-mark") ?? null,
+    keepaliveTimeout: pick(row, "keepalive-timeout") ?? null,
+    macCookieTimeout: pick(row, "mac-cookie-timeout") ?? null,
+    onLogin: pick(row, "on-login") ?? null,
+    onLogout: pick(row, "on-logout") ?? null,
+    outgoingFilter: pick(row, "outgoing-filter") ?? null,
+    outgoingPacketMark: pick(row, "outgoing-packet-mark") ?? null,
+    sessionTimeout: pick(row, "session-timeout") ?? null,
+    statusAutorefresh: pick(row, "status-autorefresh") ?? null,
+    transparentProxy: isTruthy(pick(row, "transparent-proxy"))
+  };
+}
+
+function voucherUsageLimitMatches(user: Pick<HotspotUser, "limitUptime">, expected: string | null | undefined): boolean {
+  if (expected === undefined) return true;
+  return routerOsDurationToSeconds(user.limitUptime) === routerOsDurationToSeconds(expected);
 }
 
 async function resolveTicketPassword(user: HotspotUserDraft): Promise<string> {

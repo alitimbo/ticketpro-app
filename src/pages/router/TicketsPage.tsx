@@ -1399,6 +1399,20 @@ function TicketDetailDialog({
             </dl>
           </section>
           <section className="ticket-detail-section">
+            <h3>Plan et limites appliqués</h3>
+            <p className="muted-inline">Valeurs enregistrées pour ce ticket lors de sa création et vérifiées sur RouterOS à chaque synchronisation.</p>
+            <dl className="ticket-detail-grid">
+              <DetailLine icon={FileText} label="Plan TicketPro" value={ticket.planName} />
+              <DetailLine icon={FileText} label="Profil MikroTik appliqué" value={ticket.profileName} />
+              <DetailLine icon={Clock} label="Durée totale autorisée (limit-uptime)" value={formatDuration(ticket.planDurationMinutes)} />
+              <DetailLine icon={Clock} label="Validité après première connexion" value={formatDuration(ticket.planValidityMinutes)} />
+              <DetailLine icon={Database} label="Quota total (limit-bytes-total)" value={formatDataLimit(ticket.dataLimitMb)} />
+              <DetailLine icon={Download} label="Débit descendant du profil" value={ticket.planDownloadLimit ?? "Non défini"} />
+              <DetailLine icon={Upload} label="Débit montant du profil" value={ticket.planUploadLimit ?? "Non défini"} />
+              <DetailLine icon={Smartphone} label="Appareils simultanés" value={ticket.planSharedUsers ? String(ticket.planSharedUsers) : "Non défini"} />
+            </dl>
+          </section>
+          <section className="ticket-detail-section">
             <h3>Cycle de vie</h3>
             <dl className="ticket-detail-grid">
               {displaySettings.showCreatedAt ? <DetailLine icon={Calendar} label="Date création" value={formatDateTime(ticket.createdAt)} /> : null}
