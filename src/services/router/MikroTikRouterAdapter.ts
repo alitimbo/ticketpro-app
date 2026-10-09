@@ -1253,6 +1253,23 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     return updated;
   }
 
+  /**
+   * Writes only limit-bytes-total (profile, time limit and counters are left
+   * untouched) and confirms it by reading the user back.
+   */
+  async setHotspotUserQuota(username: string, limitBytesTotal: number): Promise<HotspotUser> {
+    const user = await this.findUserByName(username);
+    await this.call("/ip/hotspot/user/set", {
+      "limit-bytes-total": limitBytesTotal,
+      numbers: user.id
+    });
+    const updated = await this.findUserByName(username);
+    if (!voucherQuotaMatches(updated, limitBytesTotal)) {
+      throw new RouterAdapterError("router_rejected", "RouterOS n'a pas confirmé le quota du voucher.");
+    }
+    return updated;
+  }
+
   async createHotspotUsersBatch(batch: HotspotUsersBatchDraft): Promise<HotspotUser[]> {
     const existingUsers = await this.listHotspotUsers();
     const generator = new TicketCodeGenerator();

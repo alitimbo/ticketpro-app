@@ -5,6 +5,7 @@ import {
   buildConnectedClientViewModels,
   describeClientDataQuota,
   emptyConnectedClientFilters,
+  findVouchersMissingQuota,
   filterConnectedClients,
   formatClientBytes,
   getConnectedClientPlanOptions
@@ -353,5 +354,29 @@ describe("quota data des clients connectés", () => {
 
     expect(client.dataQuotaState).toBe("unavailable");
     expect(describeClientDataQuota(client).total).toBe("Non disponible");
+  });
+});
+
+describe("findVouchersMissingQuota", () => {
+  const plan = { data_limit_mb: 2048, deleted_at: null, mikrotik_profile_name: "6H-2G", name: "6H-2G" };
+  const user = (username: string, overrides: Partial<HotspotUser> = {}): HotspotUser => ({
+    ...hotspotUsers[0], planId: "6H-2G", profileName: "6H-2G", username, ...overrides
+  });
+
+  it("liste les vouchers d'un plan à quota sans limit-bytes-total, connectés ou non", () => {
+    const candidates = findVouchersMissingQuota(
+      [
+        user("A", { limitBytesTotal: null, downloadedBytes: 100, uploadedBytes: 50 }),
+        user("B", { limitBytesTotal: 2 * 1024 ** 3 }),
+        user("C", { limitBytesTotal: null, downloadedBytes: 3 * 1024 ** 3 }),
+        user("D", { limitBytesTotal: null, profileName: "autre", planId: "autre" })
+      ],
+      [plan, { data_limit_mb: null, deleted_at: null, mikrotik_profile_name: "autre", name: "Autre" }],
+      new Set(["A"])
+    );
+    expect(candidates).toEqual([
+      { exceedsQuota: false, isConnected: true, limitBytesTotal: 2 * 1024 ** 3, planName: "6H-2G", usedBytes: 150, username: "A" },
+      { exceedsQuota: true, isConnected: false, limitBytesTotal: 2 * 1024 ** 3, planName: "6H-2G", usedBytes: 3 * 1024 ** 3, username: "C" }
+    ]);
   });
 });

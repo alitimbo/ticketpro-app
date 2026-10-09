@@ -1893,3 +1893,15 @@ describe("MikroTikRouterAdapter", () => {
     })).rejects.toThrow("RouterOS kept a TicketPro anti-tethering rule after removal");
   });
 });
+
+describe("MikroTikRouterAdapter.setHotspotUserQuota", () => {
+  it("écrit seulement limit-bytes-total puis le confirme par relecture, sans remise à zéro", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/user/print": [{ ".id": "*U1", name: "V1", profile: "6H-2G", "bytes-in": "10", "bytes-out": "20" }]
+    });
+    await expect(createAdapter(transport).setHotspotUserQuota("V1", 2147483648)).resolves.toMatchObject({ limitBytesTotal: 2147483648 });
+    const set = transport.calls.find((call) => call.command === "/ip/hotspot/user/set");
+    expect(set?.params).toEqual({ "limit-bytes-total": 2147483648, numbers: "*U1" });
+    expect(transport.calls.every((call) => !call.command.includes("reset-counters"))).toBe(true);
+  });
+});

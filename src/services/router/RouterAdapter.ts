@@ -66,6 +66,7 @@ export interface RouterAdapter {
   listHotspotUsers(): Promise<HotspotUser[]>;
   listTicketProManagedVoucherUsernames?(): Promise<string[]>;
   listHotspotUsersForVerification?(): Promise<HotspotUser[]>;
+  setHotspotUserQuota?(username: string, limitBytesTotal: number): Promise<HotspotUser>;
   listHotspotUsernames?(): Promise<Array<{ username: string }>>;
   findHotspotUser(username: string): Promise<HotspotUser | null>;
   updateHotspotUser(username: string, planId: string, limits?: HotspotUserLimits): Promise<HotspotUser>;

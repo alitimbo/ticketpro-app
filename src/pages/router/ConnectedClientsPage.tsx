@@ -56,12 +56,14 @@ import {
   buildCachedConnectedClientViewModels,
   describeClientDataQuota,
   emptyConnectedClientFilters,
+  findVouchersMissingQuota,
   filterConnectedClients,
   formatClientBytes,
   getConnectedClientPlanOptions,
   type ConnectedClientFilters,
   type ConnectedClientPlanOption,
-  type ConnectedClientViewModel
+  type ConnectedClientViewModel,
+  type VoucherQuotaRepairCandidate
 } from "./connectedClientsPageModel";
 
 type PendingAction = {
@@ -98,6 +100,8 @@ export function ConnectedClientsPage() {
   const [availablePlans, setAvailablePlans] = useState<ConnectedClientPlanOption[]>([]);
   const [isLiveRefreshing, setIsLiveRefreshing] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
+  const [quotaRepair, setQuotaRepair] = useState<VoucherQuotaRepairCandidate[] | null>(null);
+  const [isRepairingQuota, setIsRepairingQuota] = useState(false);
   const refreshRunningRef = useRef(false);
   const clientsRef = useRef<ConnectedClientViewModel[]>([]);
   const liveRouterServiceRef = useRef<{ key: string; service: RouterService } | null>(null);
@@ -418,19 +422,113 @@ export function ConnectedClientsPage() {
     }
   };
 
+  // Reads every RouterOS voucher and lists those whose plan has a quota that
+  // RouterOS does not carry. Nothing is written before confirmation.
+  const inspectVoucherQuotas = async () => {
+    if (!isPersistent || !session) return;
+    setIsRepairingQuota(true);
+    setNotice(null);
+    try {
+      const service = await createService();
+      const [routerUsers, activeUsers, planRecords] = await Promise.all([
+        service.listHotspotUsersForVerification(),
+        service.listActiveUsers(),
+        planRepository.listByRouter(routerId)
+      ]);
+      const candidates = findVouchersMissingQuota(
+        routerUsers,
+        planRecords,
+        new Set(activeUsers.map((user) => user.username))
+      );
+      if (candidates.length === 0) {
+        setNotice({ status: "success", text: "Tous les vouchers des plans avec quota portent leur quota sur RouterOS." });
+      } else {
+        setQuotaRepair(candidates);
+      }
+    } catch (error) {
+      setNotice({
+        status: "error",
+        text: error instanceof RouterServiceError ? error.message : "Lecture des quotas RouterOS impossible."
+      });
+    } finally {
+      setIsRepairingQuota(false);
+    }
+  };
+
+  const applyVoucherQuotas = async () => {
+    const candidates = quotaRepair ?? [];
+    setQuotaRepair(null);
+    if (!session || candidates.length === 0) return;
+    setIsRepairingQuota(true);
+    let applied = 0;
+    const failed: string[] = [];
+    try {
+      const service = await createService();
+      const ticketsByUsername = new Map(
+        (await ticketRepository.listByRouter(routerId)).map((ticket) => [ticket.username, ticket])
+      );
+      for (const candidate of candidates) {
+        try {
+          await service.setHotspotUserQuota(candidate.username, candidate.limitBytesTotal);
+          applied += 1;
+          const ticket = ticketsByUsername.get(candidate.username);
+          if (ticket) {
+            await ticketRepository.update({
+              ...ticket,
+              data_limit_mb_snapshot: candidate.limitBytesTotal / 1024 / 1024,
+              data_remaining_bytes: Math.max(0, candidate.limitBytesTotal - candidate.usedBytes)
+            });
+          }
+        } catch {
+          failed.push(candidate.username);
+        }
+      }
+      setNotice(failed.length > 0
+        ? {
+            status: "error",
+            text: `${applied} quota(s) appliqué(s) et confirmé(s) par RouterOS ; échec pour ${failed.length} : ${failed.slice(0, 10).join(", ")}${failed.length > 10 ? "…" : ""}.`
+          }
+        : { status: "success", text: `${applied} quota(s) appliqué(s) et confirmé(s) par RouterOS.` });
+      await loadClients({ synchronizePolicy: false });
+    } catch (error) {
+      setNotice({
+        status: "error",
+        text: error instanceof RouterServiceError ? error.message : "Application des quotas impossible."
+      });
+    } finally {
+      setIsRepairingQuota(false);
+    }
+  };
+
+  const quotaRepairConnected = quotaRepair?.filter((candidate) => candidate.isConnected).length ?? 0;
+  const quotaRepairExceeded = quotaRepair?.filter((candidate) => candidate.exceedsQuota).length ?? 0;
+
   return (
     <div className="page-stack">
       <PageHeader
         actions={
-          <Button
-            className={isLoading || isLiveRefreshing ? "button--loading" : ""}
-            disabled={isLoading || isLiveRefreshing}
-            icon={RefreshCw}
-            onClick={() => void loadClients({ synchronizePolicy: true })}
-            variant="primary"
-          >
-            Synchroniser maintenant
-          </Button>
+          <div className="button-row">
+            {isPersistent && canManageDeviceBinding ? (
+              <Button
+                className={isRepairingQuota ? "button--loading" : ""}
+                disabled={isRepairingQuota || isLoading}
+                icon={ShieldCheck}
+                onClick={() => void inspectVoucherQuotas()}
+                variant="ghost"
+              >
+                Vérifier les quotas
+              </Button>
+            ) : null}
+            <Button
+              className={isLoading || isLiveRefreshing ? "button--loading" : ""}
+              disabled={isLoading || isLiveRefreshing}
+              icon={RefreshCw}
+              onClick={() => void loadClients({ synchronizePolicy: true })}
+              variant="primary"
+            >
+              Synchroniser maintenant
+            </Button>
+          </div>
         }
         description="Suivez les utilisateurs actuellement connectés au réseau."
         eyebrow="Routeur"
@@ -623,6 +721,22 @@ export function ConnectedClientsPage() {
               ? "Libérer l’appareil associé ?"
               : "Déconnecter ce client ?"
         }
+      />
+
+      <ConfirmDialog
+        confirmLabel="Appliquer les quotas"
+        description={quotaRepair
+          ? `${quotaRepair.length} voucher(s) n'ont pas sur RouterOS le quota prévu par leur plan`
+            + ` (dont ${quotaRepairConnected} connecté(s)). Le quota du plan sera écrit sur chaque voucher puis relu.`
+            + " La consommation déjà enregistrée est conservée : elle n'est ni remise à zéro ni recréditée."
+            + (quotaRepairExceeded > 0
+              ? ` ${quotaRepairExceeded} voucher(s) ont déjà dépassé ce quota : RouterOS les coupera immédiatement.`
+              : "")
+          : ""}
+        isOpen={Boolean(quotaRepair)}
+        onCancel={() => setQuotaRepair(null)}
+        onConfirm={() => void applyVoucherQuotas()}
+        title="Appliquer le quota des plans ?"
       />
 
       <ClientDetailDialog

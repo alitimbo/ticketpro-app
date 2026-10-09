@@ -416,3 +416,47 @@ function ticketStatusFromRecord(
 function normalize(value: string): string {
   return value.trim().toUpperCase();
 }
+
+export type VoucherQuotaRepairCandidate = {
+  /** Already consumed at least the quota: RouterOS will cut it at once. */
+  exceedsQuota: boolean;
+  isConnected: boolean;
+  limitBytesTotal: number;
+  planName: string;
+  usedBytes: number;
+  username: string;
+};
+
+/**
+ * RouterOS vouchers whose TicketPro plan declares a quota but which carry no
+ * limit-bytes-total. Matching is done on the voucher's current RouterOS
+ * profile; plans without quota and vouchers outside TicketPro plans are left
+ * untouched.
+ */
+export function findVouchersMissingQuota(
+  routerUsers: HotspotUser[],
+  plans: Array<Pick<HotspotPlanRecord, "data_limit_mb" | "deleted_at" | "mikrotik_profile_name" | "name">>,
+  activeUsernames: ReadonlySet<string>
+): VoucherQuotaRepairCandidate[] {
+  const planByProfile = new Map(
+    plans
+      .filter((plan) => !plan.deleted_at && plan.mikrotik_profile_name && plan.data_limit_mb && plan.data_limit_mb > 0)
+      .map((plan) => [plan.mikrotik_profile_name as string, plan])
+  );
+  return routerUsers.flatMap((user) => {
+    if (user.limitBytesTotal && user.limitBytesTotal > 0) return [];
+    const plan = planByProfile.get(user.profileName);
+    if (!plan) return [];
+    const limitBytesTotal = resolveDataLimitBytes(undefined, plan.data_limit_mb);
+    if (limitBytesTotal === null) return [];
+    const usedBytes = (user.downloadedBytes ?? 0) + (user.uploadedBytes ?? 0);
+    return [{
+      exceedsQuota: usedBytes >= limitBytesTotal,
+      isConnected: activeUsernames.has(user.username),
+      limitBytesTotal,
+      planName: plan.name,
+      usedBytes,
+      username: user.username
+    }];
+  });
+}
