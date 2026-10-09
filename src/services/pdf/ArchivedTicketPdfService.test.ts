@@ -32,8 +32,10 @@ describe("ArchivedTicketPdfService", () => {
     expect(text).toContain("(TP1001)");
     expect(result.input.durationLabel).toBe("1 h");
     expect(result.input.validityLabel).toBe("3H");
-    expect(text).toContain("(Duree : 1 h)");
-    expect(text).toContain("(Validite : 3H)");
+    expect(text).toContain("(DUR\\311E)");
+    expect(text).toContain("(1 h)");
+    expect(text).toContain("(VALIDIT\\311)");
+    expect(text).toContain("(3H)");
   });
 
   it("refuse de mélanger les données de deux comptes", async () => {
