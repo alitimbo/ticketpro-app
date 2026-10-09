@@ -355,3 +355,33 @@ function toProfileName(name: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "");
 }
+
+/**
+ * Explains what a plan edit changes. A new name never changes the duration,
+ * validity or quota; changed limits only reach vouchers that were never used.
+ */
+export function describePlanChangeImpact(
+  previous: Pick<HotspotPlan, "dataLimitMb" | "durationMinutes" | "name" | "profileName" | "validityMinutes">,
+  next: Pick<HotspotPlanDraft, "dataLimitMb" | "durationMinutes" | "name" | "profileName" | "validityMinutes">,
+  vouchers?: { immutableTicketsSkipped: number; updatedRouterUsers: number }
+): string {
+  const parts: string[] = [];
+  if (previous.name !== next.name) parts.push(`Nom : « ${previous.name} » → « ${next.name} ».`);
+  if (previous.profileName !== next.profileName) {
+    parts.push(`Profil RouterOS : « ${previous.profileName} » → « ${next.profileName} ».`);
+  }
+  const limitsChanged = previous.durationMinutes !== next.durationMinutes
+    || (previous.validityMinutes ?? null) !== (next.validityMinutes ?? null)
+    || (previous.dataLimitMb ?? null) !== (next.dataLimitMb ?? null);
+  if (!limitsChanged) {
+    parts.push("Durée, validité et quota inchangés.");
+  } else if (vouchers) {
+    parts.push(
+      `Nouvelles limites appliquées à ${vouchers.updatedRouterUsers} ticket(s) non utilisé(s) ; `
+      + `${vouchers.immutableTicketsSkipped} ticket(s) déjà utilisé(s) conservent leurs conditions.`
+    );
+  } else {
+    parts.push("Les tickets déjà utilisés conservent leurs conditions.");
+  }
+  return parts.join(" ");
+}

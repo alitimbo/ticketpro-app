@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyTemplate,
+  describePlanChangeImpact,
   duplicatePlan,
   emptyPlanFormValues,
   formatPlanDisplayName,
@@ -83,5 +84,20 @@ describe("plansPageModel", () => {
     expect(formatPlanDisplayName("1h-100-cfa")).toBe("1h-100");
     expect(formatPlanDisplayName("1h-100-CFA")).toBe("1h-100");
     expect(formatPlanDisplayName("Forfait soirée")).toBe("Forfait soirée");
+  });
+});
+
+describe("describePlanChangeImpact", () => {
+  const plan4h = { dataLimitMb: null, durationMinutes: 240, name: "4H", profileName: "4H", validityMinutes: 240 };
+
+  it("précise qu'un renommage ne change ni la durée ni le quota", () => {
+    expect(describePlanChangeImpact(plan4h, { ...plan4h, name: "6H" }))
+      .toBe("Nom : « 4H » → « 6H ». Durée, validité et quota inchangés.");
+  });
+
+  it("indique que les tickets déjà utilisés conservent leurs conditions", () => {
+    expect(describePlanChangeImpact(plan4h, { ...plan4h, durationMinutes: 360, name: "6H" },
+      { immutableTicketsSkipped: 3, updatedRouterUsers: 5 }))
+      .toBe("Nom : « 4H » → « 6H ». Nouvelles limites appliquées à 5 ticket(s) non utilisé(s) ; 3 ticket(s) déjà utilisé(s) conservent leurs conditions.");
   });
 });

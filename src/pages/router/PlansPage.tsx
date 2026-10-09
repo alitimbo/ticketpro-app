@@ -34,6 +34,7 @@ import {
 import { ActionMenu, AsyncStateCard, Badge, Button, Card, EmptyState, FilterButton, PageHeader, StatusDot } from "../../shared/ui";
 import {
   applyTemplate,
+  describePlanChangeImpact,
   emptyPlanFormValues,
   formValuesToPlanDraft,
   formatPlanDisplayName,
@@ -413,6 +414,7 @@ export function PlansPage() {
       } else if (submittedForm.plan) {
         let syncStatus: PlanViewModel["syncStatus"] = isPersistent ? "pending" : "synced";
         let updatedRouterUsers = 0;
+        let voucherImpact: { immutableTicketsSkipped: number; updatedRouterUsers: number } | undefined;
         const localRecord = planRecordFromDraft(draft, routerId, submittedForm.plan.id, isPersistent ? "pending" : "local", {
           createdByProfileId: submittedForm.plan.createdByProfileId,
           lastSyncedAt: submittedForm.plan.lastSyncedAt,
@@ -442,6 +444,7 @@ export function PlansPage() {
               service: activeService
             });
             updatedRouterUsers = voucherSync.updatedRouterUsers;
+            voucherImpact = voucherSync;
             syncStatus = "synced";
             storedRecord = await planRepository.update({
               ...localRecord,
@@ -467,10 +470,11 @@ export function PlansPage() {
 
         setPlans((current) => current.map((plan) => (plan.id === viewModel.id ? viewModel : plan)));
         if (isPersistent) await backupRouterSnapshot();
+        const impact = describePlanChangeImpact(submittedForm.plan, draft, voucherImpact);
         setMessage(
           syncStatus === "synced"
-            ? `${viewModel.name} modifié ; ${updatedRouterUsers} voucher(s) encore présent(s) sur RouterOS mis à jour.`
-            : `${viewModel.name} modifié localement ; synchronisation RouterOS à reprendre.`
+            ? `${viewModel.name} modifié et confirmé par RouterOS ; ${updatedRouterUsers} voucher(s) mis à jour. ${impact}`
+            : `${viewModel.name} modifié localement seulement : RouterOS n'a pas confirmé la modification, synchronisation à reprendre. ${impact}`
         );
       }
 
