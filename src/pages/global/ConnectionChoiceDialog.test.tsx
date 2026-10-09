@@ -22,3 +22,11 @@ describe("ConnectionChoiceDialog", () => {
     expect(onRemote).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("parcours routeur", () => {
+  it("n'affiche la consigne d'exposition RouterOS ni dans la connexion ni dans le formulaire", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("./RoutersPage.tsx", import.meta.url), "utf8");
+    expect(source).not.toContain("remoteSecurityWarnings");
+  });
+});

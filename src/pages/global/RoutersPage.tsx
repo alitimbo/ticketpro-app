@@ -25,7 +25,6 @@ import { RouterConnectionRepository, RouterRepository, useAppDatabase } from "..
 import {
   createPersistedRouterService,
   FakeRouterAdapter,
-  remoteSecurityWarnings,
   RouterService,
   RouterServiceError,
   type RouterActionLog
@@ -1203,7 +1202,6 @@ function RouterFormDialog({
           ) : null}
           <label className="form-field router-form-notes">Notes internes<textarea value={values.notes} onChange={(event) => update({ notes: event.target.value })} /></label>
         </fieldset>
-        {remoteMode ? <div className="form-error"><AlertTriangle aria-hidden="true" /><span>{remoteSecurityWarnings.join(" ")}</span></div> : null}
         {formState.detectedInfo ? (
           <div className="router-form-result"><Badge status="success">Infos récupérées</Badge><span>{formState.detectedInfo.model} · {formState.detectedInfo.boardName} · RouterOS {formState.detectedInfo.routerOsVersion}</span></div>
         ) : null}
