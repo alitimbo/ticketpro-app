@@ -7320,9 +7320,16 @@ a {
   place-items: center;
 }
 
-.router-grid .router-card__status .status-dot {
-  gap: 0;
-  font-size: 0;
+/* La couleur est toujours accompagnée de son libellé (En ligne, Hors ligne…). */
+.router-grid .router-card__status .status-dot,
+.router-grid .router-card__status .router-connection-indicator {
+  gap: 6px;
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
+.router-grid .router-card .status-dot--active {
+  color: var(--color-success);
 }
 
 .router-grid .router-card__status .status-dot::before {
@@ -7333,7 +7340,21 @@ a {
 
 /* Le battement confirme un routeur joignable, sans déplacer ni recharger la carte. */
 .router-grid .router-card .status-dot--active::before {
-  animation: router-online-heartbeat 1.8s ease-in-out infinite;
+  animation:
+    router-online-heartbeat 1.8s ease-in-out infinite,
+    router-online-glow 2.4s ease-in-out infinite;
+}
+
+/* Halo léger et scintillement, réservés à une connexion confirmée. */
+@keyframes router-online-glow {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 1px var(--color-success)) brightness(1);
+  }
+
+  50% {
+    filter: drop-shadow(0 0 5px var(--color-success)) brightness(1.25);
+  }
 }
 
 @keyframes router-online-heartbeat {
