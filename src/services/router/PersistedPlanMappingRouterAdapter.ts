@@ -87,6 +87,16 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
       : this.delegate.listHotspotUsers();
   }
 
+  listHotspotUsersByUsernames(usernames: string[]) {
+    if (this.delegate.listHotspotUsersByUsernames) {
+      return this.delegate.listHotspotUsersByUsernames(usernames);
+    }
+    const requested = new Set(usernames);
+    return this.listHotspotUsersForVerification().then((users) =>
+      users.filter((user) => requested.has(user.username))
+    );
+  }
+
   listHotspotUsernames() {
     return this.delegate.listHotspotUsernames
       ? this.delegate.listHotspotUsernames()

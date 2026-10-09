@@ -73,6 +73,7 @@ const ROUTER_MANAGEMENT_GROUP = "ticketpro-api";
 const ROUTER_MANAGEMENT_POLICIES = ["api", "policy", "read", "sensitive", "test", "write"] as const;
 const HOTSPOT_USER_CREATE_BATCH_SIZE = 100;
 const PASSWORD_RESOLUTION_CONCURRENCY = 16;
+const HOTSPOT_USER_TARGETED_READ_MAX = 20;
 const HOTSPOT_USER_VERIFICATION_PROPERTIES = [
   ".id",
   "name",
@@ -895,6 +896,38 @@ export class MikroTikRouterAdapter implements RouterAdapter {
       ".proplist": HOTSPOT_USER_VERIFICATION_PROPERTIES
     });
     return Promise.all(rows.map((row) => userRowToHotspotUser(row)));
+  }
+
+  /**
+   * Read for live views, without passwords (so no local secret protection per
+   * row). Up to HOTSPOT_USER_TARGETED_READ_MAX users, one filtered print per
+   * username over a single connection; beyond that, one lean print of all
+   * users is cheaper than many sequential round trips on a remote link.
+   * Any partial failure rejects the whole read so that a missing row is never
+   * mistaken for a missing voucher.
+   */
+  async listHotspotUsersByUsernames(usernames: string[]): Promise<HotspotUser[]> {
+    const unique = Array.from(new Set(usernames.map((username) => username.trim()).filter(Boolean)));
+    if (unique.length === 0) return [];
+    if (unique.length > HOTSPOT_USER_TARGETED_READ_MAX) {
+      return Array.from((await this.readRequestedUsers(unique)).values());
+    }
+    const response = await this.callBatch(unique.map((username) => ({
+      command: "/ip/hotspot/user/print",
+      params: { ".proplist": HOTSPOT_USER_VERIFICATION_PROPERTIES },
+      queries: { name: username }
+    })));
+    const failure = response.connectionError
+      ?? response.error
+      ?? response.results.find((result) => result.error)?.error
+      ?? (response.results.length < unique.length ? "RouterOS batch interrupted" : null);
+    if (failure) throw normalizeMikroTikError(failure);
+    const users: HotspotUser[] = [];
+    for (const [position, result] of response.results.entries()) {
+      const row = result.rows.find((item) => pick(item, "name", "user") === unique[position]);
+      if (row) users.push(await userRowToHotspotUser(row));
+    }
+    return users;
   }
 
   async listHotspotUsernames(): Promise<Array<{ username: string }>> {

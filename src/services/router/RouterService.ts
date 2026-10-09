@@ -194,6 +194,20 @@ export class RouterService {
     );
   }
 
+  listHotspotUsersByUsernames(usernames: string[]) {
+    return this.run("listHotspotUsersByUsernames", async () => {
+      if (usernames.length === 0) return [];
+      if (this.adapter.listHotspotUsersByUsernames) {
+        return this.adapter.listHotspotUsersByUsernames(usernames);
+      }
+      const requested = new Set(usernames);
+      const users = this.adapter.listHotspotUsersForVerification
+        ? await this.adapter.listHotspotUsersForVerification()
+        : await this.adapter.listHotspotUsers();
+      return users.filter((user) => requested.has(user.username));
+    });
+  }
+
   listHotspotUsernames() {
     return this.run("listHotspotUsernames", async () =>
       this.adapter.listHotspotUsernames
