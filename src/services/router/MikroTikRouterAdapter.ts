@@ -262,6 +262,48 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     };
   }
 
+  /**
+   * Enables or disables the RouterOS-side first-device lock and makes sure
+   * every managed TicketPro profile carries the current on-login handler.
+   */
+  async configureVoucherFirstMacLock(
+    enabled: boolean,
+    managedProfileNames: string[]
+  ): Promise<import("../../domain/router").VoucherFirstMacLockState> {
+    if (enabled) {
+      await this.upsertSystemScript(
+        VOUCHER_FIRST_MAC_LOCK_SCRIPT,
+        `${VOUCHER_FIRST_MAC_LOCK_MARKER}\r\n:return true`
+      );
+      await this.ensureVoucherLifecycleEngine({ managedProfileNames });
+    } else {
+      const scripts = await this.call("/system/script/print");
+      for (const script of scripts.filter((item) => pick(item, "name") === VOUCHER_FIRST_MAC_LOCK_SCRIPT)) {
+        const id = pick(script, ".id", "id");
+        if (id) await this.call("/system/script/remove", { numbers: id });
+      }
+    }
+    return this.getVoucherFirstMacLockState(managedProfileNames);
+  }
+
+  async getVoucherFirstMacLockState(
+    managedProfileNames: string[]
+  ): Promise<import("../../domain/router").VoucherFirstMacLockState> {
+    const [scripts, profiles] = await Promise.all([
+      this.call("/system/script/print"),
+      this.call("/ip/hotspot/user/profile/print")
+    ]);
+    const wanted = normalizeManagedProfileNames(managedProfileNames);
+    const managed = profiles.filter((profile) => wanted.has(pick(profile, "name") ?? ""));
+    return {
+      enabled: scripts.some((script) => pick(script, "name") === VOUCHER_FIRST_MAC_LOCK_SCRIPT),
+      managedProfiles: managed.length,
+      profilesWithHandler: managed.filter((profile) =>
+        (pick(profile, "on-login") ?? "").includes(VOUCHER_FIRST_MAC_LOCK_MARKER)
+      ).length
+    };
+  }
+
   async inspectManagedResources(
     options: RouterManagedResourceInspectionOptions = {}
   ): Promise<RouterManagedResourceManifest> {
@@ -2770,10 +2812,26 @@ function isPositiveRouterOsDuration(value: string | undefined): boolean {
   return /\d+(?:w|d|h|m|s)/.test(value);
 }
 
+/**
+ * RouterOS-side first-device lock. When the marker script exists, the first
+ * successful login writes the client MAC on the Hotspot user; RouterOS then
+ * refuses that voucher from any other MAC, even while TicketPro is closed.
+ * An existing lock is never moved.
+ */
+export const VOUCHER_FIRST_MAC_LOCK_SCRIPT = "ticketpro-first-mac-lock";
+export const VOUCHER_FIRST_MAC_LOCK_MARKER = "# TicketPro first-mac-lock v1";
+
 export function buildVoucherOnLoginScript(): string {
   return [
     ':local tpId [/ip hotspot user find where name=$user];',
     ':if ([:len $tpId] = 0) do={ :return };',
+    VOUCHER_FIRST_MAC_LOCK_MARKER,
+    `:if ([:len [/system script find where name="${VOUCHER_FIRST_MAC_LOCK_SCRIPT}"]] > 0) do={`,
+    '  :local tpLockedMac [:tostr [/ip hotspot user get $tpId mac-address]];',
+    '  :if (([:len $tpLockedMac] = 0) || ($tpLockedMac = "00:00:00:00:00:00")) do={',
+    '    :do { /ip hotspot user set $tpId mac-address=$"mac-address" } on-error={ :log warning ("TicketPro: verrou MAC impossible pour " . $user) };',
+    '  };',
+    '};',
     ':local tpComment [/ip hotspot user get $tpId comment];',
     ':local tpOwnership "";',
     ':local tpBatchStart [:find $tpComment "batch="];',
