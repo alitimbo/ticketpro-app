@@ -1070,7 +1070,7 @@ function formatRouterLastSeen(value: string): string {
   }).format(date);
 }
 
-function ConnectionChoiceDialog({
+export function ConnectionChoiceDialog({
   onCancel,
   onLocal,
   onRemote,
@@ -1112,7 +1112,6 @@ function ConnectionChoiceDialog({
             </span>
           </button>
         </div>
-        <div className="form-error"><AlertTriangle aria-hidden="true" /><span>{remoteSecurityWarnings.join(" ")}</span></div>
         <div className="confirm-dialog__actions"><Button icon={WifiOff} onClick={onCancel} variant="ghost">Fermer</Button></div>
       </section>
     </div>
