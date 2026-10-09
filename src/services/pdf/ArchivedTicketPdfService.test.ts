@@ -28,7 +28,7 @@ describe("ArchivedTicketPdfService", () => {
     expect(text).toContain("(Ancienne Zone)");
     expect(text).toContain("(Portail : ancien.hotspot.test)");
     expect(text).toContain("(Contact : +227 90 00 00 01)");
-    expect(text).toContain("(LOGIN)");
+    expect(text).toContain("(CODE)");
     expect(text).toContain("(TP1001)");
     expect(result.input.durationLabel).toBe("1 h");
     expect(result.input.validityLabel).toBe("3H");

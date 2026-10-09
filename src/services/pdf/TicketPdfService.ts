@@ -576,7 +576,7 @@ function accessCodeBlock({
   const labelSize = 3.9 * u;
   if (singleCode) {
     // One code: label on the left, the code itself as large as possible.
-    const labelWidth = textWidth("LOGIN", labelSize, true) + 9 * u;
+    const labelWidth = textWidth("CODE", labelSize, true) + 9 * u;
     const valueSize = fitTextSize(ticket.username, contentWidth - labelWidth - 4 * u, 12 * u, 8 * u);
     const frameHeight = valueSize * 1.15 + 2.4 * u;
     return {
@@ -586,7 +586,7 @@ function accessCodeBlock({
         const middle = frameBottom + frameHeight / 2;
         page.rect(frameX, frameBottom, contentWidth, frameHeight);
         drawUserOutlineIcon(page, frameX + 3.6 * u, middle, 4.6 * u);
-        page.text("LOGIN", frameX + 7 * u, middle - labelSize * 0.35, { font: "bold", size: labelSize });
+        page.text("CODE", frameX + 7 * u, middle - labelSize * 0.35, { font: "bold", size: labelSize });
         page.text(ticket.username, frameX + labelWidth + (contentWidth - labelWidth) / 2, middle - valueSize * 0.36, {
           align: "center", font: "bold", size: valueSize
         });
@@ -669,7 +669,7 @@ function qrAccessBlock({
   const detailsX = qrSize + 3 * u;
   const detailsWidth = contentWidth - detailsX;
   const values = singleCode
-    ? [{ label: "LOGIN", value: ticket.username }]
+    ? [{ label: "CODE", value: ticket.username }]
     : [{ label: "LOGIN", value: ticket.username }, { label: "MOT DE PASSE", value: password }];
   const valueSize = Math.min(...values.map((item) => fitTextSize(item.value, detailsWidth - 2.5 * u, singleCode ? 11 * u : 9 * u, 5.5 * u)));
   const frameHeight = labelSize * 1.35 + valueSize * 1.15 + 1.2 * u;

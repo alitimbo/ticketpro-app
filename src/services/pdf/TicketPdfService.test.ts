@@ -265,3 +265,24 @@ describe("application des paramètres ticket", () => {
     expect(text).toContain(`(Cr\\351\\351 le ${pad(local.getDate())}/${pad(local.getMonth() + 1)}/${local.getFullYear()} ${pad(local.getHours())}:${pad(local.getMinutes())})`);
   });
 });
+
+describe("tickets à code unique", () => {
+  it.each(["a4", "thermal58", "thermal80"] as const)("imprime un seul code en %s quand identifiant = mot de passe", (format) => {
+    const input = buildPdfInput(1);
+    input.format = format;
+    input.tickets[0] = { passwordSecretRef: `secret://router/${input.tickets[0].username}/password`, username: input.tickets[0].username };
+    const text = new TextDecoder().decode(generateTicketPdf(input));
+    expect(text).toContain("(CODE)");
+    expect(text).not.toContain("(LOGIN)");
+    expect(text).not.toContain("(MOT DE PASSE)");
+  });
+
+  it("garde LOGIN et MOT DE PASSE quand les deux diffèrent", () => {
+    const input = buildPdfInput(1);
+    input.tickets[0].password = "847295";
+    const text = new TextDecoder().decode(generateTicketPdf(input));
+    expect(text).toContain("(LOGIN)");
+    expect(text).toContain("(MOT DE PASSE)");
+    expect(text).not.toContain("(CODE)");
+  });
+});
