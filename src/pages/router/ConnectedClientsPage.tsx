@@ -54,6 +54,7 @@ import {
 import {
   buildConnectedClientViewModels,
   buildCachedConnectedClientViewModels,
+  describeClientDataQuota,
   emptyConnectedClientFilters,
   filterConnectedClients,
   formatClientBytes,
@@ -738,6 +739,7 @@ function ClientDetailDialog({
   if (!client) {
     return null;
   }
+  const dataQuota = describeClientDataQuota(client);
 
   return (
     <div className="dialog-backdrop" role="presentation">
@@ -768,16 +770,8 @@ function ClientDetailDialog({
           <DetailLine icon={Download} label="Download" value={formatClientBytes(client.downloadedBytes)} />
           <DetailLine icon={Upload} label="Upload" value={formatClientBytes(client.uploadedBytes)} />
           <DetailLine icon={Laptop} label="Volume total" value={formatClientBytes(client.totalBytes)} />
-          <DetailLine
-            icon={Download}
-            label="Volume restant"
-            value={client.dataRemainingBytes === null ? "Illimité" : formatClientBytes(client.dataRemainingBytes)}
-          />
-          <DetailLine
-            icon={Laptop}
-            label="Quota total du voucher"
-            value={client.dataLimitBytes === null ? "Illimité" : formatClientBytes(client.dataLimitBytes)}
-          />
+          <DetailLine icon={Download} label="Volume restant" value={dataQuota.remaining} />
+          <DetailLine icon={Laptop} label="Quota total du voucher" value={dataQuota.total} />
           <DetailLine icon={Download} label="Débit descendant du profil" value={client.downloadLimit ?? "Non défini"} />
           <DetailLine icon={Upload} label="Débit montant du profil" value={client.uploadLimit ?? "Non défini"} />
           <DetailLine icon={Smartphone} label="Appareils simultanés" value={client.sharedUsers === null ? "Non défini" : String(client.sharedUsers)} />
