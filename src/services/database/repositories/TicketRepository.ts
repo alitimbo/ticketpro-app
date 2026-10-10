@@ -359,6 +359,33 @@ export class TicketRepository {
     );
   }
 
+  /**
+   * After a RouterOS profile rename, RouterOS itself moves every voucher of the
+   * profile. Mirror that on the local references of the plan's tickets, used
+   * or not: the profile name is a reference, not a commercial term.
+   */
+  async renameProfileReference(input: {
+    accountId: string;
+    planId: string;
+    previousProfileName: string;
+    profileName: string;
+    routerId: string;
+  }): Promise<number> {
+    const tickets = (await this.listByRouter(input.routerId)).filter((ticket) =>
+      ticket.account_id === input.accountId
+      && ticket.plan_id === input.planId
+      && (ticket.mikrotik_profile_name === input.previousProfileName || ticket.mikrotik_profile_name === null)
+    );
+    const updatedAt = new Date().toISOString();
+    for (const ticket of tickets) {
+      await this.database.execute(
+        "UPDATE tickets SET mikrotik_profile_name = ?1, updated_at = ?2 WHERE id = ?3 AND account_id = ?4",
+        [input.profileName, updatedAt, ticket.id, input.accountId]
+      );
+    }
+    return tickets.length;
+  }
+
   async recordRouterStatusByUsername(input: {
     accountId: string;
     routerId: string;
