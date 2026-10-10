@@ -34,6 +34,7 @@ import {
   Badge,
   Button,
   Card,
+  ConfirmDialog,
   EmptyState,
   FilterButton,
   PageHeader,
@@ -70,6 +71,7 @@ import {
   type RouterFormValues
 } from "./routerPageModel";
 import { countRoutersForSubscription, getSubscriptionOverview } from "./subscriptionPageModel";
+import { createRouterRemoteAccessService, remoteAccessStepLabels } from "./routerRemoteAccess";
 import { RouterCloudRecoveryService } from "../../services/recovery";
 import {
   completeSaasRouterDecommission,
@@ -126,6 +128,77 @@ export function RoutersPage() {
   const currentScopeKey = routerPageScopeKey(accountId, organizationId);
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
   const connectionRepository = useMemo(() => new RouterConnectionRepository(database), [database]);
+  const [remoteAccess, setRemoteAccess] = useState<RemoteAccessView | null>(null);
+  const [confirmRemoteAccessOff, setConfirmRemoteAccessOff] = useState(false);
+  const remoteAccessService = useMemo(
+    () => isPersistent && accountId && session
+      ? createRouterRemoteAccessService({ accountId, database, organizationId, session })
+      : null,
+    [accountId, database, isPersistent, organizationId, session]
+  );
+  const selectedRouterId = selectedRouter?.id ?? null;
+
+  useEffect(() => {
+    if (!remoteAccessService || !selectedRouterId) {
+      setRemoteAccess(null);
+      return undefined;
+    }
+    let cancelled = false;
+    setRemoteAccess({ canChange: canEditRouter, error: null, progress: null, state: "loading" });
+    void routerRepository.findById(selectedRouterId)
+      .then((record) => (record ? remoteAccessService.state(record) : null))
+      .then((result) => {
+        if (cancelled) return;
+        setRemoteAccess(result
+          ? { canChange: canEditRouter, error: null, progress: null, state: result.state }
+          : null);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setRemoteAccess({ canChange: canEditRouter, error: readUnknownError(error, "État de l'accès distant illisible."), progress: null, state: "off" });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [canEditRouter, remoteAccessService, routerRepository, selectedRouterId]);
+
+  const runRemoteAccessChange = async (enable: boolean) => {
+    if (!remoteAccessService || !selectedRouterId || !canEditRouter) return;
+    const record = await routerRepository.findById(selectedRouterId);
+    if (!record) return;
+    const previousState = remoteAccess?.state === "on" || remoteAccess?.state === "pending" ? remoteAccess.state : "off";
+    setRemoteAccess({
+      canChange: true,
+      error: null,
+      progress: enable ? "Activation de l'accès à distance…" : "Désactivation de l'accès à distance…",
+      state: previousState
+    });
+    try {
+      const result = enable
+        ? await remoteAccessService.enable(record, (step) => setRemoteAccess((current) => current
+          ? { ...current, progress: remoteAccessStepLabels[step] }
+          : current))
+        : (await remoteAccessService.disable(record), { state: "off" as const });
+      const refreshed = await routerRepository.findById(record.id);
+      if (refreshed) {
+        const card = routerCardFromRecord(refreshed, await connectionRepository.listByRouter(record.id));
+        setRouters((current) => current.map((item) => (item.id === card.id ? card : item)));
+        setSelectedRouter((current) => (current?.id === card.id ? card : current));
+      }
+      setRemoteAccess({ canChange: true, error: null, progress: null, state: result.state });
+      setMessage(enable
+        ? `Accès à distance activé et vérifié pour ${record.name}.`
+        : `Accès à distance désactivé pour ${record.name}.`);
+    } catch (error) {
+      const latest = await remoteAccessService.state(record).catch(() => null);
+      setRemoteAccess({
+        canChange: true,
+        error: readUnknownError(error, enable ? "Activation de l'accès à distance impossible." : "Désactivation impossible."),
+        progress: null,
+        state: latest?.state ?? previousState
+      });
+    }
+  };
   const recoveryService = useMemo(
     () => accountId && internalProfileId
       ? new RouterCloudRecoveryService(
@@ -996,7 +1069,23 @@ export function RoutersPage() {
         onCancel={() => setSelectedRouter(null)}
         onLocal={() => void enterSelectedRouter("local")}
         onRemote={() => void enterSelectedRouter(selectedRouter?.remoteMode ?? "distant_ip")}
+        onToggleRemoteAccess={(enabled) => {
+          if (enabled) void runRemoteAccessChange(true);
+          else setConfirmRemoteAccessOff(true);
+        }}
+        remoteAccess={remoteAccess}
         router={selectedRouter}
+      />
+      <ConfirmDialog
+        confirmLabel="Désactiver"
+        description="Ce routeur ne sera plus joignable à distance par TicketPro : son tunnel WireGuard est retiré et sa clé révoquée. L'accès local reste inchangé ; vous pourrez réactiver l'accès à distance depuis son réseau local."
+        isOpen={confirmRemoteAccessOff}
+        onCancel={() => setConfirmRemoteAccessOff(false)}
+        onConfirm={() => {
+          setConfirmRemoteAccessOff(false);
+          void runRemoteAccessChange(false);
+        }}
+        title="Désactiver l'accès à distance ?"
       />
       <RouterFormDialog
         formState={formState}
@@ -1132,15 +1221,27 @@ function formatRouterLastSeen(value: string): string {
   }).format(date);
 }
 
+export type RemoteAccessView = {
+  /** Allowed to change the switch (global.routers.edit). */
+  canChange: boolean;
+  error: string | null;
+  progress: string | null;
+  state: "off" | "pending" | "on" | "loading";
+};
+
 export function ConnectionChoiceDialog({
   onCancel,
   onLocal,
   onRemote,
+  onToggleRemoteAccess,
+  remoteAccess,
   router
 }: {
   onCancel: () => void;
   onLocal: () => void;
   onRemote: () => void;
+  onToggleRemoteAccess?: (enabled: boolean) => void;
+  remoteAccess?: RemoteAccessView | null;
   router: RouterCardData | null;
 }) {
   if (!router) return null;
@@ -1174,8 +1275,50 @@ export function ConnectionChoiceDialog({
             </span>
           </button>
         </div>
+        {remoteAccess ? (
+          <RemoteAccessSwitch onToggle={onToggleRemoteAccess} view={remoteAccess} />
+        ) : null}
         <div className="confirm-dialog__actions"><Button icon={WifiOff} onClick={onCancel} variant="ghost">Fermer</Button></div>
       </section>
+    </div>
+  );
+}
+
+function RemoteAccessSwitch({
+  onToggle,
+  view
+}: {
+  onToggle?: (enabled: boolean) => void;
+  view: RemoteAccessView;
+}) {
+  const busy = view.state === "loading" || Boolean(view.progress);
+  const checked = view.state === "on" || view.state === "pending";
+  const status = view.progress
+    ?? (view.state === "loading"
+      ? "Lecture de l'état…"
+      : view.state === "on"
+        ? "Activé et vérifié à travers le VPN : ce routeur est accessible de partout."
+        : view.state === "pending"
+          ? "Configuré sur le routeur mais pas encore vérifié. Basculez à nouveau pour réessayer."
+          : "Désactivé. La première activation se fait depuis le réseau local du routeur.");
+  return (
+    <div className={`remote-access-switch remote-access-switch--${view.state}`}>
+      <label className="remote-access-switch__control">
+        <input
+          aria-describedby="remote-access-status"
+          checked={checked}
+          disabled={busy || !view.canChange || !onToggle}
+          onChange={(event) => onToggle?.(view.state === "pending" ? true : event.target.checked)}
+          role="switch"
+          type="checkbox"
+        />
+        <span aria-hidden="true" className="remote-access-switch__track"><span /></span>
+        <strong>Accès à distance</strong>
+        {busy ? <LoaderCircle aria-hidden="true" className="vpn-button--loading" /> : null}
+      </label>
+      <small id="remote-access-status">{status}</small>
+      {view.error ? <p className="form-error"><AlertTriangle aria-hidden="true" /><span>{view.error}</span></p> : null}
+      {!view.canChange ? <small>Seul un profil autorisé à modifier les routeurs peut changer ce réglage.</small> : null}
     </div>
   );
 }

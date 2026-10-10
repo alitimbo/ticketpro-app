@@ -395,8 +395,11 @@ export function VpnPage() {
       .filter((peer) => peer.peer_type === "router" && peer.status === "draft")
       .map((peer) => peer.id)
       .sort();
-    if (activeOperators.length === 0 || draftRouters.length === 0) return;
-    const validationKey = `${activeOperators.join(",")}:${draftRouters.join(",")}`;
+    // With the embedded provider the PC tunnel is the Windows service itself:
+    // there is no operator peer, so validation must not wait for one.
+    const pcTunnelAvailable = vpnProvider === "EMBEDDED" || activeOperators.length > 0;
+    if (!pcTunnelAvailable || draftRouters.length === 0) return;
+    const validationKey = `${vpnProvider}:${activeOperators.join(",")}:${draftRouters.join(",")}`;
     if (routerValidationRef.current === validationKey) return;
     routerValidationRef.current = validationKey;
     void validateDraftRouterPeers()
@@ -416,7 +419,7 @@ export function VpnPage() {
             : "La validation automatique des routeurs restaurés a échoué."
         );
       });
-  }, [peers, routers]);
+  }, [peers, routers, vpnProvider]);
 
   const createRouterPeer = async () => {
     if (!accountId || !network) {
@@ -510,7 +513,7 @@ export function VpnPage() {
       );
 
       let validatedNow = false;
-      if (peers.some((item) => item.peer_type === "operator" && item.status === "active")) {
+      if (vpnProvider === "EMBEDDED" || peers.some((item) => item.peer_type === "operator" && item.status === "active")) {
         try {
           await verifyRouterOverVpn(router, vpnHost, routerPassword);
           await reconciliationService?.reconcile(
