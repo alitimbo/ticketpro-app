@@ -16,7 +16,8 @@ describe("TicketPdfService", () => {
     input.displaySettings = { ...defaultTicketDisplaySettings, showDataLimit: true };
     const text = new TextDecoder().decode(generateTicketPdf(input));
 
-    expect(text).toContain("(Volume : 2 Go)");
+    expect(text).toContain("(VOLUME)");
+    expect(text).toContain("(2 Go)");
   });
 
   it("génère un PDF A4 lisible avec 40 tickets par page", () => {
@@ -30,13 +31,13 @@ describe("TicketPdfService", () => {
     expect(text).toContain("(Zone Centre)");
     expect(text).toContain("(123001)");
     expect(text).not.toContain("(MOT DE PASSE)");
-    expect(text).toContain("(DUREE)");
-    expect(text).toContain("(VALIDITE)");
+    expect(text).toContain("(DUR\\311E)");
+    expect(text).toContain("(VALIDIT\\311)");
     expect(text).toContain("(3 h)");
     expect(text).toContain("(6H)");
     expect(text).toContain("(Portail : wifi.ticketpro.local)");
     expect(text).not.toContain("(Contact : +227 90 12 34 56)");
-    expect(text).toContain("(Propulse par TicketPro)");
+    expect(text).toContain("(Propuls\\351 par TicketPro)");
     expect(text).not.toContain("(Lot ");
 
     const overflowText = new TextDecoder().decode(generateTicketPdf(buildPdfInput(41)));
@@ -60,9 +61,9 @@ describe("TicketPdfService", () => {
     input.validityLabel = "3 j";
     const text = new TextDecoder().decode(generateTicketPdf(input));
 
-    expect(text).toContain("(DUREE)");
+    expect(text).toContain("(DUR\\311E)");
     expect(text).toContain("(1 h)");
-    expect(text).toContain("(VALIDITE)");
+    expect(text).toContain("(VALIDIT\\311)");
     expect(text).toContain("(3Jrs)");
   });
 
@@ -145,7 +146,7 @@ describe("TicketPdfService", () => {
     input.printedAt = "2026-09-13T18:45:00.000Z";
     const text = new TextDecoder().decode(generateTicketPdf(input));
 
-    expect(text).toMatch(/\(\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}\)/);
+    expect(text).toMatch(/\(Imprim\\351 le \d{2}\/\d{2}\/\d{4} \d{2}:\d{2}\)/);
   });
 
   it.each(["thermal58", "thermal80"] as const)(
@@ -153,14 +154,17 @@ describe("TicketPdfService", () => {
     (format) => {
       const input = buildPdfInput(1);
       input.format = format;
-      input.hotspotAddress = "portail-zone-wifi-tres-longue.ticketpro.local";
       input.tickets[0].password = "847295";
+      const shortText = new TextDecoder().decode(generateTicketPdf(input));
+      input.hotspotAddress = "portail-zone-wifi-tres-longue.ticketpro.local";
+      input.displaySettings = { ...input.displaySettings!, noteText: "Conservez ce ticket jusqu'à expiration de la validité", showNote: true };
       const text = new TextDecoder().decode(generateTicketPdf(input));
       const expectedWidth = format === "thermal58" ? "164.41" : "226.77";
       const mediaBox = text.match(new RegExp(`/MediaBox \\[0 0 ${expectedWidth} ([0-9.]+)\\]`));
 
       expect(mediaBox).not.toBeNull();
-      expect(Number(mediaBox?.[1])).toBeGreaterThan(format === "thermal58" ? 122 : 132);
+      const shortHeight = Number(shortText.match(new RegExp(`/MediaBox \\[0 0 ${expectedWidth} ([0-9.]+)\\]`))?.[1]);
+      expect(Number(mediaBox?.[1])).toBeGreaterThan(shortHeight);
       expect(text).toContain("(MOT DE PASSE)");
       expect(text).toContain("(847295)");
       expect(text).not.toContain("(Lot ");
@@ -215,3 +219,70 @@ function buildPdfInput(quantity: number): TicketPdfInput {
     zoneName: "Zone Centre"
   };
 }
+
+describe("application des paramètres ticket", () => {
+  const render = (format: "a4" | "thermal58", overrides: Partial<typeof defaultTicketDisplaySettings>, input: Partial<TicketPdfInput> = {}) => {
+    const base = buildPdfInput(1);
+    return new TextDecoder().decode(generateTicketPdf({
+      ...base,
+      format,
+      ownerPhone: "+227 90 12 34 56",
+      ...input,
+      displaySettings: { ...defaultTicketDisplaySettings, noteText: "Note client", ...overrides }
+    }));
+  };
+  const cases: Array<[string, Partial<typeof defaultTicketDisplaySettings>, string, Partial<TicketPdfInput>?]> = [
+    ["showTicketNumber", { showTicketNumber: true }, "(#01)"],
+    ["showPlanName", { showPlanName: true }, "(3h-2Go)"],
+    ["showPrice", { showPrice: true }, "(PRIX)", { priceLabel: "500 CFA" }],
+    ["showDataLimit", { showDataLimit: true }, "(VOLUME)"],
+    ["showInstructions", { showInstructions: true }, "(Portail : wifi.ticketpro.local)"],
+    ["showCreatedAt", { showCreatedAt: true }, "(Cr\\351\\351 le "],
+    ["showNote", { showNote: true }, "(Note client)"],
+    ["showContact", { showContact: true }, "(Contact : +227 90 12 34 56)"],
+    ["showPoweredBy", { showPoweredBy: true }, "(Propuls\\351 par TicketPro)"]
+  ];
+
+  it.each(["a4", "thermal58"] as const)("chaque option affichée en %s apparaît seulement si elle est activée", (format) => {
+    for (const [key, enabled, marker, input] of cases) {
+      const disabled = Object.fromEntries(Object.keys(enabled).map((name) => [name, false]));
+      expect(render(format, enabled, input), `${key} activé`).toContain(marker);
+      expect(render(format, disabled, input), `${key} désactivé`).not.toContain(marker);
+    }
+  });
+
+  it.each(["a4", "thermal58"] as const)("le modèle QR imprime un vrai QR code en %s", (format) => {
+    const withoutQr = render(format, { showQrCode: false });
+    const withQr = render(format, { showQrCode: true }, { qrCodeEnabled: true, template: "qr" });
+    expect(withQr).toContain("(Scannez");
+    expect(withoutQr).not.toContain("(Scannez");
+  });
+
+  it("imprime la date de création à l'heure locale, pas en UTC", () => {
+    const text = render("a4", { showCreatedAt: true }, { generatedAt: "2026-07-08T20:00:00.000Z" });
+    const local = new Date("2026-07-08T20:00:00.000Z");
+    const pad = (value: number) => String(value).padStart(2, "0");
+    expect(text).toContain(`(Cr\\351\\351 le ${pad(local.getDate())}/${pad(local.getMonth() + 1)}/${local.getFullYear()} ${pad(local.getHours())}:${pad(local.getMinutes())})`);
+  });
+});
+
+describe("tickets à code unique", () => {
+  it.each(["a4", "thermal58", "thermal80"] as const)("imprime un seul code en %s quand identifiant = mot de passe", (format) => {
+    const input = buildPdfInput(1);
+    input.format = format;
+    input.tickets[0] = { passwordSecretRef: `secret://router/${input.tickets[0].username}/password`, username: input.tickets[0].username };
+    const text = new TextDecoder().decode(generateTicketPdf(input));
+    expect(text).toContain("(CODE)");
+    expect(text).not.toContain("(LOGIN)");
+    expect(text).not.toContain("(MOT DE PASSE)");
+  });
+
+  it("garde LOGIN et MOT DE PASSE quand les deux diffèrent", () => {
+    const input = buildPdfInput(1);
+    input.tickets[0].password = "847295";
+    const text = new TextDecoder().decode(generateTicketPdf(input));
+    expect(text).toContain("(LOGIN)");
+    expect(text).toContain("(MOT DE PASSE)");
+    expect(text).not.toContain("(CODE)");
+  });
+});
