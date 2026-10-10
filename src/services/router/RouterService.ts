@@ -203,6 +203,20 @@ export class RouterService {
     }, "router.tickets.sync");
   }
 
+  listHotspotUsersByUsernames(usernames: string[]) {
+    return this.run("listHotspotUsersByUsernames", async () => {
+      if (usernames.length === 0) return [];
+      if (this.adapter.listHotspotUsersByUsernames) {
+        return this.adapter.listHotspotUsersByUsernames(usernames);
+      }
+      const requested = new Set(usernames);
+      const users = this.adapter.listHotspotUsersForVerification
+        ? await this.adapter.listHotspotUsersForVerification()
+        : await this.adapter.listHotspotUsers();
+      return users.filter((user) => requested.has(user.username));
+    });
+  }
+
   configureVoucherFirstMacLock(enabled: boolean, managedProfileNames: string[]) {
     return this.run("configureVoucherFirstMacLock", async () => {
       if (!this.adapter.configureVoucherFirstMacLock) {
