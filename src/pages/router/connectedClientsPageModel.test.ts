@@ -4,11 +4,14 @@ import {
   buildCachedConnectedClientViewModels,
   buildConnectedClientViewModels,
   describeClientDataQuota,
+  deviceLockLabel,
   emptyConnectedClientFilters,
-  findVouchersMissingQuota,
   filterConnectedClients,
   formatClientBytes,
-  getConnectedClientPlanOptions
+  findVouchersMissingQuota,
+  formatDeviceLockSummary,
+  getConnectedClientPlanOptions,
+  summarizeDeviceLocks
 } from "./connectedClientsPageModel";
 
 const activeUsers: ActiveHotspotUser[] = [
@@ -283,6 +286,72 @@ describe("connectedClientsPageModel", () => {
       totalBytes: 75 * 1024 * 1024,
       uptime: "45 min"
     });
+  });
+});
+
+describe("verrouillage MAC des clients connectés", () => {
+  const router = { id: "routeur-demo", name: "Routeur démo" };
+  const session = (username: string, mac: string, id = `a-${username}-${mac}`): ActiveHotspotUser => ({
+    ...activeUsers[0], id, macAddress: mac, username
+  });
+  const user = (username: string, macAddress: string | null, comment: string | null = "TicketPro:v1;validity=60;expires=0;state=new;"): HotspotUser => ({
+    ...hotspotUsers[0], comment, id: `u-${username}`, macAddress, username
+  });
+
+  it("compte des vouchers uniques lus sur RouterOS et isole les sessions hors vouchers", () => {
+    const clients = buildConnectedClientViewModels(
+      [
+        session("V1", "AA:00:00:00:00:01"),
+        session("V2", "aa-00-00-00-00-02"),
+        session("V3", "AA:00:00:00:00:03"),
+        session("V3", "AA:00:00:00:00:33"),
+        session("V4", "AA:00:00:00:00:04"),
+        session("admin", "AA:00:00:00:00:05"),
+        session("trial", "AA:00:00:00:00:06")
+      ],
+      [
+        user("V1", "AA:00:00:00:00:01"),
+        user("V2", "AA:00:00:00:00:02"),
+        user("V3", "AA:00:00:00:00:03"),
+        user("V4", null, null),
+        user("admin", null, null)
+      ],
+      plans,
+      router,
+      undefined,
+      new Set(["V1", "V2", "V3", "V4"])
+    );
+
+    expect(clients.map((client) => client.deviceLock.state)).toEqual([
+      "locked", "locked", "locked", "mismatch", "unlocked", "not_voucher", "not_voucher"
+    ]);
+    const summary = summarizeDeviceLocks(clients);
+    expect(summary).toEqual({
+      concernedVouchers: 4,
+      lockedVouchers: 2,
+      mismatchVouchers: 1,
+      outsideSessions: 2,
+      sessions: 7,
+      unlockedVouchers: 1,
+      unverifiedVouchers: 0
+    });
+    expect(formatDeviceLockSummary(summary)).toBe(
+      "2 ticket(s) verrouillé(s) sur 4 ticket(s) TicketPro concerné(s) · 1 non verrouillé(s) · 1 appareil(s) différent(s) du verrou · 2 session(s) hors vouchers TicketPro — 7 session(s) affichée(s)."
+    );
+  });
+
+  it("ne déclare jamais un verrou vérifié depuis le cache", () => {
+    const [client] = buildCachedConnectedClientViewModels(
+      [{ cached_at: "2026-07-29T09:00:00.000Z", created_at: "2026-07-29T09:00:00.000Z", deleted_at: null,
+        downloaded_bytes: 0, id: "c1", ip_address: null, mac_address: "AA:00:00:00:00:01", router_id: "router-1",
+        session_time_left: null, sync_status: "synced", updated_at: "2026-07-29T09:00:00.000Z",
+        uploaded_bytes: 0, uptime: "1m", username: "inconnu" }],
+      [],
+      [],
+      router
+    );
+    expect(client.deviceLock.state).toBe("not_voucher");
+    expect(deviceLockLabel({ lockedMacAddress: "AA:00:00:00:00:01", state: "unverified" })).toBe("Non vérifié (cache : AA:00:00:00:00:01)");
   });
 });
 

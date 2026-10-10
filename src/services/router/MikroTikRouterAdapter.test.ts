@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { protectTicketPassword, resolveTicketPasswordValue } from "../tickets";
 import {
   buildVoucherExpirationScript,
+  buildVoucherOnLoginScript,
   buildVoucherLifecycleComment,
   mergeHotspotLoginBy,
   mergeVoucherLifecycleOnLogin,
@@ -1903,6 +1904,84 @@ describe("MikroTikRouterAdapter.setHotspotUserQuota", () => {
     const set = transport.calls.find((call) => call.command === "/ip/hotspot/user/set");
     expect(set?.params).toEqual({ "limit-bytes-total": 2147483648, numbers: "*U1" });
     expect(transport.calls.every((call) => !call.command.includes("reset-counters"))).toBe(true);
+  });
+});
+
+describe("MikroTikRouterAdapter.updateHotspotPlan — confirmation RouterOS", () => {
+  const draft = { dataLimitMb: null, downloadLimit: null, uploadLimit: null, durationMinutes: 240, validityMinutes: 240, name: "6H", profileName: "6H", sharedUsers: 1, priceHint: null };
+
+  it("confirme un renommage de profil relu sur RouterOS", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/user/profile/print": [{ ".id": "*P1", name: "4H", "session-timeout": "4h" }]
+    });
+    await expect(createAdapter(transport).updateHotspotPlan("4H", draft)).resolves.toMatchObject({ id: "*P1", profileName: "6H" });
+  });
+
+  it("refuse de confirmer une modification que RouterOS n'a pas conservée", async () => {
+    class IgnoringRenameTransport extends MockRouterOsTransport {
+      async call(request: RouterOsApiRequest): Promise<RouterOsApiRow[]> {
+        if (request.command === "/ip/hotspot/user/profile/set") {
+          const params = { ...request.params };
+          delete params.name;
+          return super.call({ ...request, params });
+        }
+        return super.call(request);
+      }
+    }
+    const transport = new IgnoringRenameTransport({
+      "/ip/hotspot/user/profile/print": [{ ".id": "*P1", name: "4H", "session-timeout": "4h" }]
+    });
+    await expect(createAdapter(transport).updateHotspotPlan("4H", draft)).rejects.toThrow("RouterOS n'a pas confirmé la modification du profil.");
+  });
+});
+
+describe("verrouillage MAC appliqué par RouterOS", () => {
+  class ScriptTransport extends MockRouterOsTransport {
+    async call(request: RouterOsApiRequest): Promise<RouterOsApiRow[]> {
+      const scripts = (this as unknown as { responses: Record<string, RouterOsApiRow[]> }).responses["/system/script/print"];
+      if (request.command === "/system/script/add") {
+        this.calls.push(request);
+        scripts.push({ ".id": `*S${scripts.length + 1}`, ...Object.fromEntries(Object.entries(request.params ?? {}).map(([k, v]) => [k, String(v)])) });
+        return [];
+      }
+      if (request.command === "/system/script/remove") {
+        this.calls.push(request);
+        const index = scripts.findIndex((row) => row[".id"] === request.params?.numbers);
+        if (index >= 0) scripts.splice(index, 1);
+        return [];
+      }
+      return super.call(request);
+    }
+  }
+  const routerState = () => ({
+    "/ip/hotspot/user/profile/print": [{ ".id": "*P1", name: "forfait-1h", "on-login": "", "session-timeout": "1h" }],
+    "/ip/hotspot/print": [],
+    "/ip/hotspot/profile/print": [],
+    "/system/clock/print": [{ date: "2026-07-30", time: "12:00:00", "time-zone-name": "Africa/Niamey" }],
+    "/system/ntp/client/print": [{ enabled: "true", status: "synchronized" }],
+    "/system/ntp/client/servers/print": [{ address: "time.cloudflare.com" }],
+    "/system/resource/print": [{ version: "7.20.1" }],
+    "/system/scheduler/print": [],
+    "/system/script/print": [] as RouterOsApiRow[]
+  });
+
+  it("le script de connexion pose la MAC à la première connexion, sans déplacer un verrou existant", () => {
+    const script = buildVoucherOnLoginScript();
+    const lockIndex = script.indexOf('mac-address=$"mac-address"');
+    expect(lockIndex).toBeGreaterThan(0);
+    // The lock runs before the lifecycle checks that may return early.
+    expect(lockIndex).toBeLessThan(script.indexOf(':if ([:typeof [:find $tpComment $tpMarker]] = "nil") do={ :return };'));
+    expect(script).toContain('($tpLockedMac = "00:00:00:00:00:00")');
+  });
+
+  it("active puis désactive le verrou et le confirme par relecture", async () => {
+    const transport = new ScriptTransport(routerState());
+    const adapter = createAdapter(transport);
+
+    await expect(adapter.configureVoucherFirstMacLock(true, ["forfait-1h"])).resolves.toEqual({
+      enabled: true, managedProfiles: 1, profilesWithHandler: 1
+    });
+    await expect(adapter.configureVoucherFirstMacLock(false, ["forfait-1h"])).resolves.toMatchObject({ enabled: false });
   });
 });
 
