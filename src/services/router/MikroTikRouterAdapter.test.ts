@@ -1893,3 +1893,31 @@ describe("MikroTikRouterAdapter", () => {
     })).rejects.toThrow("RouterOS kept a TicketPro anti-tethering rule after removal");
   });
 });
+
+describe("MikroTikRouterAdapter.updateHotspotPlan — confirmation RouterOS", () => {
+  const draft = { dataLimitMb: null, downloadLimit: null, uploadLimit: null, durationMinutes: 240, validityMinutes: 240, name: "6H", profileName: "6H", sharedUsers: 1, priceHint: null };
+
+  it("confirme un renommage de profil relu sur RouterOS", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/user/profile/print": [{ ".id": "*P1", name: "4H", "session-timeout": "4h" }]
+    });
+    await expect(createAdapter(transport).updateHotspotPlan("4H", draft)).resolves.toMatchObject({ id: "*P1", profileName: "6H" });
+  });
+
+  it("refuse de confirmer une modification que RouterOS n'a pas conservée", async () => {
+    class IgnoringRenameTransport extends MockRouterOsTransport {
+      async call(request: RouterOsApiRequest): Promise<RouterOsApiRow[]> {
+        if (request.command === "/ip/hotspot/user/profile/set") {
+          const params = { ...request.params };
+          delete params.name;
+          return super.call({ ...request, params });
+        }
+        return super.call(request);
+      }
+    }
+    const transport = new IgnoringRenameTransport({
+      "/ip/hotspot/user/profile/print": [{ ".id": "*P1", name: "4H", "session-timeout": "4h" }]
+    });
+    await expect(createAdapter(transport).updateHotspotPlan("4H", draft)).rejects.toThrow("RouterOS n'a pas confirmé la modification du profil.");
+  });
+});
