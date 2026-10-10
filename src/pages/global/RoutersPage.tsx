@@ -25,7 +25,6 @@ import { RouterConnectionRepository, RouterRepository, useAppDatabase } from "..
 import {
   createPersistedRouterService,
   FakeRouterAdapter,
-  remoteSecurityWarnings,
   RouterService,
   RouterServiceError,
   type RouterActionLog
@@ -1133,7 +1132,7 @@ function formatRouterLastSeen(value: string): string {
   }).format(date);
 }
 
-function ConnectionChoiceDialog({
+export function ConnectionChoiceDialog({
   onCancel,
   onLocal,
   onRemote,
@@ -1175,7 +1174,6 @@ function ConnectionChoiceDialog({
             </span>
           </button>
         </div>
-        <div className="form-error"><AlertTriangle aria-hidden="true" /><span>{remoteSecurityWarnings.join(" ")}</span></div>
         <div className="confirm-dialog__actions"><Button icon={WifiOff} onClick={onCancel} variant="ghost">Fermer</Button></div>
       </section>
     </div>
@@ -1267,7 +1265,6 @@ function RouterFormDialog({
           ) : null}
           <label className="form-field router-form-notes">Notes internes<textarea value={values.notes} onChange={(event) => update({ notes: event.target.value })} /></label>
         </fieldset>
-        {remoteMode ? <div className="form-error"><AlertTriangle aria-hidden="true" /><span>{remoteSecurityWarnings.join(" ")}</span></div> : null}
         {formState.detectedInfo ? (
           <div className="router-form-result"><Badge status="success">Infos récupérées</Badge><span>{formState.detectedInfo.model} · {formState.detectedInfo.boardName} · RouterOS {formState.detectedInfo.routerOsVersion}</span></div>
         ) : null}
