@@ -24,6 +24,8 @@ export type RouterOsNativePerformance = {
   connectionCount: number;
   fatalCount: number;
   retryCount: number;
+  /** Commands served by an already authenticated pooled connection. */
+  reusedConnectionCount?: number;
   trapCount: number;
 };
 

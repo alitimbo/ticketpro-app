@@ -3,10 +3,15 @@ import type { ActiveHotspotUser, HotspotPlan, HotspotUser } from "../../domain/r
 import {
   buildCachedConnectedClientViewModels,
   buildConnectedClientViewModels,
+  describeClientDataQuota,
+  deviceLockLabel,
   emptyConnectedClientFilters,
   filterConnectedClients,
   formatClientBytes,
-  getConnectedClientPlanOptions
+  findVouchersMissingQuota,
+  formatDeviceLockSummary,
+  getConnectedClientPlanOptions,
+  summarizeDeviceLocks
 } from "./connectedClientsPageModel";
 
 const activeUsers: ActiveHotspotUser[] = [
@@ -281,6 +286,167 @@ describe("connectedClientsPageModel", () => {
       totalBytes: 75 * 1024 * 1024,
       uptime: "45 min"
     });
+  });
+});
+
+describe("verrouillage MAC des clients connectés", () => {
+  const router = { id: "routeur-demo", name: "Routeur démo" };
+  const session = (username: string, mac: string, id = `a-${username}-${mac}`): ActiveHotspotUser => ({
+    ...activeUsers[0], id, macAddress: mac, username
+  });
+  const user = (username: string, macAddress: string | null, comment: string | null = "TicketPro:v1;validity=60;expires=0;state=new;"): HotspotUser => ({
+    ...hotspotUsers[0], comment, id: `u-${username}`, macAddress, username
+  });
+
+  it("compte des vouchers uniques lus sur RouterOS et isole les sessions hors vouchers", () => {
+    const clients = buildConnectedClientViewModels(
+      [
+        session("V1", "AA:00:00:00:00:01"),
+        session("V2", "aa-00-00-00-00-02"),
+        session("V3", "AA:00:00:00:00:03"),
+        session("V3", "AA:00:00:00:00:33"),
+        session("V4", "AA:00:00:00:00:04"),
+        session("admin", "AA:00:00:00:00:05"),
+        session("trial", "AA:00:00:00:00:06")
+      ],
+      [
+        user("V1", "AA:00:00:00:00:01"),
+        user("V2", "AA:00:00:00:00:02"),
+        user("V3", "AA:00:00:00:00:03"),
+        user("V4", null, null),
+        user("admin", null, null)
+      ],
+      plans,
+      router,
+      undefined,
+      new Set(["V1", "V2", "V3", "V4"])
+    );
+
+    expect(clients.map((client) => client.deviceLock.state)).toEqual([
+      "locked", "locked", "locked", "mismatch", "unlocked", "not_voucher", "not_voucher"
+    ]);
+    const summary = summarizeDeviceLocks(clients);
+    expect(summary).toEqual({
+      concernedVouchers: 4,
+      lockedVouchers: 2,
+      mismatchVouchers: 1,
+      outsideSessions: 2,
+      sessions: 7,
+      unlockedVouchers: 1,
+      unverifiedVouchers: 0
+    });
+    expect(formatDeviceLockSummary(summary)).toBe(
+      "2 ticket(s) verrouillé(s) sur 4 ticket(s) TicketPro concerné(s) · 1 non verrouillé(s) · 1 appareil(s) différent(s) du verrou · 2 session(s) hors vouchers TicketPro — 7 session(s) affichée(s)."
+    );
+  });
+
+  it("ne déclare jamais un verrou vérifié depuis le cache", () => {
+    const [client] = buildCachedConnectedClientViewModels(
+      [{ cached_at: "2026-07-29T09:00:00.000Z", created_at: "2026-07-29T09:00:00.000Z", deleted_at: null,
+        downloaded_bytes: 0, id: "c1", ip_address: null, mac_address: "AA:00:00:00:00:01", router_id: "router-1",
+        session_time_left: null, sync_status: "synced", updated_at: "2026-07-29T09:00:00.000Z",
+        uploaded_bytes: 0, uptime: "1m", username: "inconnu" }],
+      [],
+      [],
+      router
+    );
+    expect(client.deviceLock.state).toBe("not_voucher");
+    expect(deviceLockLabel({ lockedMacAddress: "AA:00:00:00:00:01", state: "unverified" })).toBe("Non vérifié (cache : AA:00:00:00:00:01)");
+  });
+});
+
+describe("quota data des clients connectés", () => {
+  const router = { id: "routeur-demo", name: "Routeur démo" };
+  const quotaPlan: HotspotPlan = { ...plans[0], dataLimitMb: 2048, id: "plan-6h-2g", name: "6H-2G", profileName: "6H-2G" };
+  const unlimitedPlan: HotspotPlan = { ...plans[0], dataLimitMb: null, id: "plan-6h", name: "6H", profileName: "6H" };
+  const voucher = (overrides: Partial<HotspotUser>): HotspotUser => ({
+    ...hotspotUsers[0],
+    downloadedBytes: 300 * 1024 * 1024,
+    uploadedBytes: 100 * 1024 * 1024,
+    ...overrides
+  });
+
+  it("affiche quota total et volume restant lus sur RouterOS (2G = 2 × 1024³ octets, montant + descendant)", () => {
+    const [client] = buildConnectedClientViewModels(
+      [{ ...activeUsers[0], downloadedBytes: 0, uploadedBytes: 0 }],
+      [voucher({ limitBytesTotal: 2 * 1024 ** 3, planId: "6H-2G", profileName: "6H-2G" })],
+      [quotaPlan],
+      router
+    );
+
+    expect(client).toMatchObject({ dataLimitBytes: 2 * 1024 ** 3, dataQuotaState: "limited", dataRemainingBytes: 2 * 1024 ** 3 - 400 * 1024 ** 2 });
+    expect(describeClientDataQuota(client)).toEqual({ remaining: "1.6 Go", total: "2.0 Go" });
+  });
+
+  it("ne présente jamais un voucher non lu comme illimité", () => {
+    const [client] = buildConnectedClientViewModels([activeUsers[0]], [], [quotaPlan], router);
+
+    expect(client.dataQuotaState).toBe("unavailable");
+    expect(describeClientDataQuota(client)).toEqual({ remaining: "Non disponible", total: "Non disponible" });
+  });
+
+  it("signale un plan avec quota dont le voucher RouterOS n'a pas de limit-bytes-total", () => {
+    const [client] = buildConnectedClientViewModels(
+      [activeUsers[0]],
+      [voucher({ limitBytesTotal: null, planId: "6H-2G", profileName: "6H-2G" })],
+      [quotaPlan],
+      router
+    );
+
+    expect(client).toMatchObject({ dataLimitBytes: null, dataQuotaState: "missing_on_router", planDataLimitBytes: 2 * 1024 ** 3 });
+    expect(describeClientDataQuota(client).total).toBe("Aucun quota sur le routeur (plan : 2.0 Go)");
+    expect(describeClientDataQuota(client).remaining).not.toBe("Illimité");
+  });
+
+  it("réserve « Illimité » à un voucher lu sans limite dont le plan n'a pas de quota", () => {
+    const [client] = buildConnectedClientViewModels(
+      [activeUsers[0]],
+      [voucher({ limitBytesTotal: null, planId: "6H", profileName: "6H" })],
+      [unlimitedPlan],
+      router
+    );
+
+    expect(client.dataQuotaState).toBe("unlimited");
+    expect(describeClientDataQuota(client)).toEqual({ remaining: "Illimité", total: "Illimité" });
+  });
+
+  it("en cache, n'affiche pas « Illimité » faute de confirmation RouterOS", () => {
+    const [client] = buildCachedConnectedClientViewModels(
+      [{ cached_at: "2026-07-29T09:00:00.000Z", created_at: "2026-07-29T09:00:00.000Z", deleted_at: null,
+        downloaded_bytes: 0, id: "c1", ip_address: null, mac_address: null, router_id: "router-1",
+        session_time_left: null, sync_status: "synced", updated_at: "2026-07-29T09:00:00.000Z",
+        uploaded_bytes: 0, uptime: "1m", username: "inconnu" }],
+      [],
+      [],
+      router
+    );
+
+    expect(client.dataQuotaState).toBe("unavailable");
+    expect(describeClientDataQuota(client).total).toBe("Non disponible");
+  });
+});
+
+describe("findVouchersMissingQuota", () => {
+  const plan = { data_limit_mb: 2048, deleted_at: null, mikrotik_profile_name: "6H-2G", name: "6H-2G" };
+  const user = (username: string, overrides: Partial<HotspotUser> = {}): HotspotUser => ({
+    ...hotspotUsers[0], planId: "6H-2G", profileName: "6H-2G", username, ...overrides
+  });
+
+  it("liste les vouchers d'un plan à quota sans limit-bytes-total, connectés ou non", () => {
+    const candidates = findVouchersMissingQuota(
+      [
+        user("A", { limitBytesTotal: null, downloadedBytes: 100, uploadedBytes: 50 }),
+        user("B", { limitBytesTotal: 2 * 1024 ** 3 }),
+        user("C", { limitBytesTotal: null, downloadedBytes: 3 * 1024 ** 3 }),
+        user("D", { limitBytesTotal: null, profileName: "autre", planId: "autre" })
+      ],
+      [plan, { data_limit_mb: null, deleted_at: null, mikrotik_profile_name: "autre", name: "Autre" }],
+      new Set(["A"])
+    );
+    expect(candidates).toEqual([
+      { exceedsQuota: false, isConnected: true, limitBytesTotal: 2 * 1024 ** 3, planName: "6H-2G", usedBytes: 150, username: "A" },
+      { exceedsQuota: true, isConnected: false, limitBytesTotal: 2 * 1024 ** 3, planName: "6H-2G", usedBytes: 3 * 1024 ** 3, username: "C" }
+    ]);
   });
 });
 

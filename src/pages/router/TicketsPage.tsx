@@ -79,6 +79,7 @@ import {
   filterTickets,
   formatBytes,
   formatDataLimit,
+  formatRemainingData,
   formatDateTime,
   formatDuration,
   formatSeconds,
@@ -1435,7 +1436,7 @@ function TicketDetailDialog({
               <DetailLine icon={Upload} label="Upload" value={formatBytes(ticket.uploadedBytes)} />
               <DetailLine icon={Download} label="Download" value={formatBytes(ticket.downloadedBytes)} />
               <DetailLine icon={Database} label="Volume consommé" value={formatBytes(ticket.downloadedBytes + ticket.uploadedBytes)} />
-              <DetailLine icon={Database} label="Volume restant" value={ticket.dataRemainingBytes === null ? "Illimité" : formatBytes(ticket.dataRemainingBytes)} />
+              <DetailLine icon={Database} label="Volume restant" value={formatRemainingData(ticket)} />
               <DetailLine icon={RefreshCw} label="Dernière lecture RouterOS" value={formatDateTime(ticket.lastRouterSyncAt)} />
               <DetailLine icon={Printer} label="Impressions" value={`${ticket.printedCount}`} />
               <DetailLine icon={FileText} label="Fichier PDF" value={ticket.generatedFileName ?? "Non disponible"} />
