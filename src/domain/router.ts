@@ -330,6 +330,19 @@ export type HotspotAntiTetheringState = {
   blockIpv4Ttl: boolean;
   blockIpv6: boolean;
   managedRuleCount: number;
+  /** Per-interface coverage, read from RouterOS. Absent on simulated routers. */
+  coverage?: HotspotAntiTetheringCoverage;
+};
+
+export type HotspotAntiTetheringCoverage = {
+  /** Interfaces of the enabled Hotspot servers. */
+  hotspotInterfaces: string[];
+  /** Interfaces with an enabled TicketPro IPv4 TTL rule. */
+  ipv4ProtectedInterfaces: string[];
+  /** Interfaces with an enabled TicketPro IPv6 rule. */
+  ipv6ProtectedInterfaces: string[];
+  /** IPv4 TTL rules still created with passthrough=no by an older version. */
+  legacyPassthroughRules: number;
 };
 
 export type RouterHealth = {

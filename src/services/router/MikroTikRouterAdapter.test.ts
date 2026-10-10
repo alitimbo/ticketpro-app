@@ -1691,7 +1691,7 @@ describe("MikroTikRouterAdapter", () => {
       hotspot: "to-client",
       "new-ttl": "set:1",
       "out-interface": "ether1",
-      passthrough: "no"
+      passthrough: "yes"
     });
     expect(
       transport.calls.find((call) =>
@@ -1743,7 +1743,8 @@ describe("MikroTikRouterAdapter", () => {
     await expect(adapter.getHotspotAntiTetheringState()).resolves.toEqual({
       blockIpv4Ttl: true,
       blockIpv6: true,
-      managedRuleCount: 2
+      managedRuleCount: 2,
+      coverage: { hotspotInterfaces: [], ipv4ProtectedInterfaces: ["ether1"], ipv6ProtectedInterfaces: ["ether1"], legacyPassthroughRules: 0 }
     });
     await expect(adapter.listManagedHotspotBypasses()).resolves.toEqual([{
       address: "192.168.88.10",
@@ -1892,6 +1893,124 @@ describe("MikroTikRouterAdapter", () => {
       blockIpv6: false,
       enabled: false
     })).rejects.toThrow("RouterOS kept a TicketPro anti-tethering rule after removal");
+  });
+});
+
+describe("anti-partage : couverture réelle par réseau hotspot", () => {
+  const hotspots = [
+    { ".id": "*H1", disabled: "false", interface: "bridge-wifi", name: "hs-wifi" },
+    { ".id": "*H2", disabled: "false", interface: "vlan20", name: "hs-ext" }
+  ];
+  it("signale un réseau hotspot sans règle TTL active et une règle d'ancienne version", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/firewall/filter/print": [],
+      "/ip/firewall/mangle/print": [
+        { ".id": "*M1", comment: "TicketPro anti-tethering:IPv4 client TTL bridge-wifi", passthrough: "no" },
+        { ".id": "*M2", comment: "TicketPro anti-tethering:IPv4 client TTL vlan20", disabled: "true", passthrough: "yes" }
+      ],
+      "/ipv6/firewall/filter/print": [{ ".id": "*V1", comment: "TicketPro anti-tethering:IPv6 bridge-wifi" }],
+      "/ip/hotspot/print": hotspots
+    });
+    const state = await createAdapter(transport).getHotspotAntiTetheringState();
+    expect(state.coverage).toEqual({
+      hotspotInterfaces: ["bridge-wifi", "vlan20"],
+      ipv4ProtectedInterfaces: ["bridge-wifi"],
+      ipv6ProtectedInterfaces: ["bridge-wifi"],
+      legacyPassthroughRules: 1
+    });
+  });
+
+  it("protège chaque réseau hotspot actif sans court-circuiter les autres règles mangle", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/firewall/filter/print": [],
+      "/ip/firewall/mangle/print": [],
+      "/ipv6/firewall/filter/print": [],
+      "/ip/hotspot/print": hotspots
+    });
+    await createAdapter(transport).configureHotspotAntiTethering({ blockIpv4Ttl: true, blockIpv6: false, enabled: true });
+    const added = transport.calls.filter((call) => call.command === "/ip/firewall/mangle/add").map((call) => call.params);
+    expect(added).toEqual([
+      expect.objectContaining({ "out-interface": "bridge-wifi", passthrough: "yes" }),
+      expect.objectContaining({ "out-interface": "vlan20", passthrough: "yes" })
+    ]);
+  });
+});
+
+describe("verrouillage MAC appliqué par RouterOS", () => {
+  class ScriptTransport extends MockRouterOsTransport {
+    async call(request: RouterOsApiRequest): Promise<RouterOsApiRow[]> {
+      const scripts = (this as unknown as { responses: Record<string, RouterOsApiRow[]> }).responses["/system/script/print"];
+      if (request.command === "/system/script/add") {
+        this.calls.push(request);
+        scripts.push({ ".id": `*S${scripts.length + 1}`, ...Object.fromEntries(Object.entries(request.params ?? {}).map(([k, v]) => [k, String(v)])) });
+        return [];
+      }
+      if (request.command === "/system/script/remove") {
+        this.calls.push(request);
+        const index = scripts.findIndex((row) => row[".id"] === request.params?.numbers);
+        if (index >= 0) scripts.splice(index, 1);
+        return [];
+      }
+      return super.call(request);
+    }
+  }
+  const routerState = () => ({
+    "/ip/hotspot/user/profile/print": [{ ".id": "*P1", name: "forfait-1h", "on-login": "", "session-timeout": "1h" }],
+    "/ip/hotspot/print": [],
+    "/ip/hotspot/profile/print": [],
+    "/system/clock/print": [{ date: "2026-07-30", time: "12:00:00", "time-zone-name": "Africa/Niamey" }],
+    "/system/ntp/client/print": [{ enabled: "true", status: "synchronized" }],
+    "/system/ntp/client/servers/print": [{ address: "time.cloudflare.com" }],
+    "/system/resource/print": [{ version: "7.20.1" }],
+    "/system/scheduler/print": [],
+    "/system/script/print": [] as RouterOsApiRow[]
+  });
+
+  it("le script de connexion pose la MAC à la première connexion, sans déplacer un verrou existant", () => {
+    const script = buildVoucherOnLoginScript();
+    const lockIndex = script.indexOf('mac-address=$"mac-address"');
+    expect(lockIndex).toBeGreaterThan(0);
+    // The lock runs before the lifecycle checks that may return early.
+    expect(lockIndex).toBeLessThan(script.indexOf(':if ([:typeof [:find $tpComment $tpMarker]] = "nil") do={ :return };'));
+    expect(script).toContain('($tpLockedMac = "00:00:00:00:00:00")');
+  });
+
+  it("active puis désactive le verrou et le confirme par relecture", async () => {
+    const transport = new ScriptTransport(routerState());
+    const adapter = createAdapter(transport);
+
+    await expect(adapter.configureVoucherFirstMacLock(true, ["forfait-1h"])).resolves.toEqual({
+      enabled: true, managedProfiles: 1, profilesWithHandler: 1
+    });
+    await expect(adapter.configureVoucherFirstMacLock(false, ["forfait-1h"])).resolves.toMatchObject({ enabled: false });
+  });
+});
+
+describe("MikroTikRouterAdapter.updateHotspotPlan — confirmation RouterOS", () => {
+  const draft = { dataLimitMb: null, downloadLimit: null, uploadLimit: null, durationMinutes: 240, validityMinutes: 240, name: "6H", profileName: "6H", sharedUsers: 1, priceHint: null };
+
+  it("confirme un renommage de profil relu sur RouterOS", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/user/profile/print": [{ ".id": "*P1", name: "4H", "session-timeout": "4h" }]
+    });
+    await expect(createAdapter(transport).updateHotspotPlan("4H", draft)).resolves.toMatchObject({ id: "*P1", profileName: "6H" });
+  });
+
+  it("refuse de confirmer une modification que RouterOS n'a pas conservée", async () => {
+    class IgnoringRenameTransport extends MockRouterOsTransport {
+      async call(request: RouterOsApiRequest): Promise<RouterOsApiRow[]> {
+        if (request.command === "/ip/hotspot/user/profile/set") {
+          const params = { ...request.params };
+          delete params.name;
+          return super.call({ ...request, params });
+        }
+        return super.call(request);
+      }
+    }
+    const transport = new IgnoringRenameTransport({
+      "/ip/hotspot/user/profile/print": [{ ".id": "*P1", name: "4H", "session-timeout": "4h" }]
+    });
+    await expect(createAdapter(transport).updateHotspotPlan("4H", draft)).rejects.toThrow("RouterOS n'a pas confirmé la modification du profil.");
   });
 });
 

@@ -1,4 +1,4 @@
-import type { RouterConnectionMode, RouterManagedResourceManifest } from "../../domain/router";
+import type { HotspotAntiTetheringState, RouterConnectionMode, RouterManagedResourceManifest } from "../../domain/router";
 import type { RouterRecord } from "../../domain/database";
 
 export type RouterSettings = {
@@ -111,4 +111,43 @@ export function mergeRouterManagementSecurityManifest(
 function isValidPort(value: string): boolean {
   const port = Number(value);
   return Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
+/**
+ * Differences between the anti-sharing policy and what RouterOS really
+ * applies, interface by interface. An empty list means the router enforces the
+ * policy on every enabled Hotspot interface.
+ */
+export function antiTetheringCoverageIssues(
+  policy: { antiSharingMode: string; monitorIpv4Ttl: boolean; monitorIpv6HopLimit: boolean },
+  state: HotspotAntiTetheringState
+): string[] {
+  const coverage = state.coverage;
+  if (!coverage || policy.antiSharingMode !== "strict") return [];
+  const issues: string[] = [];
+  const missing = (protectedInterfaces: string[]) =>
+    coverage.hotspotInterfaces.filter((name) => !protectedInterfaces.includes(name));
+  if (policy.monitorIpv4Ttl) {
+    const unprotected = missing(coverage.ipv4ProtectedInterfaces);
+    if (unprotected.length > 0) {
+      issues.push(`Blocage TTL absent ou désactivé sur ${unprotected.join(", ")} (${coverage.hotspotInterfaces.length - unprotected.length}/${coverage.hotspotInterfaces.length} réseaux hotspot protégés).`);
+    }
+    if (coverage.legacyPassthroughRules > 0) {
+      issues.push("Règle TTL d'une ancienne version (passthrough=no) : elle court-circuite vos autres règles mangle postrouting.");
+    }
+  }
+  if (policy.monitorIpv6HopLimit) {
+    const unprotected = missing(coverage.ipv6ProtectedInterfaces);
+    if (unprotected.length > 0) {
+      issues.push(`Blocage IPv6 absent ou désactivé sur ${unprotected.join(", ")}.`);
+    }
+  }
+  return issues;
+}
+
+export function antiTetheringCoverageSummary(state: HotspotAntiTetheringState): string | null {
+  const coverage = state.coverage;
+  if (!coverage || coverage.hotspotInterfaces.length === 0) return null;
+  const covered = coverage.hotspotInterfaces.filter((name) => coverage.ipv4ProtectedInterfaces.includes(name)).length;
+  return `${covered}/${coverage.hotspotInterfaces.length} réseau(x) hotspot protégé(s) par le routeur`;
 }
