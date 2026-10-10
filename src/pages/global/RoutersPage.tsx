@@ -1051,7 +1051,7 @@ type RouterCardProps = {
   router: RouterCardData;
 };
 
-function RouterCard({ availability, canDelete, canEdit, isConnecting, onConfigureRemote, onDelete, onEdit, onLocal, onOpen, onRemote, onTest, router }: RouterCardProps) {
+export function RouterCard({ availability, canDelete, canEdit, isConnecting, onConfigureRemote, onDelete, onEdit, onLocal, onOpen, onRemote, onTest, router }: RouterCardProps) {
   const routerName = router.routerName?.trim() || router.zoneName;
   const zoneName = router.zoneName.trim() || "Site non renseigné";
   const lastSeenLabel = formatRouterLastSeen(router.lastSeenAt);
@@ -1108,6 +1108,15 @@ function RouterCard({ availability, canDelete, canEdit, isConnecting, onConfigur
         <div><dt>Adresse</dt><dd title={router.ipAddress}><MapPin aria-hidden="true" />{router.ipAddress}</dd></div>
         <div><dt>RouterOS</dt><dd>{router.routerOsVersion || "Non relevé"}</dd></div>
         <div><dt>Dernière activité</dt><dd title={router.lastSeenAt}>{lastSeenLabel}</dd></div>
+        {availability ? (
+          // Full-width line: the header only has room for the dot itself.
+          <div className="router-card__availability" title={availability.title}>
+            <dt>Connexion</dt>
+            <dd className={`router-card__availability-value router-card__availability-value--${isConnecting ? "checking" : availability.dot}`}>
+              {isConnecting ? "Connexion en cours" : availability.label}
+            </dd>
+          </div>
+        ) : null}
       </dl>
     </article>
   );

@@ -7320,16 +7320,53 @@ a {
   place-items: center;
 }
 
-/* La couleur est toujours accompagnée de son libellé (En ligne, Hors ligne…). */
+/* L'en-tête n'a de place que pour le point ; le libellé (En ligne, Hors
+   ligne…) est affiché en toutes lettres sur la ligne « Connexion ». */
 .router-grid .router-card__status .status-dot,
 .router-grid .router-card__status .router-connection-indicator {
-  gap: 6px;
-  font-size: 0.7rem;
-  white-space: nowrap;
+  gap: 0;
+  font-size: 0;
 }
 
-.router-grid .router-card .status-dot--active {
+.router-grid .router-card__availability {
+  grid-column: 1 / -1;
+}
+
+.router-grid .router-card__availability-value::before {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--color-offline);
+  content: "";
+}
+
+.router-grid .router-card__availability-value--active {
   color: var(--color-success);
+}
+
+.router-grid .router-card__availability-value--active::before {
+  background: var(--color-success);
+}
+
+.router-grid .router-card__availability-value--warning {
+  color: var(--color-warning);
+}
+
+.router-grid .router-card__availability-value--warning::before {
+  background: var(--color-warning);
+}
+
+.router-grid .router-card__availability-value--offline {
+  color: var(--color-offline);
+}
+
+.router-grid .router-card__availability-value--checking {
+  color: var(--color-primary-strong);
+}
+
+.router-grid .router-card__availability-value--checking::before {
+  background: var(--color-primary);
 }
 
 .router-grid .router-card__status .status-dot::before {
