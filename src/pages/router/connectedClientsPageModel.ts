@@ -92,7 +92,16 @@ export function buildConnectedClientViewModels(
   activeUsers: ActiveHotspotUser[],
   hotspotUsers: HotspotUser[],
   plans: HotspotPlan[],
-  router: { id: string; name: string }
+  router: { id: string; name: string },
+  /**
+   * TicketPro plan names keyed by their current RouterOS profile name. The
+   * RouterOS profile name is a technical reference: renaming a plan in
+   * TicketPro does not rename its profile, so the display name comes from
+   * the local plan whenever one points at the voucher's current profile.
+   */
+  localPlanNamesByProfile?: ReadonlyMap<string, string>,
+  /** Usernames of the TicketPro vouchers stored locally for this router. */
+  managedVoucherUsernames?: ReadonlySet<string>
 ): ConnectedClientViewModel[] {
   const ticketsByUsername = new Map(hotspotUsers.map((user) => [user.username, user]));
 

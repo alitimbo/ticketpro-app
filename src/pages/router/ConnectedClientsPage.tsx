@@ -175,7 +175,7 @@ export function ConnectedClientsPage() {
 
     try {
       const service = await createService(!options.silent);
-      const [activeUsers, hotspotUsers, plans, routers] = await Promise.all([
+      const [activeUsers, routerHotspotUsers, plans, routers, localPlans] = await Promise.all([
         service.listActiveUsers(),
         service.listHotspotUsers(),
         service.getHotspotPlans(),
@@ -244,7 +244,22 @@ export function ConnectedClientsPage() {
           }
         }
       }
-      const liveClients = buildConnectedClientViewModels(activeUsers, hotspotUsers, plans, router);
+      const managedVoucherUsernames = managedVoucherUsernamesRef.current?.routerId === routerId
+        ? managedVoucherUsernamesRef.current.usernames
+        : undefined;
+      const localPlanNamesByProfile = new Map(
+        localPlans
+          .filter((plan) => plan.mikrotik_profile_name)
+          .map((plan) => [plan.mikrotik_profile_name as string, plan.name])
+      );
+      const liveClients = buildConnectedClientViewModels(
+        activeUsers,
+        hotspotUsers,
+        plans,
+        router,
+        localPlanNamesByProfile,
+        managedVoucherUsernames
+      );
       setAvailablePlans(plans.map((plan) => ({ id: plan.id, name: plan.name })));
       applyClients(liveClients);
       setDataSource("live");
