@@ -15,11 +15,26 @@ export type ConnectedClientFilters = {
   planId: string;
 };
 
+/**
+ * Origin of the data quota shown for a client.
+ * - limited: a positive limit-bytes-total was read (RouterOS live, or the
+ *   TicketPro voucher snapshot when only the local cache is available).
+ * - unlimited: the RouterOS user was read, has no limit-bytes-total and its
+ *   plan does not declare a quota either.
+ * - missing_on_router: the RouterOS user was read without limit-bytes-total
+ *   while its plan declares a quota. RouterOS does not limit this voucher.
+ * - unavailable: the voucher could not be read (unknown user, cache without
+ *   snapshot). Never presented as unlimited.
+ */
+export type ClientDataQuotaState = "limited" | "unlimited" | "missing_on_router" | "unavailable";
+
 export type ConnectedClientViewModel = {
   consumptionPercent: number | null;
   currentSessionUptime: string;
   dataLimitBytes: number | null;
+  dataQuotaState: ClientDataQuotaState;
   dataRemainingBytes: number | null;
+  planDataLimitBytes: number | null;
   downloadLimit: string | null;
   downloadedBytes: number;
   expiresAt: string | null;
@@ -125,7 +140,19 @@ export function buildConnectedClientViewModels(
     const downloadedBytes = Math.max(activeUser.downloadedBytes, ticket?.downloadedBytes ?? 0);
     const uploadedBytes = Math.max(activeUser.uploadedBytes, ticket?.uploadedBytes ?? 0);
     const totalBytes = downloadedBytes + uploadedBytes;
-    const dataLimitBytes = resolveDataLimitBytes(ticket?.limitBytesTotal, plan?.dataLimitMb);
+    // RouterOS enforces limit-bytes-total on the hotspot user itself; the plan
+    // only tells what TicketPro intended. Never fall back to "unlimited" when
+    // the voucher was not read.
+    const routerLimitBytes = ticket?.limitBytesTotal && ticket.limitBytesTotal > 0 ? ticket.limitBytesTotal : null;
+    const planDataLimitBytes = resolveDataLimitBytes(undefined, plan?.dataLimitMb);
+    const dataQuotaState: ClientDataQuotaState = !ticket
+      ? "unavailable"
+      : routerLimitBytes !== null
+        ? "limited"
+        : planDataLimitBytes !== null
+          ? "missing_on_router"
+          : "unlimited";
+    const dataLimitBytes = routerLimitBytes;
     const expiresAt = lifecycleExpirationIso(ticket?.comment);
     const timeConsumed = durationLimitSeconds > 0 && uptimeSeconds >= durationLimitSeconds;
     const quotaConsumed = dataLimitBytes !== null && totalBytes >= dataLimitBytes;
@@ -141,7 +168,9 @@ export function buildConnectedClientViewModels(
       ),
       currentSessionUptime: activeUser.uptime,
       dataLimitBytes,
+      dataQuotaState,
       dataRemainingBytes: dataLimitBytes === null ? null : Math.max(0, dataLimitBytes - totalBytes),
+      planDataLimitBytes,
       downloadLimit: plan?.downloadLimit ?? null,
       downloadedBytes,
       expiresAt,
@@ -204,9 +233,10 @@ export function buildCachedConnectedClientViewModels(
     );
     const durationLimitSeconds = Math.max(0, (ticket?.duration_minutes_snapshot ?? plan?.duration_minutes ?? 0) * 60);
     const totalBytes = downloadedBytes + uploadedBytes;
-    const dataLimitBytes = ticket?.data_limit_mb_snapshot !== undefined
-      ? resolveDataLimitBytes(undefined, ticket.data_limit_mb_snapshot)
-      : resolveDataLimitBytes(undefined, plan?.data_limit_mb);
+    // The cache cannot confirm the absence of a quota: only a positive
+    // voucher snapshot is shown, anything else stays "unavailable".
+    const dataLimitBytes = ticket ? resolveDataLimitBytes(undefined, ticket.data_limit_mb_snapshot) : null;
+    const dataQuotaState: ClientDataQuotaState = dataLimitBytes === null ? "unavailable" : "limited";
 
     return {
       consumptionPercent: calculateConsumptionPercent(
@@ -217,8 +247,14 @@ export function buildCachedConnectedClientViewModels(
       ),
       currentSessionUptime: cachedUser.uptime ?? "0s",
       dataLimitBytes,
-      dataRemainingBytes: ticket?.data_remaining_bytes
-        ?? (dataLimitBytes === null ? null : Math.max(0, dataLimitBytes - totalBytes)),
+      dataQuotaState,
+      dataRemainingBytes: dataLimitBytes === null
+        ? null
+        : Math.min(
+            ticket?.data_remaining_bytes ?? Number.POSITIVE_INFINITY,
+            Math.max(0, dataLimitBytes - totalBytes)
+          ),
+      planDataLimitBytes: resolveDataLimitBytes(undefined, ticket?.data_limit_mb_snapshot ?? plan?.data_limit_mb),
       downloadLimit: ticket?.download_limit_snapshot ?? plan?.download_limit ?? null,
       downloadedBytes,
       expiresAt: ticket?.expires_at ?? null,
@@ -417,6 +453,27 @@ export function formatClientBytes(bytes: number): string {
   return `${Math.round(megabytes)} MB`;
 }
 
+export function describeClientDataQuota(
+  client: Pick<ConnectedClientViewModel, "dataLimitBytes" | "dataQuotaState" | "dataRemainingBytes" | "planDataLimitBytes">
+): { remaining: string; total: string } {
+  switch (client.dataQuotaState) {
+    case "limited":
+      return {
+        remaining: formatClientBytes(client.dataRemainingBytes ?? 0),
+        total: formatClientBytes(client.dataLimitBytes ?? 0)
+      };
+    case "unlimited":
+      return { remaining: "Illimité", total: "Illimité" };
+    case "missing_on_router":
+      return {
+        remaining: "Non limité par le routeur",
+        total: `Aucun quota sur le routeur (plan : ${formatClientBytes(client.planDataLimitBytes ?? 0)})`
+      };
+    default:
+      return { remaining: "Non disponible", total: "Non disponible" };
+  }
+}
+
 export function parseClientDurationToSeconds(value: string | null | undefined): number {
   return parseDurationToSeconds(value);
 }
@@ -490,4 +547,48 @@ function ticketStatusFromRecord(
 
 function normalize(value: string): string {
   return value.trim().toUpperCase();
+}
+
+export type VoucherQuotaRepairCandidate = {
+  /** Already consumed at least the quota: RouterOS will cut it at once. */
+  exceedsQuota: boolean;
+  isConnected: boolean;
+  limitBytesTotal: number;
+  planName: string;
+  usedBytes: number;
+  username: string;
+};
+
+/**
+ * RouterOS vouchers whose TicketPro plan declares a quota but which carry no
+ * limit-bytes-total. Matching is done on the voucher's current RouterOS
+ * profile; plans without quota and vouchers outside TicketPro plans are left
+ * untouched.
+ */
+export function findVouchersMissingQuota(
+  routerUsers: HotspotUser[],
+  plans: Array<Pick<HotspotPlanRecord, "data_limit_mb" | "deleted_at" | "mikrotik_profile_name" | "name">>,
+  activeUsernames: ReadonlySet<string>
+): VoucherQuotaRepairCandidate[] {
+  const planByProfile = new Map(
+    plans
+      .filter((plan) => !plan.deleted_at && plan.mikrotik_profile_name && plan.data_limit_mb && plan.data_limit_mb > 0)
+      .map((plan) => [plan.mikrotik_profile_name as string, plan])
+  );
+  return routerUsers.flatMap((user) => {
+    if (user.limitBytesTotal && user.limitBytesTotal > 0) return [];
+    const plan = planByProfile.get(user.profileName);
+    if (!plan) return [];
+    const limitBytesTotal = resolveDataLimitBytes(undefined, plan.data_limit_mb);
+    if (limitBytesTotal === null) return [];
+    const usedBytes = (user.downloadedBytes ?? 0) + (user.uploadedBytes ?? 0);
+    return [{
+      exceedsQuota: usedBytes >= limitBytesTotal,
+      isConnected: activeUsernames.has(user.username),
+      limitBytesTotal,
+      planName: plan.name,
+      usedBytes,
+      username: user.username
+    }];
+  });
 }
