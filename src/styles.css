@@ -7320,9 +7320,53 @@ a {
   place-items: center;
 }
 
-.router-grid .router-card__status .status-dot {
+/* L'en-tête n'a de place que pour le point ; le libellé (En ligne, Hors
+   ligne…) est affiché en toutes lettres sur la ligne « Connexion ». */
+.router-grid .router-card__status .status-dot,
+.router-grid .router-card__status .router-connection-indicator {
   gap: 0;
   font-size: 0;
+}
+
+.router-grid .router-card__availability {
+  grid-column: 1 / -1;
+}
+
+.router-grid .router-card__availability-value::before {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--color-offline);
+  content: "";
+}
+
+.router-grid .router-card__availability-value--active {
+  color: var(--color-success);
+}
+
+.router-grid .router-card__availability-value--active::before {
+  background: var(--color-success);
+}
+
+.router-grid .router-card__availability-value--warning {
+  color: var(--color-warning);
+}
+
+.router-grid .router-card__availability-value--warning::before {
+  background: var(--color-warning);
+}
+
+.router-grid .router-card__availability-value--offline {
+  color: var(--color-offline);
+}
+
+.router-grid .router-card__availability-value--checking {
+  color: var(--color-primary-strong);
+}
+
+.router-grid .router-card__availability-value--checking::before {
+  background: var(--color-primary);
 }
 
 .router-grid .router-card__status .status-dot::before {
@@ -7333,7 +7377,21 @@ a {
 
 /* Le battement confirme un routeur joignable, sans déplacer ni recharger la carte. */
 .router-grid .router-card .status-dot--active::before {
-  animation: router-online-heartbeat 1.8s ease-in-out infinite;
+  animation:
+    router-online-heartbeat 1.8s ease-in-out infinite,
+    router-online-glow 2.4s ease-in-out infinite;
+}
+
+/* Halo léger et scintillement, réservés à une connexion confirmée. */
+@keyframes router-online-glow {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 1px var(--color-success)) brightness(1);
+  }
+
+  50% {
+    filter: drop-shadow(0 0 5px var(--color-success)) brightness(1.25);
+  }
 }
 
 @keyframes router-online-heartbeat {

@@ -2,7 +2,7 @@
   "name": "ticketpro",
   "description": "Gestion locale et distante de hotspots MikroTik",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.6.2",
   "type": "module",
   "scripts": {
     "dev": "vite",

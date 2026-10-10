@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
+import type { HotspotPlan } from "../../domain/router";
 import {
   Ban,
   Clock,
@@ -54,13 +55,19 @@ import {
 import {
   buildConnectedClientViewModels,
   buildCachedConnectedClientViewModels,
+  describeClientDataQuota,
+  deviceLockLabel,
   emptyConnectedClientFilters,
+  findVouchersMissingQuota,
   filterConnectedClients,
   formatClientBytes,
+  formatDeviceLockSummary,
   getConnectedClientPlanOptions,
+  summarizeDeviceLocks,
   type ConnectedClientFilters,
   type ConnectedClientPlanOption,
-  type ConnectedClientViewModel
+  type ConnectedClientViewModel,
+  type VoucherQuotaRepairCandidate
 } from "./connectedClientsPageModel";
 
 type PendingAction = {
@@ -74,6 +81,8 @@ type Notice = {
 } | null;
 
 const connectedClientsLiveIntervalMs = 5_000;
+/** Plans change rarely; re-read them at most this often during live refreshes. */
+const connectedClientsPlanRefreshMs = 30_000;
 
 export function ConnectedClientsPage() {
   const { routerId = "routeur-demo" } = useParams();
@@ -90,14 +99,26 @@ export function ConnectedClientsPage() {
   const [notice, setNotice] = useState<Notice>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [busyUsername, setBusyUsername] = useState<string | null>(null);
-  const [dataSource, setDataSource] = useState<"cache" | "live" | "none">("none");
+  const [dataSource, setDataSourceState] = useState<"cache" | "live" | "none">("none");
+  const dataSourceRef = useRef<"cache" | "live" | "none">("none");
+  const setDataSource = (next: "cache" | "live" | "none") => {
+    dataSourceRef.current = next;
+    setDataSourceState(next);
+  };
   const [lastRefreshAt, setLastRefreshAt] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [selectedClient, setSelectedClient] = useState<ConnectedClientViewModel | null>(null);
   const [availablePlans, setAvailablePlans] = useState<ConnectedClientPlanOption[]>([]);
   const [isLiveRefreshing, setIsLiveRefreshing] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
-  const refreshRunningRef = useRef(false);
+  const [quotaRepair, setQuotaRepair] = useState<VoucherQuotaRepairCandidate[] | null>(null);
+  const [isRepairingQuota, setIsRepairingQuota] = useState(false);
+  const [lockPolicyEnabled, setLockPolicyEnabled] = useState(false);
+  const managedVoucherUsernamesRef = useRef<{ routerId: string; usernames: Set<string> } | null>(null);
+  const refreshRunningRef = useRef<string | null>(null);
+  const viewGenerationRef = useRef(0);
+  const displayedRouterIdRef = useRef<string | null>(null);
+  const plansCacheRef = useRef<{ key: string; plans: HotspotPlan[]; readAt: number } | null>(null);
   const clientsRef = useRef<ConnectedClientViewModel[]>([]);
   const liveRouterServiceRef = useRef<{ key: string; service: RouterService } | null>(null);
 
@@ -157,26 +178,64 @@ export function ConnectedClientsPage() {
     return service;
   };
 
+  const loadCachedClients = async (generation: number) => {
+    if (!isPersistent || !session) return false;
+    const [router, cachedUsers, ticketRecords, planRecords] = await Promise.all([
+      routerRepository.findById(routerId),
+      activeSessionCacheRepository.listByRouter(routerId),
+      ticketRepository.listByRouter(routerId),
+      planRepository.listByRouter(routerId)
+    ]);
+    // Never replace a RouterOS read that arrived first.
+    if (generation !== viewGenerationRef.current || dataSourceRef.current === "live") return false;
+    if (!router || router.account_id !== session.account_id || cachedUsers.length === 0) return false;
+    setAvailablePlans(planRecords.map((plan) => ({ id: plan.id, name: plan.name })));
+    applyClients(buildCachedConnectedClientViewModels(cachedUsers, ticketRecords, planRecords, router));
+    setDataSource("cache");
+    setLastRefreshAt(formatRefreshDate(new Date(cachedUsers[0].cached_at)));
+    return true;
+  };
+
+  const readPlans = async (service: RouterService, force: boolean) => {
+    const key = `${session?.account_id ?? "demo"}:${routerId}`;
+    const cached = plansCacheRef.current;
+    if (!force && cached?.key === key && Date.now() - cached.readAt < connectedClientsPlanRefreshMs) {
+      return cached.plans;
+    }
+    const plans = await service.getHotspotPlans();
+    plansCacheRef.current = { key, plans, readAt: Date.now() };
+    return plans;
+  };
+
   const loadClients = async (options: { silent?: boolean; synchronizePolicy?: boolean } = {}) => {
     if (isPersistent && (!isInitialized || !session)) {
       return;
     }
-    if (refreshRunningRef.current) return;
+    // One refresh at a time per router; a refresh for a previous router never
+    // blocks nor overwrites the router now displayed.
+    if (refreshRunningRef.current === routerId) return;
+    const generation = viewGenerationRef.current;
+    const isCurrent = () => generation === viewGenerationRef.current;
 
-    refreshRunningRef.current = true;
+    refreshRunningRef.current = routerId;
     if (options.silent) setIsLiveRefreshing(true);
     else setIsLoading(true);
     if (!options.silent) setNotice(null);
 
     try {
       const service = await createService(!options.silent);
-      const [activeUsers, hotspotUsers, plans, routers, localPlans] = await Promise.all([
+      // Only the vouchers of the active sessions are read, without passwords,
+      // instead of every hotspot user of the router.
+      const [activeUsers, plans, routers, localPlans] = await Promise.all([
         service.listActiveUsers(),
-        service.listHotspotUsers(),
-        service.getHotspotPlans(),
+        readPlans(service, !options.silent),
         isPersistent ? Promise.resolve([]) : service.listRouters(),
         isPersistent ? planRepository.listByRouter(routerId) : Promise.resolve([])
       ]);
+      let hotspotUsers = await service.listHotspotUsersByUsernames(
+        activeUsers.map((user) => user.username)
+      );
+      if (!isCurrent()) return;
       const persistedRouter = isPersistent ? await routerRepository.findById(routerId) : null;
       const router = persistedRouter ?? routers.find((item) => item.id === routerId) ?? routers[0] ?? { id: routerId, name: "Routeur" };
 
@@ -196,6 +255,12 @@ export function ConnectedClientsPage() {
             ),
             ticketRepository.listByRouter(routerId)
           ]);
+          if (!isCurrent()) return;
+          managedVoucherUsernamesRef.current = {
+            routerId,
+            usernames: new Set(ticketRecords.map((ticket) => ticket.username))
+          };
+          setLockPolicyEnabled(policy.policy.lockVoucherToFirstMac);
           if (
             policy.policy.lockVoucherToFirstMac
             && canManageDeviceBinding
@@ -208,25 +273,35 @@ export function ConnectedClientsPage() {
               routerService: service,
               tickets: ticketRecords
             });
-            if (bindingResult.errors.length > 0) {
-              setNotice({
-                status: "error",
-                text: `${bindingResult.errors.length} voucher(s) n'ont pas pu être verrouillés. Consultez les logs puis réessayez.`
-              });
-            } else if (bindingResult.conflicts.length > 0) {
-              setNotice({
-                status: "error",
-                text: `${bindingResult.conflicts.length} partage ou changement d’appareil suspect détecté.`
-              });
+            if (bindingResult.verifiedUsers.length > 0) {
+              const verifiedByUsername = new Map(bindingResult.verifiedUsers.map((user) => [user.username, user]));
+              hotspotUsers = hotspotUsers.map((user) => verifiedByUsername.get(user.username) ?? user);
+            }
+            // The overall lock state is shown by the summary computed from
+            // RouterOS; this notice only reports what this pass changed.
+            const problems = [
+              bindingResult.errors.length > 0
+                ? `${bindingResult.errors.length} voucher(s) n'ont pas pu être verrouillés (consultez les logs puis réessayez)`
+                : null,
+              bindingResult.conflicts.length > 0
+                ? `${bindingResult.conflicts.length} partage ou changement d’appareil suspect détecté`
+                : null
+            ].filter(Boolean);
+            if (problems.length > 0) {
+              setNotice({ status: "error", text: `${problems.join(" · ")}.` });
             } else if (bindingResult.boundUsernames.length > 0) {
               setNotice({
                 status: "success",
-                text: `${bindingResult.boundUsernames.length} voucher(s) verrouillé(s) sur leur premier appareil.`
+                text: `${bindingResult.boundUsernames.length} nouveau(x) voucher(s) verrouillé(s) sur leur premier appareil lors de cette synchronisation.`
               });
             }
           }
         }
       }
+      if (!isCurrent()) return;
+      const managedVoucherUsernames = managedVoucherUsernamesRef.current?.routerId === routerId
+        ? managedVoucherUsernamesRef.current.usernames
+        : undefined;
       const localPlanNamesByProfile = new Map(
         localPlans
           .filter((plan) => plan.mikrotik_profile_name)
@@ -237,7 +312,8 @@ export function ConnectedClientsPage() {
         hotspotUsers,
         plans,
         router,
-        localPlanNamesByProfile
+        localPlanNamesByProfile,
+        managedVoucherUsernames
       );
       setAvailablePlans(plans.map((plan) => ({ id: plan.id, name: plan.name })));
       applyClients(liveClients);
@@ -245,36 +321,20 @@ export function ConnectedClientsPage() {
       setLastRefreshAt(formatRefreshDate(new Date()));
       setLiveError(null);
     } catch (error) {
+      if (!isCurrent()) return;
       const errorMessage = error instanceof RouterServiceError
         ? error.message
         : "Impossible de charger les clients connectés.";
       setLiveError(errorMessage);
-      if (isPersistent) {
-        const [router, cachedUsers, ticketRecords, planRecords] = await Promise.all([
-          routerRepository.findById(routerId),
-          activeSessionCacheRepository.listByRouter(routerId),
-          ticketRepository.listByRouter(routerId),
-          planRepository.listByRouter(routerId)
-        ]);
-
-        if (router && router.account_id === session?.account_id && cachedUsers.length > 0) {
-          setAvailablePlans(planRecords.map((plan) => ({ id: plan.id, name: plan.name })));
-          applyClients(
-            buildCachedConnectedClientViewModels(
-              cachedUsers,
-              ticketRecords,
-              planRecords,
-              router
-            )
-          );
-          setDataSource("cache");
-          setLastRefreshAt(formatRefreshDate(new Date(cachedUsers[0].cached_at)));
-          if (!options.silent) {
-            setNotice({ status: "error", text: "Routeur hors ligne : affichage du dernier cache local." });
-          }
-          return;
+      // Keep the live list already displayed; only fall back to the cache when
+      // nothing fresher is on screen.
+      if (dataSourceRef.current !== "live" && await loadCachedClients(generation)) {
+        if (!options.silent) {
+          setNotice({ status: "error", text: "Routeur hors ligne : affichage du dernier cache local." });
         }
+        return;
       }
+      if (!isCurrent()) return;
       if (clientsRef.current.length === 0) {
         applyClients([]);
         setDataSource("none");
@@ -284,13 +344,31 @@ export function ConnectedClientsPage() {
       }
       if (!options.silent) setNotice({ status: "error", text: errorMessage });
     } finally {
-      refreshRunningRef.current = false;
-      if (options.silent) setIsLiveRefreshing(false);
-      else setIsLoading(false);
+      if (refreshRunningRef.current === routerId) refreshRunningRef.current = null;
+      if (isCurrent()) {
+        if (options.silent) setIsLiveRefreshing(false);
+        else setIsLoading(false);
+      }
     }
   };
 
   useEffect(() => {
+    viewGenerationRef.current += 1;
+    const generation = viewGenerationRef.current;
+    if (displayedRouterIdRef.current !== routerId) {
+      // A new router never shows the previous router's list.
+      displayedRouterIdRef.current = routerId;
+      applyClients([]);
+      setDataSource("none");
+      setLastRefreshAt(null);
+      setLiveError(null);
+      setIsLoading(false);
+      setIsLiveRefreshing(false);
+      setLockPolicyEnabled(false);
+    }
+    // First useful display: the local cache (labelled as such) while the
+    // RouterOS read is in progress.
+    if (dataSourceRef.current === "none") void loadCachedClients(generation).catch(() => undefined);
     void loadClients();
     const synchronize = () => {
       if (document.visibilityState === "hidden") return;
@@ -299,6 +377,7 @@ export function ConnectedClientsPage() {
     const interval = window.setInterval(synchronize, connectedClientsLiveIntervalMs);
     window.addEventListener("focus", synchronize);
     return () => {
+      viewGenerationRef.current += 1;
       window.clearInterval(interval);
       window.removeEventListener("focus", synchronize);
     };
@@ -310,6 +389,10 @@ export function ConnectedClientsPage() {
   const planOptions = useMemo(
     () => getConnectedClientPlanOptions(clients, availablePlans),
     [availablePlans, clients]
+  );
+  const deviceLockSummary = useMemo(
+    () => (lockPolicyEnabled ? summarizeDeviceLocks(filteredClients) : null),
+    [filteredClients, lockPolicyEnabled]
   );
   const totalDownload = filteredClients.reduce((total, client) => total + client.downloadedBytes, 0);
   const totalUpload = filteredClients.reduce((total, client) => total + client.uploadedBytes, 0);
@@ -429,19 +512,113 @@ export function ConnectedClientsPage() {
     }
   };
 
+  // Reads every RouterOS voucher and lists those whose plan has a quota that
+  // RouterOS does not carry. Nothing is written before confirmation.
+  const inspectVoucherQuotas = async () => {
+    if (!isPersistent || !session) return;
+    setIsRepairingQuota(true);
+    setNotice(null);
+    try {
+      const service = await createService();
+      const [routerUsers, activeUsers, planRecords] = await Promise.all([
+        service.listHotspotUsersForVerification(),
+        service.listActiveUsers(),
+        planRepository.listByRouter(routerId)
+      ]);
+      const candidates = findVouchersMissingQuota(
+        routerUsers,
+        planRecords,
+        new Set(activeUsers.map((user) => user.username))
+      );
+      if (candidates.length === 0) {
+        setNotice({ status: "success", text: "Tous les vouchers des plans avec quota portent leur quota sur RouterOS." });
+      } else {
+        setQuotaRepair(candidates);
+      }
+    } catch (error) {
+      setNotice({
+        status: "error",
+        text: error instanceof RouterServiceError ? error.message : "Lecture des quotas RouterOS impossible."
+      });
+    } finally {
+      setIsRepairingQuota(false);
+    }
+  };
+
+  const applyVoucherQuotas = async () => {
+    const candidates = quotaRepair ?? [];
+    setQuotaRepair(null);
+    if (!session || candidates.length === 0) return;
+    setIsRepairingQuota(true);
+    let applied = 0;
+    const failed: string[] = [];
+    try {
+      const service = await createService();
+      const ticketsByUsername = new Map(
+        (await ticketRepository.listByRouter(routerId)).map((ticket) => [ticket.username, ticket])
+      );
+      for (const candidate of candidates) {
+        try {
+          await service.setHotspotUserQuota(candidate.username, candidate.limitBytesTotal);
+          applied += 1;
+          const ticket = ticketsByUsername.get(candidate.username);
+          if (ticket) {
+            await ticketRepository.update({
+              ...ticket,
+              data_limit_mb_snapshot: candidate.limitBytesTotal / 1024 / 1024,
+              data_remaining_bytes: Math.max(0, candidate.limitBytesTotal - candidate.usedBytes)
+            });
+          }
+        } catch {
+          failed.push(candidate.username);
+        }
+      }
+      setNotice(failed.length > 0
+        ? {
+            status: "error",
+            text: `${applied} quota(s) appliqué(s) et confirmé(s) par RouterOS ; échec pour ${failed.length} : ${failed.slice(0, 10).join(", ")}${failed.length > 10 ? "…" : ""}.`
+          }
+        : { status: "success", text: `${applied} quota(s) appliqué(s) et confirmé(s) par RouterOS.` });
+      await loadClients({ synchronizePolicy: false });
+    } catch (error) {
+      setNotice({
+        status: "error",
+        text: error instanceof RouterServiceError ? error.message : "Application des quotas impossible."
+      });
+    } finally {
+      setIsRepairingQuota(false);
+    }
+  };
+
+  const quotaRepairConnected = quotaRepair?.filter((candidate) => candidate.isConnected).length ?? 0;
+  const quotaRepairExceeded = quotaRepair?.filter((candidate) => candidate.exceedsQuota).length ?? 0;
+
   return (
     <div className="page-stack">
       <PageHeader
         actions={
-          <Button
-            className={isLoading || isLiveRefreshing ? "button--loading" : ""}
-            disabled={isLoading || isLiveRefreshing}
-            icon={RefreshCw}
-            onClick={() => void loadClients({ synchronizePolicy: true })}
-            variant="primary"
-          >
-            Synchroniser maintenant
-          </Button>
+          <div className="button-row">
+            {isPersistent && canManageDeviceBinding ? (
+              <Button
+                className={isRepairingQuota ? "button--loading" : ""}
+                disabled={isRepairingQuota || isLoading}
+                icon={ShieldCheck}
+                onClick={() => void inspectVoucherQuotas()}
+                variant="ghost"
+              >
+                Vérifier les quotas
+              </Button>
+            ) : null}
+            <Button
+              className={isLoading || isLiveRefreshing ? "button--loading" : ""}
+              disabled={isLoading || isLiveRefreshing}
+              icon={RefreshCw}
+              onClick={() => void loadClients({ synchronizePolicy: true })}
+              variant="primary"
+            >
+              Synchroniser maintenant
+            </Button>
+          </div>
         }
         description="Suivez les utilisateurs actuellement connectés au réseau."
         eyebrow="Routeur"
@@ -573,6 +750,14 @@ export function ConnectedClientsPage() {
       {notice ? (
         <p className={`form-error ${notice.status === "success" ? "form-error--success" : ""}`}>{notice.text}</p>
       ) : null}
+      {deviceLockSummary ? (
+        <p
+          className={`form-error ${deviceLockSummary.lockedVouchers === deviceLockSummary.concernedVouchers ? "form-error--success" : ""}`}
+          role="status"
+        >
+          <ShieldCheck aria-hidden="true" /> {formatDeviceLockSummary(deviceLockSummary)}
+        </p>
+      ) : null}
 
       <Card className="clients-list-card">
         {filteredClients.length > 0 ? (
@@ -586,6 +771,7 @@ export function ConnectedClientsPage() {
                 isBusy={busyUsername === client.username}
                 isCached={dataSource === "cache"}
                 key={client.id}
+                showDeviceLock={lockPolicyEnabled}
                 onCopyIp={() => void copyValue("IP", client.ipAddress)}
                 onCopyMac={() => void copyValue("MAC", client.macAddress)}
                 onDetail={() => setSelectedClient(client)}
@@ -636,6 +822,22 @@ export function ConnectedClientsPage() {
         }
       />
 
+      <ConfirmDialog
+        confirmLabel="Appliquer les quotas"
+        description={quotaRepair
+          ? `${quotaRepair.length} voucher(s) n'ont pas sur RouterOS le quota prévu par leur plan`
+            + ` (dont ${quotaRepairConnected} connecté(s)). Le quota du plan sera écrit sur chaque voucher puis relu.`
+            + " La consommation déjà enregistrée est conservée : elle n'est ni remise à zéro ni recréditée."
+            + (quotaRepairExceeded > 0
+              ? ` ${quotaRepairExceeded} voucher(s) ont déjà dépassé ce quota : RouterOS les coupera immédiatement.`
+              : "")
+          : ""}
+        isOpen={Boolean(quotaRepair)}
+        onCancel={() => setQuotaRepair(null)}
+        onConfirm={() => void applyVoucherQuotas()}
+        title="Appliquer le quota des plans ?"
+      />
+
       <ClientDetailDialog
         client={selectedClient}
         isCached={dataSource === "cache"}
@@ -658,6 +860,7 @@ type ConnectedClientRowProps = {
   onDisable: () => void;
   onDisconnect: () => void;
   onReleaseDevice: () => void;
+  showDeviceLock: boolean;
 };
 
 function ConnectedClientRow({
@@ -672,7 +875,8 @@ function ConnectedClientRow({
   onDetail,
   onDisable,
   onDisconnect,
-  onReleaseDevice
+  onReleaseDevice,
+  showDeviceLock
 }: ConnectedClientRowProps) {
   return (
     <article
@@ -705,6 +909,9 @@ function ConnectedClientRow({
       <div className="client-row__network">
         <span><Smartphone aria-hidden="true" /> {client.ipAddress}</span>
         <span><Laptop aria-hidden="true" /> {client.macAddress}</span>
+        {showDeviceLock ? (
+          <span><ShieldCheck aria-hidden="true" /> {deviceLockLabel(client.deviceLock)}</span>
+        ) : null}
       </div>
 
       <div className="client-row__usage">
@@ -750,6 +957,7 @@ function ClientDetailDialog({
   if (!client) {
     return null;
   }
+  const dataQuota = describeClientDataQuota(client);
 
   return (
     <div className="dialog-backdrop" role="presentation">
@@ -774,22 +982,15 @@ function ClientDetailDialog({
           <DetailLine icon={Router} label="Routeur" value={client.routerName} />
           <DetailLine icon={Smartphone} label="Adresse IP" value={client.ipAddress} />
           <DetailLine icon={Laptop} label="Adresse MAC" value={client.macAddress} />
+          <DetailLine icon={ShieldCheck} label="Verrouillage appareil (RouterOS)" value={deviceLockLabel(client.deviceLock)} />
           <DetailLine icon={Clock} label="Session actuelle" value={client.currentSessionUptime} />
           <DetailLine icon={Clock} label="Temps total utilisé" value={client.uptime} />
           <DetailLine icon={Clock} label="Temps d'utilisation restant" value={client.sessionTimeLeft} />
           <DetailLine icon={Download} label="Download" value={formatClientBytes(client.downloadedBytes)} />
           <DetailLine icon={Upload} label="Upload" value={formatClientBytes(client.uploadedBytes)} />
           <DetailLine icon={Laptop} label="Volume total" value={formatClientBytes(client.totalBytes)} />
-          <DetailLine
-            icon={Download}
-            label="Volume restant"
-            value={client.dataRemainingBytes === null ? "Illimité" : formatClientBytes(client.dataRemainingBytes)}
-          />
-          <DetailLine
-            icon={Laptop}
-            label="Quota total du voucher"
-            value={client.dataLimitBytes === null ? "Illimité" : formatClientBytes(client.dataLimitBytes)}
-          />
+          <DetailLine icon={Download} label="Volume restant" value={dataQuota.remaining} />
+          <DetailLine icon={Laptop} label="Quota total du voucher" value={dataQuota.total} />
           <DetailLine icon={Download} label="Débit descendant du profil" value={client.downloadLimit ?? "Non défini"} />
           <DetailLine icon={Upload} label="Débit montant du profil" value={client.uploadLimit ?? "Non défini"} />
           <DetailLine icon={Smartphone} label="Appareils simultanés" value={client.sharedUsers === null ? "Non défini" : String(client.sharedUsers)} />
