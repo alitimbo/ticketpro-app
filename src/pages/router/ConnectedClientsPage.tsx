@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
+import type { HotspotPlan } from "../../domain/router";
 import {
   Ban,
   Clock,
@@ -77,6 +78,8 @@ type Notice = {
 } | null;
 
 const connectedClientsLiveIntervalMs = 5_000;
+/** Plans change rarely; re-read them at most this often during live refreshes. */
+const connectedClientsPlanRefreshMs = 30_000;
 
 export function ConnectedClientsPage() {
   const { routerId = "routeur-demo" } = useParams();
@@ -93,7 +96,12 @@ export function ConnectedClientsPage() {
   const [notice, setNotice] = useState<Notice>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [busyUsername, setBusyUsername] = useState<string | null>(null);
-  const [dataSource, setDataSource] = useState<"cache" | "live" | "none">("none");
+  const [dataSource, setDataSourceState] = useState<"cache" | "live" | "none">("none");
+  const dataSourceRef = useRef<"cache" | "live" | "none">("none");
+  const setDataSource = (next: "cache" | "live" | "none") => {
+    dataSourceRef.current = next;
+    setDataSourceState(next);
+  };
   const [lastRefreshAt, setLastRefreshAt] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [selectedClient, setSelectedClient] = useState<ConnectedClientViewModel | null>(null);
@@ -102,7 +110,10 @@ export function ConnectedClientsPage() {
   const [liveError, setLiveError] = useState<string | null>(null);
   const [lockPolicyEnabled, setLockPolicyEnabled] = useState(false);
   const managedVoucherUsernamesRef = useRef<{ routerId: string; usernames: Set<string> } | null>(null);
-  const refreshRunningRef = useRef(false);
+  const refreshRunningRef = useRef<string | null>(null);
+  const viewGenerationRef = useRef(0);
+  const displayedRouterIdRef = useRef<string | null>(null);
+  const plansCacheRef = useRef<{ key: string; plans: HotspotPlan[]; readAt: number } | null>(null);
   const clientsRef = useRef<ConnectedClientViewModel[]>([]);
   const liveRouterServiceRef = useRef<{ key: string; service: RouterService } | null>(null);
 
@@ -162,27 +173,64 @@ export function ConnectedClientsPage() {
     return service;
   };
 
+  const loadCachedClients = async (generation: number) => {
+    if (!isPersistent || !session) return false;
+    const [router, cachedUsers, ticketRecords, planRecords] = await Promise.all([
+      routerRepository.findById(routerId),
+      activeSessionCacheRepository.listByRouter(routerId),
+      ticketRepository.listByRouter(routerId),
+      planRepository.listByRouter(routerId)
+    ]);
+    // Never replace a RouterOS read that arrived first.
+    if (generation !== viewGenerationRef.current || dataSourceRef.current === "live") return false;
+    if (!router || router.account_id !== session.account_id || cachedUsers.length === 0) return false;
+    setAvailablePlans(planRecords.map((plan) => ({ id: plan.id, name: plan.name })));
+    applyClients(buildCachedConnectedClientViewModels(cachedUsers, ticketRecords, planRecords, router));
+    setDataSource("cache");
+    setLastRefreshAt(formatRefreshDate(new Date(cachedUsers[0].cached_at)));
+    return true;
+  };
+
+  const readPlans = async (service: RouterService, force: boolean) => {
+    const key = `${session?.account_id ?? "demo"}:${routerId}`;
+    const cached = plansCacheRef.current;
+    if (!force && cached?.key === key && Date.now() - cached.readAt < connectedClientsPlanRefreshMs) {
+      return cached.plans;
+    }
+    const plans = await service.getHotspotPlans();
+    plansCacheRef.current = { key, plans, readAt: Date.now() };
+    return plans;
+  };
+
   const loadClients = async (options: { silent?: boolean; synchronizePolicy?: boolean } = {}) => {
     if (isPersistent && (!isInitialized || !session)) {
       return;
     }
-    if (refreshRunningRef.current) return;
+    // One refresh at a time per router; a refresh for a previous router never
+    // blocks nor overwrites the router now displayed.
+    if (refreshRunningRef.current === routerId) return;
+    const generation = viewGenerationRef.current;
+    const isCurrent = () => generation === viewGenerationRef.current;
 
-    refreshRunningRef.current = true;
+    refreshRunningRef.current = routerId;
     if (options.silent) setIsLiveRefreshing(true);
     else setIsLoading(true);
     if (!options.silent) setNotice(null);
 
     try {
       const service = await createService(!options.silent);
-      const [activeUsers, routerHotspotUsers, plans, routers, localPlans] = await Promise.all([
+      // Only the vouchers of the active sessions are read, without passwords,
+      // instead of every hotspot user of the router.
+      const [activeUsers, plans, routers, localPlans] = await Promise.all([
         service.listActiveUsers(),
-        service.listHotspotUsers(),
-        service.getHotspotPlans(),
+        readPlans(service, !options.silent),
         isPersistent ? Promise.resolve([]) : service.listRouters(),
         isPersistent ? planRepository.listByRouter(routerId) : Promise.resolve([])
       ]);
-      let hotspotUsers = routerHotspotUsers;
+      let hotspotUsers = await service.listHotspotUsersByUsernames(
+        activeUsers.map((user) => user.username)
+      );
+      if (!isCurrent()) return;
       const persistedRouter = isPersistent ? await routerRepository.findById(routerId) : null;
       const router = persistedRouter ?? routers.find((item) => item.id === routerId) ?? routers[0] ?? { id: routerId, name: "Routeur" };
 
@@ -202,6 +250,7 @@ export function ConnectedClientsPage() {
             ),
             ticketRepository.listByRouter(routerId)
           ]);
+          if (!isCurrent()) return;
           managedVoucherUsernamesRef.current = {
             routerId,
             usernames: new Set(ticketRecords.map((ticket) => ticket.username))
@@ -244,6 +293,7 @@ export function ConnectedClientsPage() {
           }
         }
       }
+      if (!isCurrent()) return;
       const managedVoucherUsernames = managedVoucherUsernamesRef.current?.routerId === routerId
         ? managedVoucherUsernamesRef.current.usernames
         : undefined;
@@ -266,36 +316,20 @@ export function ConnectedClientsPage() {
       setLastRefreshAt(formatRefreshDate(new Date()));
       setLiveError(null);
     } catch (error) {
+      if (!isCurrent()) return;
       const errorMessage = error instanceof RouterServiceError
         ? error.message
         : "Impossible de charger les clients connectés.";
       setLiveError(errorMessage);
-      if (isPersistent) {
-        const [router, cachedUsers, ticketRecords, planRecords] = await Promise.all([
-          routerRepository.findById(routerId),
-          activeSessionCacheRepository.listByRouter(routerId),
-          ticketRepository.listByRouter(routerId),
-          planRepository.listByRouter(routerId)
-        ]);
-
-        if (router && router.account_id === session?.account_id && cachedUsers.length > 0) {
-          setAvailablePlans(planRecords.map((plan) => ({ id: plan.id, name: plan.name })));
-          applyClients(
-            buildCachedConnectedClientViewModels(
-              cachedUsers,
-              ticketRecords,
-              planRecords,
-              router
-            )
-          );
-          setDataSource("cache");
-          setLastRefreshAt(formatRefreshDate(new Date(cachedUsers[0].cached_at)));
-          if (!options.silent) {
-            setNotice({ status: "error", text: "Routeur hors ligne : affichage du dernier cache local." });
-          }
-          return;
+      // Keep the live list already displayed; only fall back to the cache when
+      // nothing fresher is on screen.
+      if (dataSourceRef.current !== "live" && await loadCachedClients(generation)) {
+        if (!options.silent) {
+          setNotice({ status: "error", text: "Routeur hors ligne : affichage du dernier cache local." });
         }
+        return;
       }
+      if (!isCurrent()) return;
       if (clientsRef.current.length === 0) {
         applyClients([]);
         setDataSource("none");
@@ -305,13 +339,31 @@ export function ConnectedClientsPage() {
       }
       if (!options.silent) setNotice({ status: "error", text: errorMessage });
     } finally {
-      refreshRunningRef.current = false;
-      if (options.silent) setIsLiveRefreshing(false);
-      else setIsLoading(false);
+      if (refreshRunningRef.current === routerId) refreshRunningRef.current = null;
+      if (isCurrent()) {
+        if (options.silent) setIsLiveRefreshing(false);
+        else setIsLoading(false);
+      }
     }
   };
 
   useEffect(() => {
+    viewGenerationRef.current += 1;
+    const generation = viewGenerationRef.current;
+    if (displayedRouterIdRef.current !== routerId) {
+      // A new router never shows the previous router's list.
+      displayedRouterIdRef.current = routerId;
+      applyClients([]);
+      setDataSource("none");
+      setLastRefreshAt(null);
+      setLiveError(null);
+      setIsLoading(false);
+      setIsLiveRefreshing(false);
+      setLockPolicyEnabled(false);
+    }
+    // First useful display: the local cache (labelled as such) while the
+    // RouterOS read is in progress.
+    if (dataSourceRef.current === "none") void loadCachedClients(generation).catch(() => undefined);
     void loadClients();
     const synchronize = () => {
       if (document.visibilityState === "hidden") return;
@@ -320,6 +372,7 @@ export function ConnectedClientsPage() {
     const interval = window.setInterval(synchronize, connectedClientsLiveIntervalMs);
     window.addEventListener("focus", synchronize);
     return () => {
+      viewGenerationRef.current += 1;
       window.clearInterval(interval);
       window.removeEventListener("focus", synchronize);
     };

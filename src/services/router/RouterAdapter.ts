@@ -66,6 +66,8 @@ export interface RouterAdapter {
   listHotspotUsers(): Promise<HotspotUser[]>;
   listTicketProManagedVoucherUsernames?(): Promise<string[]>;
   listHotspotUsersForVerification?(): Promise<HotspotUser[]>;
+  /** Reads only the named users, without passwords. */
+  listHotspotUsersByUsernames?(usernames: string[]): Promise<HotspotUser[]>;
   configureVoucherFirstMacLock?(
     enabled: boolean,
     managedProfileNames: string[]
