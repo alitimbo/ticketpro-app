@@ -161,6 +161,13 @@ export class HotspotPlanRepository {
     );
   }
 
+  async listHistoryByRouter(routerId: string): Promise<HotspotPlanHistoryRecord[]> {
+    return this.database.query<HotspotPlanHistoryRecord>(
+      "SELECT * FROM hotspot_plan_history WHERE router_id = ?1 ORDER BY created_at ASC, revision ASC",
+      [routerId]
+    );
+  }
+
   async listHistory(planId: string): Promise<HotspotPlanHistoryRecord[]> {
     return this.database.query<HotspotPlanHistoryRecord>(
       "SELECT * FROM hotspot_plan_history WHERE plan_id = ?1 ORDER BY revision DESC, created_at DESC",

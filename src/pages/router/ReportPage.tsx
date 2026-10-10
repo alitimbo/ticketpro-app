@@ -66,7 +66,7 @@ import {
 import { getSaasRouterRecoveryState, getSaasRouterTicketCatalog, SaasRequestError, type SaasRouterTicketCatalog } from "../../services/saas";
 import { routerAccessPolicyCloudId } from "../../services/access/routerAccessPolicyIdentity";
 import { hasTicketDataChanges, mergeTicketUpdate, persistTicketSyncReport } from "./ticketSyncPersistence";
-import { cloudReportTickets, mergeReportTickets, reportRead } from "./reportRead";
+import { cloudReportTickets, mergeReportTickets, planPriceAt, reportRead } from "./reportRead";
 
 type SelectedReportTickets = {
   title: string;
@@ -168,13 +168,14 @@ export function ReportPage() {
       const profileScope = session.permissions.includes("router.report.read")
         ? undefined
         : session.internal_profile_id;
-      const [router, records, plans, batches, printHistory, connections] = await read("Lecture locale", () => Promise.all([
+      const [router, records, plans, batches, printHistory, connections, planHistory] = await read("Lecture locale", () => Promise.all([
         routerRepository.findById(routerId),
         ticketRepository.listForReportByAccount(session.account_id, profileScope),
         planRepository.listByRouter(routerId),
         ticketBatchRepository.listByRouter(routerId),
         printHistoryRepository.listByAccount(session.account_id),
-        routerConnectionRepository.listByRouter(routerId)
+        routerConnectionRepository.listByRouter(routerId),
+        planRepository.listHistoryByRouter(routerId)
       ]));
       if (!current()) return;
 
@@ -205,14 +206,17 @@ export function ReportPage() {
           .filter((record) => record.router_id === routerId)
           .map((record) => {
             const ticket = ticketFromRecord(record, plansById.get(record.plan_id) ?? null, router.name);
+            // The batch keeps the price of the sale; without it, the plan
+            // history gives the price in force when the ticket was created.
+            const historical = priceByBatchId.has(record.batch_id)
+              ? null
+              : planPriceAt(planHistory, plansById.get(record.plan_id) ?? null, record.plan_id, record.created_at);
             return {
               ...ticket,
-              currency: currencyByBatchId.get(record.batch_id) ?? "CFA",
+              currency: currencyByBatchId.get(record.batch_id) ?? historical?.currency ?? "CFA",
               deletedAt: record.deleted_at,
               printedAt: record.printed_count > 0 ? printDatesByBatch.get(record.batch_id) ?? [] : [],
-              priceHint: priceByBatchId.has(record.batch_id)
-                ? priceByBatchId.get(record.batch_id) ?? null
-                : plansById.get(ticket.planId)?.price_hint ?? null
+              priceHint: historical ? historical.priceHint : priceByBatchId.get(record.batch_id) ?? null
             };
           });
 
@@ -240,7 +244,7 @@ export function ReportPage() {
           setTickets([]);
           throw new SaasRequestError("Ce routeur n’est plus accessible dans cette organisation.", 403);
         }
-        const shared = cloudReportTickets(catalog, session, saasAccount?.user.id, routerId, router.name, plans);
+        const shared = cloudReportTickets(catalog, session, saasAccount?.user.id, routerId, router.name, plans, planHistory);
         sharedCatalog = catalog;
         reportTickets = mergeReportTickets(reportTickets, shared);
         publishStage(reportTickets);

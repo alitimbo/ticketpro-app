@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSession } from "../../services/auth";
 import type { SaasRouterTicketCatalog, SaasTicketSnapshot } from "../../services/saas";
-import { cloudReportTickets, mergeReportTickets, reportRead } from "./reportRead";
+import { cloudReportTickets, mergeReportTickets, planPriceAt, reportRead } from "./reportRead";
 import { scopeReportTicketsForSession } from "./reportPageModel";
 
 export function reportCatalog(): SaasRouterTicketCatalog {
@@ -86,5 +86,26 @@ describe("cloud report projection", () => {
     expect(cloudReportTickets(reportCatalog(), session, "other-user", "local-router", "Nova", [])).toEqual([]);
     expect(cloudReportTickets(reportCatalog(), session, undefined, "local-router", "Nova", [])).toEqual([]);
     expect(cloudReportTickets(reportCatalog(), { ...session, permissions: [] }, "user-1", "local-router", "Nova", [])).toEqual([]);
+  });
+});
+
+describe("planPriceAt", () => {
+  const entry = (created_at: string, price_hint: number | null, revision: number, currency = "CFA") => ({
+    action: "updated" as const, actor_profile_id: null, created_at, currency, id: `h${revision}`, mikrotik_id: null,
+    mikrotik_profile_name: "4H", name: "4H", plan_id: "plan-4h", price_hint, revision, router_id: "r1",
+    snapshot_json: "{}", source: "test"
+  });
+  const history = [entry("2026-01-01T00:00:00Z", 200, 1), entry("2026-03-01T00:00:00Z", 300, 2), entry("2026-05-01T00:00:00Z", 500, 3, "XOF")];
+  const current = { currency: "XOF", id: "plan-4h", price_hint: 500 };
+
+  it("garde le prix en vigueur à la création du ticket, malgré un changement de prix ultérieur", () => {
+    expect(planPriceAt(history, current, "plan-4h", "2026-02-15T10:00:00Z")).toEqual({ currency: "CFA", priceHint: 200 });
+    expect(planPriceAt(history, current, "plan-4h", "2026-04-01T10:00:00Z")).toEqual({ currency: "CFA", priceHint: 300 });
+    expect(planPriceAt(history, current, "plan-4h", "2026-06-01T10:00:00Z")).toEqual({ currency: "XOF", priceHint: 500 });
+  });
+
+  it("utilise la plus ancienne révision connue, puis le plan actuel faute d'historique", () => {
+    expect(planPriceAt(history, current, "plan-4h", "2025-12-01T00:00:00Z")).toEqual({ currency: "CFA", priceHint: 200 });
+    expect(planPriceAt([], current, "plan-4h", "2026-02-15T10:00:00Z")).toEqual({ currency: "XOF", priceHint: 500 });
   });
 });
