@@ -9,7 +9,8 @@ import {
   getPageCount,
   paginateTickets,
   ticketLifecycleBadges,
-  scopeTicketsForSession
+  scopeTicketsForSession,
+  formatRemainingData
 } from "./ticketsPageModel";
 
 const adminSession = createSession("admin", "doumacorporation@gmail.com", Date.now());
@@ -97,5 +98,13 @@ describe("ticketsPageModel", () => {
     expect(adminTickets.every((ticket) => ticket.accountId === "account-douma-demo")).toBe(true);
     expect(agentTickets.length).toBeGreaterThan(0);
     expect(agentTickets.every((ticket) => ticket.createdByProfileId === "account-douma-demo:internal-profile-agent")).toBe(true);
+  });
+});
+
+describe("formatRemainingData", () => {
+  it("n'affiche « Illimité » que pour un voucher sans quota", () => {
+    expect(formatRemainingData({ dataLimitMb: null, dataRemainingBytes: null })).toBe("Illimité");
+    expect(formatRemainingData({ dataLimitMb: 2048, dataRemainingBytes: null })).toBe("Non disponible");
+    expect(formatRemainingData({ dataLimitMb: 2048, dataRemainingBytes: 1024 * 1024 * 1024 })).not.toBe("Illimité");
   });
 });

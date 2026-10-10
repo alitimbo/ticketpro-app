@@ -201,3 +201,28 @@ function ticketInputFromRecord(record: TicketRecord): CreateTicketInput {
     username: record.username
   };
 }
+
+describe("TicketRepository.renameProfileReference", () => {
+  it("reporte le renommage du profil RouterOS sur les tickets du plan, utilisés ou non", async () => {
+    const statements: Array<{ params: unknown[]; sql: string }> = [];
+    const tickets = [
+      { ...createTicketRecord(), id: "t1", mikrotik_profile_name: "4H", plan_id: "plan-4h", status: "activé" },
+      { ...createTicketRecord(), id: "t2", mikrotik_profile_name: "4H", plan_id: "plan-4h" },
+      { ...createTicketRecord(), id: "t3", mikrotik_profile_name: "4H", plan_id: "autre-plan" }
+    ];
+    const database = {
+      execute: async (sql: string, params: unknown[] = []) => { statements.push({ params, sql }); return { rowsAffected: 1 }; },
+      initialize: async () => undefined,
+      query: async () => tickets,
+      transaction: async () => []
+    } as unknown as DatabaseClient;
+
+    const count = await new TicketRepository(database).renameProfileReference({
+      accountId: tickets[0].account_id, planId: "plan-4h", previousProfileName: "4H", profileName: "6H", routerId: tickets[0].router_id
+    });
+
+    expect(count).toBe(2);
+    expect(statements.map((statement) => statement.params[2])).toEqual(["t1", "t2"]);
+    expect(statements.every((statement) => statement.params[0] === "6H")).toBe(true);
+  });
+});

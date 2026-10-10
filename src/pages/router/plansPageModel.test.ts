@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   applyTemplate,
+  describePlanChangeImpact,
+  findPlanProfileConflict,
+  routerProfileNameForPlan,
   duplicatePlan,
   emptyPlanFormValues,
   formatPlanDisplayName,
   formValuesToPlanDraft,
   planFromHotspotPlan,
+  planToFormValues,
   quickPlanTemplates,
   validatePlanForm
 } from "./plansPageModel";
@@ -26,7 +30,7 @@ describe("plansPageModel", () => {
       downloadLimit: "5M",
       durationMinutes: 180,
       name: "3h-2Go",
-      profileName: "3h-2go",
+      profileName: "3h-2Go",
       sharedUsers: 1,
       uploadLimit: "2M",
       validityMinutes: 300
@@ -83,5 +87,36 @@ describe("plansPageModel", () => {
     expect(formatPlanDisplayName("1h-100-cfa")).toBe("1h-100");
     expect(formatPlanDisplayName("1h-100-CFA")).toBe("1h-100");
     expect(formatPlanDisplayName("Forfait soirée")).toBe("Forfait soirée");
+  });
+});
+
+describe("describePlanChangeImpact", () => {
+  const plan4h = { dataLimitMb: null, durationMinutes: 240, name: "4H", profileName: "4H", validityMinutes: 240 };
+
+  it("précise qu'un renommage ne change ni la durée ni le quota", () => {
+    expect(describePlanChangeImpact(plan4h, { ...plan4h, name: "6H" }))
+      .toBe("Nom : « 4H » → « 6H ». Durée, validité et quota inchangés.");
+  });
+
+  it("indique que les tickets déjà utilisés conservent leurs conditions", () => {
+    expect(describePlanChangeImpact(plan4h, { ...plan4h, durationMinutes: 360, name: "6H" },
+      { immutableTicketsSkipped: 3, updatedRouterUsers: 5 }))
+      .toBe("Nom : « 4H » → « 6H ». Nouvelles limites appliquées à 5 ticket(s) non utilisé(s) ; 3 ticket(s) déjà utilisé(s) conservent leurs conditions.");
+  });
+});
+
+describe("concordance nom du plan / profil RouterOS", () => {
+  it("le profil RouterOS porte le nom du plan, y compris après renommage", () => {
+    const values = planToFormValues({ ...planFromHotspotPlan({ dataLimitMb: null, downloadLimit: null, durationMinutes: 240,
+      id: "*P4", name: "4H", priceHint: 200, profileName: "4H", sharedUsers: 1, status: "active", uploadLimit: null,
+      validityMinutes: 240 }, 0) });
+    expect(formValuesToPlanDraft({ ...values, name: "6H" }).profileName).toBe("6H");
+    expect(routerProfileNameForPlan('  Forfait  "VIP"; 1$  ')).toBe("Forfait -VIP-- 1-");
+  });
+
+  it("refuse un nom déjà utilisé par un autre profil du routeur", () => {
+    const plans = [{ id: "a", name: "4H", profileName: "4H" }, { id: "b", name: "Jour", profileName: "jour" }];
+    expect(findPlanProfileConflict("jour", plans, "a")).toBe("Le plan « Jour » utilise déjà ce nom sur le routeur.");
+    expect(findPlanProfileConflict("4H", plans, "a")).toBeNull();
   });
 });

@@ -1,5 +1,5 @@
 import type { AuthSession } from "../../domain/auth";
-import type { HotspotPlanRecord, TicketRecord } from "../../domain/database";
+import type { HotspotPlanHistoryRecord, HotspotPlanRecord, TicketRecord } from "../../domain/database";
 import type { SaasRouterTicketCatalog } from "../../services/saas";
 import { ticketFromRecord } from "./ticketsPageModel";
 import type { ReportTicket } from "./reportPageModel";
@@ -59,7 +59,8 @@ export async function reportRead<T>(signal: AbortSignal, label: string, read: ()
 
 /** No SQLite import is necessary to display an authorized cloud report. */
 export function cloudReportTickets(catalog: SaasRouterTicketCatalog, session: AuthSession,
-  userId: string | undefined, routerId: string, routerName: string, plans: HotspotPlanRecord[]): ReportTicket[] {
+  userId: string | undefined, routerId: string, routerName: string, plans: HotspotPlanRecord[],
+  planHistory: HotspotPlanHistoryRecord[] = []): ReportTicket[] {
   const batches = new Map(catalog.batches.map(batch => [batch.id, batch]));
   const byId = new Map(plans.map(plan => [plan.id, plan]));
   const byProfile = new Map(plans.map(plan => [plan.mikrotik_profile_name, plan]));
@@ -74,8 +75,36 @@ export function cloudReportTickets(catalog: SaasRouterTicketCatalog, session: Au
         created_by_profile_id: remote.created_by_user_id === userId ? session.internal_profile_id
           : `${session.account_id}:cloud-user:${remote.created_by_user_id}`,
         sync_status: "synced" };
+      const historical = batch ? null : planPriceAt(planHistory, plan, plan?.id ?? remote.plan_id, remote.created_at);
       return { ...ticketFromRecord(record, plan, routerName),
-        currency: batch?.currency ?? plan?.currency ?? "CFA", priceHint: batch ? batch.price_snapshot : plan?.price_hint ?? null,
+        currency: batch?.currency ?? historical?.currency ?? "CFA",
+        priceHint: batch ? batch.price_snapshot : historical?.priceHint ?? null,
         printedAt: remote.printed_at ?? [], deletedAt: remote.deleted_at };
     });
+}
+
+export type HistoricalPrice = { currency: string; priceHint: number | null };
+
+/**
+ * Price of a plan when a ticket was created, from the immutable plan history.
+ * Used only when the ticket's batch (and its price snapshot) is unknown, so a
+ * later price change never rewrites past sales. Falls back to the oldest
+ * known revision, then to the current plan.
+ */
+export function planPriceAt(
+  history: HotspotPlanHistoryRecord[],
+  plan: Pick<HotspotPlanRecord, "currency" | "id" | "price_hint"> | null,
+  planId: string,
+  at: string
+): HistoricalPrice {
+  const atMs = Date.parse(at);
+  const revisions = history
+    .filter((entry) => entry.plan_id === planId && entry.action !== "deleted")
+    .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at) || a.revision - b.revision);
+  const before = Number.isFinite(atMs)
+    ? revisions.filter((entry) => Date.parse(entry.created_at) <= atMs)
+    : [];
+  const effective = Number.isFinite(atMs) ? before[before.length - 1] ?? revisions[0] : undefined;
+  if (effective) return { currency: effective.currency || "CFA", priceHint: effective.price_hint };
+  return { currency: plan?.currency || "CFA", priceHint: plan?.price_hint ?? null };
 }

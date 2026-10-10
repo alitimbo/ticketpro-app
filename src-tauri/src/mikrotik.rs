@@ -1,9 +1,12 @@
 use native_tls::{TlsConnector, TlsStream};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Deserialize)]
@@ -67,6 +70,7 @@ pub struct RouterOsNativePerformance {
     connection_count: usize,
     fatal_count: usize,
     retry_count: usize,
+    reused_connection_count: usize,
     trap_count: usize,
 }
 
@@ -147,109 +151,120 @@ fn mikrotik_api_batch_blocking(
 
     let retries = request.retries.unwrap_or(1);
     let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(5000));
-    let mut connected_stream = None;
-    let mut last_error = "router offline".to_string();
+    let key = PoolKey::new(
+        &request.host,
+        request.port,
+        &request.username,
+        &request.password,
+        request.use_ssl,
+    );
     let mut metrics = RouterOsNativePerformance::default();
+    let mut allow_pooled = true;
 
-    // Reconnecting is safe only before the first business command. Once an
-    // add has been sent, the caller reconciles by username instead of
-    // replaying an uncertain command and risking a duplicate voucher.
-    for attempt in 0..=retries {
-        if attempt > 0 {
-            metrics.retry_count += 1;
-        }
-        match open_authenticated_stream(
+    loop {
+        let (mut stream, reused) = match acquire_stream(
+            &key,
             &request.host,
             request.port,
             &request.username,
             &request.password,
             request.use_ssl,
             timeout,
+            retries,
+            allow_pooled,
             &mut metrics,
         ) {
-            Ok(stream) => {
-                connected_stream = Some(stream);
-                break;
+            Ok(acquired) => acquired,
+            Err(last_error) => {
+                return Ok(MikroTikApiBatchResponse {
+                    completed_count: 0,
+                    connection_error: None,
+                    error: Some(last_error),
+                    metrics,
+                    results: Vec::new(),
+                });
             }
-            Err(error) => {
-                last_error = error;
-                if is_non_retryable(&last_error) || attempt == retries {
-                    break;
-                }
-            }
-        }
-    }
+        };
+        let mut results = Vec::with_capacity(request.commands.len());
+        let mut connection_error = None;
 
-    let Some(mut stream) = connected_stream else {
-        return Ok(MikroTikApiBatchResponse {
-            completed_count: 0,
-            connection_error: None,
-            error: Some(last_error),
-            metrics,
-            results: Vec::new(),
-        });
-    };
-    let mut results = Vec::with_capacity(request.commands.len());
-    let mut connection_error = None;
+        for command in &request.commands {
+            let mut words = vec![command.command.clone()];
+            append_api_words(&mut words, "=", command.params.as_ref());
+            append_api_words(&mut words, "?", command.queries.as_ref());
+            let command_started_at = Instant::now();
+            metrics.command_count += 1;
 
-    for command in &request.commands {
-        let mut words = vec![command.command.clone()];
-        append_api_words(&mut words, "=", command.params.as_ref());
-        append_api_words(&mut words, "?", command.queries.as_ref());
-        let command_started_at = Instant::now();
-        metrics.command_count += 1;
-
-        if let Err(error) = send_sentence(&mut stream, &words) {
-            metrics.command_timings.push(RouterOsCommandPerformance {
-                command: command.command.clone(),
-                duration_ms: elapsed_ms(command_started_at),
-                outcome: "connection",
-            });
-            connection_error = Some(error);
-            break;
-        }
-        match read_response_outcome(&mut stream) {
-            Ok(outcome) => {
-                metrics.trap_count += outcome.trap_count;
+            if let Err(error) = send_sentence(&mut stream, &words) {
                 metrics.command_timings.push(RouterOsCommandPerformance {
                     command: command.command.clone(),
                     duration_ms: elapsed_ms(command_started_at),
-                    outcome: if outcome.error.is_some() {
-                        "trap"
-                    } else {
-                        "success"
-                    },
-                });
-                results.push(MikroTikApiBatchItemResult {
-                    error: outcome.error,
-                    rows: outcome.rows,
-                });
-            }
-            Err(error) => {
-                let outcome = if is_fatal_response(&error) {
-                    metrics.fatal_count += 1;
-                    "fatal"
-                } else {
-                    "connection"
-                };
-                metrics.command_timings.push(RouterOsCommandPerformance {
-                    command: command.command.clone(),
-                    duration_ms: elapsed_ms(command_started_at),
-                    outcome,
+                    outcome: "connection",
                 });
                 connection_error = Some(error);
                 break;
             }
+            match read_response_outcome(&mut stream) {
+                Ok(outcome) => {
+                    metrics.trap_count += outcome.trap_count;
+                    metrics.command_timings.push(RouterOsCommandPerformance {
+                        command: command.command.clone(),
+                        duration_ms: elapsed_ms(command_started_at),
+                        outcome: if outcome.error.is_some() {
+                            "trap"
+                        } else {
+                            "success"
+                        },
+                    });
+                    results.push(MikroTikApiBatchItemResult {
+                        error: outcome.error,
+                        rows: outcome.rows,
+                    });
+                }
+                Err(error) => {
+                    let outcome = if is_fatal_response(&error) {
+                        metrics.fatal_count += 1;
+                        "fatal"
+                    } else {
+                        "connection"
+                    };
+                    metrics.command_timings.push(RouterOsCommandPerformance {
+                        command: command.command.clone(),
+                        duration_ms: elapsed_ms(command_started_at),
+                        outcome,
+                    });
+                    connection_error = Some(error);
+                    break;
+                }
+            }
         }
-    }
 
-    Ok(MikroTikApiBatchResponse {
-        completed_count: results.len(),
-        connection_error,
-        error: None,
-        metrics,
-        results,
-    })
+        // A reused connection that the router had already closed fails on the
+        // very first command, before RouterOS executed anything: start again
+        // once on a fresh connection. Reconnecting after a command succeeded
+        // stays forbidden: the caller reconciles by username instead of
+        // replaying an uncertain command and risking a duplicate voucher.
+        if reused && results.is_empty() {
+            if let Some(error) = &connection_error {
+                if is_stale_connection_error(error) {
+                    allow_pooled = false;
+                    metrics.retry_count += 1;
+                    continue;
+                }
+            }
+        }
+
+        if connection_error.is_none() {
+            release_stream(key, stream);
+        }
+        return Ok(MikroTikApiBatchResponse {
+            completed_count: results.len(),
+            connection_error,
+            error: None,
+            metrics,
+            results,
+        });
+    }
 }
 
 fn mikrotik_api_call_blocking(
@@ -258,12 +273,11 @@ fn mikrotik_api_call_blocking(
     let retries = request.retries.unwrap_or(1);
     let mut last_error = "router offline".to_string();
     let mut metrics = RouterOsNativePerformance::default();
+    let mut allow_pooled = true;
+    let mut attempt = 0;
 
-    for attempt in 0..=retries {
-        if attempt > 0 {
-            metrics.retry_count += 1;
-        }
-        match execute_once(&request, &mut metrics) {
+    while attempt <= retries {
+        match execute_once(&request, &mut metrics, allow_pooled) {
             Ok(rows) => {
                 return Ok(MikroTikApiCallResponse {
                     error: None,
@@ -271,12 +285,20 @@ fn mikrotik_api_call_blocking(
                     rows,
                 })
             }
-            Err(error) => {
-                last_error = error;
-
+            Err(failure) => {
+                last_error = failure.error;
+                // A stale pooled connection costs one fresh attempt, not a retry.
+                if failure.reused && is_stale_connection_error(&last_error) {
+                    allow_pooled = false;
+                    metrics.retry_count += 1;
+                    continue;
+                }
                 if is_non_retryable(&last_error) || attempt == retries {
                     break;
                 }
+                allow_pooled = false;
+                attempt += 1;
+                metrics.retry_count += 1;
             }
         }
     }
@@ -354,20 +376,41 @@ fn open_authenticated_stream(
     Ok(stream)
 }
 
+struct ExecuteFailure {
+    error: String,
+    reused: bool,
+}
+
 fn execute_once(
     request: &MikroTikApiRequest,
     metrics: &mut RouterOsNativePerformance,
-) -> Result<Vec<ApiRow>, String> {
+    allow_pooled: bool,
+) -> Result<Vec<ApiRow>, ExecuteFailure> {
     let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(5000));
-    let mut stream = open_authenticated_stream(
+    let key = PoolKey::new(
+        &request.host,
+        request.port,
+        &request.username,
+        &request.password,
+        request.use_ssl,
+    );
+    let (mut stream, reused) = acquire_stream(
+        &key,
         &request.host,
         request.port,
         &request.username,
         &request.password,
         request.use_ssl,
         timeout,
+        0,
+        allow_pooled,
         metrics,
-    )?;
+    )
+    .map_err(|error| ExecuteFailure {
+        error,
+        reused: false,
+    })?;
+    let fail = |error: String| ExecuteFailure { error, reused };
     let mut words = vec![request.command.clone()];
     append_api_words(&mut words, "=", request.params.as_ref());
     append_api_words(&mut words, "?", request.queries.as_ref());
@@ -379,7 +422,7 @@ fn execute_once(
             duration_ms: elapsed_ms(command_started_at),
             outcome: "connection",
         });
-        return Err(error);
+        return Err(fail(error));
     }
     match read_response_outcome(&mut stream) {
         Ok(outcome) => {
@@ -393,8 +436,11 @@ fn execute_once(
                     "success"
                 },
             });
+            // The whole response, trap included, was read up to !done: the
+            // connection is clean and can serve the next command.
+            release_stream(key, stream);
             match outcome.error {
-                Some(error) => Err(error),
+                Some(error) => Err(fail(error)),
                 None => Ok(outcome.rows),
             }
         }
@@ -410,9 +456,151 @@ fn execute_once(
                 duration_ms: elapsed_ms(command_started_at),
                 outcome,
             });
-            Err(error)
+            Err(fail(error))
         }
     }
+}
+
+/// Idle authenticated connections, reused for the same router and account.
+/// RouterOS keeps an API session open while idle; a short lifetime limits the
+/// risk of reusing a connection silently dropped by a NAT or a VPN.
+const POOL_IDLE_TTL: Duration = Duration::from_secs(15);
+const POOL_MAX_IDLE_PER_ENDPOINT: usize = 4;
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct PoolKey {
+    host: String,
+    port: u16,
+    username: String,
+    /// Changing the password never reuses a session opened with the old one.
+    password_digest: u64,
+    use_ssl: bool,
+}
+
+impl PoolKey {
+    fn new(host: &str, port: u16, username: &str, password: &str, use_ssl: bool) -> Self {
+        let mut hasher = DefaultHasher::new();
+        password.hash(&mut hasher);
+        Self {
+            host: host.trim().to_lowercase(),
+            port,
+            username: username.to_string(),
+            password_digest: hasher.finish(),
+            use_ssl,
+        }
+    }
+}
+
+struct IdleConnection {
+    idle_since: Instant,
+    stream: ApiStream,
+}
+
+fn connection_pool() -> &'static Mutex<HashMap<PoolKey, Vec<IdleConnection>>> {
+    static POOL: OnceLock<Mutex<HashMap<PoolKey, Vec<IdleConnection>>>> = OnceLock::new();
+    POOL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+impl ApiStream {
+    fn tcp(&self) -> &TcpStream {
+        match self {
+            Self::Tcp(stream) => stream,
+            Self::Tls(stream) => stream.get_ref(),
+        }
+    }
+}
+
+/// Peer closed or unexpected unread bytes: not reusable.
+fn is_reusable(stream: &ApiStream, timeout: Duration) -> bool {
+    let tcp = stream.tcp();
+    if tcp.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let mut probe = [0u8; 1];
+    let alive = matches!(
+        tcp.peek(&mut probe),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    );
+    tcp.set_nonblocking(false).is_ok()
+        && tcp.set_read_timeout(Some(timeout)).is_ok()
+        && tcp.set_write_timeout(Some(timeout)).is_ok()
+        && alive
+}
+
+fn take_idle_stream(key: &PoolKey, timeout: Duration) -> Option<ApiStream> {
+    let mut pool = connection_pool().lock().ok()?;
+    let idle = pool.get_mut(key)?;
+    while let Some(candidate) = idle.pop() {
+        if candidate.idle_since.elapsed() <= POOL_IDLE_TTL && is_reusable(&candidate.stream, timeout) {
+            return Some(candidate.stream);
+        }
+    }
+    None
+}
+
+fn release_stream(key: PoolKey, stream: ApiStream) {
+    let Ok(mut pool) = connection_pool().lock() else {
+        return;
+    };
+    pool.retain(|_, idle| {
+        idle.retain(|connection| connection.idle_since.elapsed() <= POOL_IDLE_TTL);
+        !idle.is_empty()
+    });
+    let idle = pool.entry(key).or_default();
+    if idle.len() < POOL_MAX_IDLE_PER_ENDPOINT {
+        idle.push(IdleConnection {
+            idle_since: Instant::now(),
+            stream,
+        });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn acquire_stream(
+    key: &PoolKey,
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    use_ssl: bool,
+    timeout: Duration,
+    retries: u8,
+    allow_pooled: bool,
+    metrics: &mut RouterOsNativePerformance,
+) -> Result<(ApiStream, bool), String> {
+    if allow_pooled {
+        if let Some(stream) = take_idle_stream(key, timeout) {
+            metrics.reused_connection_count += 1;
+            return Ok((stream, true));
+        }
+    }
+    let mut last_error = "router offline".to_string();
+    for attempt in 0..=retries {
+        if attempt > 0 {
+            metrics.retry_count += 1;
+        }
+        match open_authenticated_stream(host, port, username, password, use_ssl, timeout, metrics) {
+            Ok(stream) => return Ok((stream, false)),
+            Err(error) => {
+                last_error = error;
+                if is_non_retryable(&last_error) {
+                    break;
+                }
+            }
+        }
+    }
+    Err(last_error)
+}
+
+/// Errors of a connection the router already closed; a timeout is excluded
+/// because the command may have been executed.
+fn is_stale_connection_error(error: &str) -> bool {
+    let normalized = error.to_lowercase();
+    normalized.starts_with("router offline")
+        || normalized.contains("broken pipe")
+        || normalized.contains("connection reset")
+        || normalized.contains("connection aborted")
+        || normalized.contains("unexpected eof")
 }
 
 fn append_api_words(
@@ -731,5 +919,81 @@ mod tests {
             following.rows[0].get("name").map(String::as_str),
             Some("654321")
         );
+    }
+
+    /// Minimal RouterOS API server: answers /login and any command with one
+    /// row, counts accepted connections and can close after N commands.
+    fn spawn_fake_router(
+        close_after_commands: Option<usize>,
+    ) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let counter = connections.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                counter.fetch_add(1, Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    let mut commands = 0;
+                    while let Ok(words) = read_sentence(&mut stream) {
+                        if words.first().map(String::as_str) == Some("/login") {
+                            send_sentence(&mut stream, &["!done".to_string()]).unwrap();
+                            continue;
+                        }
+                        commands += 1;
+                        send_sentence(&mut stream, &["!re".to_string(), "=name=ok".to_string()]).unwrap();
+                        send_sentence(&mut stream, &["!done".to_string()]).unwrap();
+                        if close_after_commands == Some(commands) {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        (port, connections)
+    }
+
+    fn call(port: u16, password: &str) -> MikroTikApiCallResponse {
+        mikrotik_api_call_blocking(MikroTikApiRequest {
+            host: "127.0.0.1".to_string(),
+            port,
+            username: "api".to_string(),
+            password: password.to_string(),
+            use_ssl: false,
+            timeout_ms: Some(2000),
+            retries: Some(0),
+            command: "/system/identity/print".to_string(),
+            params: None,
+            queries: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn reuses_an_authenticated_connection_between_calls() {
+        let (port, connections) = spawn_fake_router(None);
+        for _ in 0..3 {
+            let response = call(port, "secret-a");
+            assert_eq!(response.error, None);
+            assert_eq!(response.rows[0].get("name").map(String::as_str), Some("ok"));
+        }
+        assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // Other credentials never reuse that session.
+        assert_eq!(call(port, "secret-b").error, None);
+        assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn reconnects_transparently_when_the_router_closed_the_idle_connection() {
+        let (port, connections) = spawn_fake_router(Some(1));
+        assert_eq!(call(port, "secret").error, None);
+        std::thread::sleep(Duration::from_millis(100));
+        let second = call(port, "secret");
+        assert_eq!(second.error, None);
+        assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }

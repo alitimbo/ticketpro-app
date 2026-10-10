@@ -426,6 +426,12 @@ export function formatDataLimit(megabytes: number | null): string {
   return `${megabytes} MB`;
 }
 
+/** A missing remaining volume is "Illimité" only when the voucher has no quota. */
+export function formatRemainingData(ticket: Pick<TicketListItem, "dataLimitMb" | "dataRemainingBytes">): string {
+  if (ticket.dataRemainingBytes !== null) return formatBytes(ticket.dataRemainingBytes);
+  return ticket.dataLimitMb === null ? "Illimité" : "Non disponible";
+}
+
 export function formatBytes(bytes: number): string {
   if (bytes <= 0) {
     return "0 MB";
