@@ -12,6 +12,8 @@ export type VoucherBindingConflict = {
 
 export type VoucherBindingResult = {
   boundUsernames: string[];
+  /** RouterOS users re-read after a successful MAC write. */
+  verifiedUsers: HotspotUser[];
   conflicts: VoucherBindingConflict[];
   errors: Array<{ message: string; username: string }>;
 };
@@ -29,6 +31,7 @@ export class VoucherDeviceBindingService {
   }): Promise<VoucherBindingResult> {
     const result: VoucherBindingResult = {
       boundUsernames: [],
+      verifiedUsers: [],
       conflicts: [],
       errors: []
     };
@@ -84,10 +87,18 @@ export class VoucherDeviceBindingService {
 
       try {
         if (routerMac !== observedMac) {
-          await input.routerService.bindHotspotUserToMac(
+          // Only a RouterOS read-back proves the lock is applied.
+          const verified = await input.routerService.bindHotspotUserToMac(
             activeUser.username,
             observedMac
           );
+          const verifiedMac = isMacAddress(verified?.macAddress ?? "")
+            ? normalizeMacAddress(verified?.macAddress ?? "")
+            : null;
+          if (verifiedMac !== observedMac) {
+            throw new Error("RouterOS n'a pas conservé l'adresse MAC du voucher.");
+          }
+          result.verifiedUsers.push(verified);
         }
         await this.tickets.update({
           ...ticket,

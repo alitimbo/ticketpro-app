@@ -94,6 +94,7 @@ export function ReportPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [liveStatus, setLiveStatus] = useState<ReportLiveStatus>(isPersistent ? "connecting" : "offline");
   const [lastLiveSyncAt, setLastLiveSyncAt] = useState<string | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
   const [routerOnlyCount, setRouterOnlyCount] = useState(0);
   const [loadedScope, setLoadedScope] = useState("");
@@ -137,9 +138,21 @@ export function ReportPage() {
     activeRead.current = controller;
     const current = () => activeRead.current === controller && !controller.signal.aborted;
     const read = <T,>(label: string, work: () => Promise<T>) => reportRead(controller.signal, label, work);
+    // A report already on screen is replaced only once per cycle, by a
+    // complete result (local + shared catalogue + RouterOS). Intermediate
+    // stages are shown only when nothing is displayed yet.
+    const hasDisplayedReport = latestTickets.current.length > 0;
+    let stagedTickets: ReportTicket[] | null = null;
+    const publishStage = (next: ReportTicket[]) => {
+      stagedTickets = next;
+      if (!hasDisplayedReport) setTickets(next);
+    };
     if (!options.silent) setIsLoading(true);
-    setLiveStatus("connecting");
-    setLiveError(null);
+    setIsRefreshing(true);
+    if (!hasDisplayedReport) {
+      setLiveStatus("connecting");
+      setLiveError(null);
+    }
     if (!options.silent) {
       setMessage(null);
       setMessageIsError(false);
@@ -211,7 +224,7 @@ export function ReportPage() {
       if (latestTickets.current.length > 0) {
         reportTickets = mergeReportTickets(latestTickets.current, reportTickets);
       }
-      setTickets(reportTickets);
+      publishStage(reportTickets);
       setIsLoading(false);
 
       const cloudController = new AbortController();
@@ -234,7 +247,7 @@ export function ReportPage() {
         const shared = cloudReportTickets(catalog, session, saasAccount?.user.id, routerId, router.name, plans, planHistory);
         sharedCatalog = catalog;
         reportTickets = mergeReportTickets(reportTickets, shared);
-        setTickets(reportTickets);
+        publishStage(reportTickets);
       } catch (error) {
         if (!current()) return;
         if (error instanceof SaasRequestError && [401, 403, 404].includes(error.status)) {
@@ -329,6 +342,9 @@ export function ReportPage() {
     } catch (error) {
       if (!current()) return;
       const errorMessage = error instanceof Error ? error.message : "Le routeur ne répond pas.";
+      // RouterOS failed: keep the report already displayed. When nothing was
+      // displayed, the local/shared snapshot is shown, flagged as degraded.
+      if (!hasDisplayedReport && stagedTickets) setTickets(stagedTickets);
       setLiveStatus("degraded");
       setLiveError(errorMessage);
       if (!options.silent) {
@@ -339,6 +355,7 @@ export function ReportPage() {
       if (current()) {
         activeRead.current = null;
         setIsLoading(false);
+        setIsRefreshing(false);
       }
       controller.abort();
     }
@@ -429,8 +446,8 @@ export function ReportPage() {
               Exporter CSV
             </Button>
             <Button
-              className={liveStatus === "connecting" ? "button--loading" : ""}
-              disabled={isLoading || liveStatus === "connecting"}
+              className={isRefreshing ? "button--loading" : ""}
+              disabled={isLoading || isRefreshing}
               icon={RefreshCw}
               onClick={() => void loadReport()}
             >
@@ -453,7 +470,10 @@ export function ReportPage() {
               <strong>Données RouterOS en direct</strong>
               <Badge status={reportLiveBadgeStatus(liveStatus)}>{reportLiveStatusLabel(liveStatus)}</Badge>
             </div>
-            <span>{reportLiveDescription(liveStatus, lastLiveSyncAt, liveError)}</span>
+            <span>
+              {reportLiveDescription(liveStatus, lastLiveSyncAt, liveError)}
+              {isRefreshing && liveStatus !== "connecting" ? " Actualisation en cours : les chiffres affichés restent ceux de la dernière lecture complète." : ""}
+            </span>
           </div>
           <div className="report-live-status__facts">
             <span>Actualisation</span>

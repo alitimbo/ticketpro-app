@@ -15,17 +15,34 @@ export type ConnectedClientFilters = {
   planId: string;
 };
 
+/**
+ * Origin of the data quota shown for a client.
+ * - limited: a positive limit-bytes-total was read (RouterOS live, or the
+ *   TicketPro voucher snapshot when only the local cache is available).
+ * - unlimited: the RouterOS user was read, has no limit-bytes-total and its
+ *   plan does not declare a quota either.
+ * - missing_on_router: the RouterOS user was read without limit-bytes-total
+ *   while its plan declares a quota. RouterOS does not limit this voucher.
+ * - unavailable: the voucher could not be read (unknown user, cache without
+ *   snapshot). Never presented as unlimited.
+ */
+export type ClientDataQuotaState = "limited" | "unlimited" | "missing_on_router" | "unavailable";
+
 export type ConnectedClientViewModel = {
   consumptionPercent: number | null;
   currentSessionUptime: string;
   dataLimitBytes: number | null;
+  dataQuotaState: ClientDataQuotaState;
   dataRemainingBytes: number | null;
+  planDataLimitBytes: number | null;
   downloadLimit: string | null;
   downloadedBytes: number;
   expiresAt: string | null;
   id: string;
   ipAddress: string;
   macAddress: string;
+  /** Device lock read on RouterOS (/ip hotspot user mac-address). */
+  deviceLock: ClientDeviceLock;
   planId: string | null;
   planName: string;
   profileName: string | null;
@@ -42,6 +59,36 @@ export type ConnectedClientViewModel = {
   uptimeMinutes: number;
   username: string;
 };
+
+/**
+ * - locked: the RouterOS user carries the MAC of this session; RouterOS refuses
+ *   the voucher from any other device.
+ * - mismatch: the RouterOS user carries another MAC than this session.
+ * - unlocked: the RouterOS user has no MAC; any device can use the voucher.
+ * - not_voucher: no TicketPro voucher on RouterOS for this session (other
+ *   hotspot account, trial, bypass…); the first-device rule does not apply.
+ * - unverified: only the local cache is available.
+ */
+export type ClientDeviceLockState = "locked" | "mismatch" | "unlocked" | "not_voucher" | "unverified";
+
+export type ClientDeviceLock = {
+  lockedMacAddress: string | null;
+  state: ClientDeviceLockState;
+};
+
+export type DeviceLockSummary = {
+  /** Unique TicketPro vouchers among the listed sessions. */
+  concernedVouchers: number;
+  lockedVouchers: number;
+  mismatchVouchers: number;
+  /** Listed sessions that are not TicketPro vouchers. */
+  outsideSessions: number;
+  sessions: number;
+  unlockedVouchers: number;
+  unverifiedVouchers: number;
+};
+
+const ticketProVoucherCommentPrefix = "TicketPro:v1;";
 
 export type ConnectedClientPlanOption = {
   id: string;
@@ -60,7 +107,16 @@ export function buildConnectedClientViewModels(
   activeUsers: ActiveHotspotUser[],
   hotspotUsers: HotspotUser[],
   plans: HotspotPlan[],
-  router: { id: string; name: string }
+  router: { id: string; name: string },
+  /**
+   * TicketPro plan names keyed by their current RouterOS profile name. The
+   * RouterOS profile name is a technical reference: renaming a plan in
+   * TicketPro does not rename its profile, so the display name comes from
+   * the local plan whenever one points at the voucher's current profile.
+   */
+  localPlanNamesByProfile?: ReadonlyMap<string, string>,
+  /** Usernames of the TicketPro vouchers stored locally for this router. */
+  managedVoucherUsernames?: ReadonlySet<string>
 ): ConnectedClientViewModel[] {
   const ticketsByUsername = new Map(hotspotUsers.map((user) => [user.username, user]));
 
@@ -84,11 +140,24 @@ export function buildConnectedClientViewModels(
     const downloadedBytes = Math.max(activeUser.downloadedBytes, ticket?.downloadedBytes ?? 0);
     const uploadedBytes = Math.max(activeUser.uploadedBytes, ticket?.uploadedBytes ?? 0);
     const totalBytes = downloadedBytes + uploadedBytes;
-    const dataLimitBytes = resolveDataLimitBytes(ticket?.limitBytesTotal, plan?.dataLimitMb);
+    // RouterOS enforces limit-bytes-total on the hotspot user itself; the plan
+    // only tells what TicketPro intended. Never fall back to "unlimited" when
+    // the voucher was not read.
+    const routerLimitBytes = ticket?.limitBytesTotal && ticket.limitBytesTotal > 0 ? ticket.limitBytesTotal : null;
+    const planDataLimitBytes = resolveDataLimitBytes(undefined, plan?.dataLimitMb);
+    const dataQuotaState: ClientDataQuotaState = !ticket
+      ? "unavailable"
+      : routerLimitBytes !== null
+        ? "limited"
+        : planDataLimitBytes !== null
+          ? "missing_on_router"
+          : "unlimited";
+    const dataLimitBytes = routerLimitBytes;
     const expiresAt = lifecycleExpirationIso(ticket?.comment);
     const timeConsumed = durationLimitSeconds > 0 && uptimeSeconds >= durationLimitSeconds;
     const quotaConsumed = dataLimitBytes !== null && totalBytes >= dataLimitBytes;
     const validityExpired = expiresAt !== null && Date.parse(expiresAt) <= Date.now();
+    const deviceLock = resolveDeviceLock(ticket, activeUser.macAddress, managedVoucherUsernames);
 
     return {
       consumptionPercent: calculateConsumptionPercent(
@@ -99,15 +168,19 @@ export function buildConnectedClientViewModels(
       ),
       currentSessionUptime: activeUser.uptime,
       dataLimitBytes,
+      dataQuotaState,
       dataRemainingBytes: dataLimitBytes === null ? null : Math.max(0, dataLimitBytes - totalBytes),
+      planDataLimitBytes,
       downloadLimit: plan?.downloadLimit ?? null,
       downloadedBytes,
       expiresAt,
       id: activeUser.id,
       ipAddress: activeUser.ipAddress,
       macAddress: activeUser.macAddress,
+      deviceLock,
       planId: plan?.id ?? ticket?.planId ?? null,
-      planName: plan?.name ?? ticket?.profileName ?? ticket?.planId ?? "Plan non identifié",
+      planName: (ticket?.profileName ? localPlanNamesByProfile?.get(ticket.profileName) : undefined)
+        ?? plan?.name ?? ticket?.profileName ?? ticket?.planId ?? "Plan non identifié",
       profileName: ticket?.profileName ?? plan?.profileName ?? null,
       routerId: router.id,
       routerName: router.name,
@@ -160,9 +233,10 @@ export function buildCachedConnectedClientViewModels(
     );
     const durationLimitSeconds = Math.max(0, (ticket?.duration_minutes_snapshot ?? plan?.duration_minutes ?? 0) * 60);
     const totalBytes = downloadedBytes + uploadedBytes;
-    const dataLimitBytes = ticket?.data_limit_mb_snapshot !== undefined
-      ? resolveDataLimitBytes(undefined, ticket.data_limit_mb_snapshot)
-      : resolveDataLimitBytes(undefined, plan?.data_limit_mb);
+    // The cache cannot confirm the absence of a quota: only a positive
+    // voucher snapshot is shown, anything else stays "unavailable".
+    const dataLimitBytes = ticket ? resolveDataLimitBytes(undefined, ticket.data_limit_mb_snapshot) : null;
+    const dataQuotaState: ClientDataQuotaState = dataLimitBytes === null ? "unavailable" : "limited";
 
     return {
       consumptionPercent: calculateConsumptionPercent(
@@ -173,14 +247,24 @@ export function buildCachedConnectedClientViewModels(
       ),
       currentSessionUptime: cachedUser.uptime ?? "0s",
       dataLimitBytes,
-      dataRemainingBytes: ticket?.data_remaining_bytes
-        ?? (dataLimitBytes === null ? null : Math.max(0, dataLimitBytes - totalBytes)),
+      dataQuotaState,
+      dataRemainingBytes: dataLimitBytes === null
+        ? null
+        : Math.min(
+            ticket?.data_remaining_bytes ?? Number.POSITIVE_INFINITY,
+            Math.max(0, dataLimitBytes - totalBytes)
+          ),
+      planDataLimitBytes: resolveDataLimitBytes(undefined, ticket?.data_limit_mb_snapshot ?? plan?.data_limit_mb),
       downloadLimit: ticket?.download_limit_snapshot ?? plan?.download_limit ?? null,
       downloadedBytes,
       expiresAt: ticket?.expires_at ?? null,
       id: cachedUser.id,
       ipAddress: cachedUser.ip_address ?? "",
       macAddress: cachedUser.mac_address ?? "",
+      deviceLock: {
+        lockedMacAddress: ticket?.mac_address ?? null,
+        state: ticket ? "unverified" : "not_voucher"
+      },
       planId: plan?.id ?? ticket?.plan_id ?? null,
       planName: plan?.name ?? ticket?.plan_id ?? "Plan non identifié",
       profileName: ticket?.mikrotik_profile_name ?? plan?.mikrotik_profile_name ?? null,
@@ -268,6 +352,90 @@ export function getConnectedClientPlanOptions(
     .sort((left, right) => left.name.localeCompare(right.name, "fr"));
 }
 
+/**
+ * Counts unique vouchers (not sessions) so a voucher shared by two sessions is
+ * counted once, and sessions outside TicketPro vouchers are reported apart.
+ */
+export function summarizeDeviceLocks(clients: ConnectedClientViewModel[]): DeviceLockSummary {
+  const byVoucher = new Map<string, ClientDeviceLockState>();
+  const rank: Record<ClientDeviceLockState, number> = { mismatch: 4, unlocked: 3, unverified: 2, locked: 1, not_voucher: 0 };
+  let outsideSessions = 0;
+  for (const client of clients) {
+    if (client.deviceLock.state === "not_voucher") {
+      outsideSessions += 1;
+      continue;
+    }
+    const current = byVoucher.get(client.username);
+    // A voucher with one locked session and one foreign session is not safe.
+    if (!current || rank[client.deviceLock.state] > rank[current]) {
+      byVoucher.set(client.username, client.deviceLock.state);
+    }
+  }
+  const states = Array.from(byVoucher.values());
+  const count = (state: ClientDeviceLockState) => states.filter((item) => item === state).length;
+  return {
+    concernedVouchers: byVoucher.size,
+    lockedVouchers: count("locked"),
+    mismatchVouchers: count("mismatch"),
+    outsideSessions,
+    sessions: clients.length,
+    unlockedVouchers: count("unlocked"),
+    unverifiedVouchers: count("unverified")
+  };
+}
+
+export function formatDeviceLockSummary(summary: DeviceLockSummary): string {
+  const parts = [
+    `${summary.lockedVouchers} ticket(s) verrouillé(s) sur ${summary.concernedVouchers} ticket(s) TicketPro concerné(s)`
+  ];
+  if (summary.unlockedVouchers > 0) parts.push(`${summary.unlockedVouchers} non verrouillé(s)`);
+  if (summary.mismatchVouchers > 0) parts.push(`${summary.mismatchVouchers} appareil(s) différent(s) du verrou`);
+  if (summary.unverifiedVouchers > 0) parts.push(`${summary.unverifiedVouchers} non vérifié(s) (cache)`);
+  if (summary.outsideSessions > 0) parts.push(`${summary.outsideSessions} session(s) hors vouchers TicketPro`);
+  return `${parts.join(" · ")} — ${summary.sessions} session(s) affichée(s).`;
+}
+
+export function deviceLockLabel(lock: ClientDeviceLock): string {
+  switch (lock.state) {
+    case "locked":
+      return `Verrouillé sur ${lock.lockedMacAddress}`;
+    case "mismatch":
+      return `Verrou sur un autre appareil (${lock.lockedMacAddress})`;
+    case "unlocked":
+      return "Non verrouillé sur RouterOS";
+    case "unverified":
+      return lock.lockedMacAddress ? `Non vérifié (cache : ${lock.lockedMacAddress})` : "Non vérifié (cache)";
+    default:
+      return "Non concerné (hors voucher TicketPro)";
+  }
+}
+
+function resolveDeviceLock(
+  user: HotspotUser | undefined,
+  sessionMacAddress: string,
+  managedVoucherUsernames: ReadonlySet<string> | undefined
+): ClientDeviceLock {
+  const isTicketProVoucher = Boolean(user) && (
+    (user?.comment ?? "").startsWith(ticketProVoucherCommentPrefix)
+    || (managedVoucherUsernames?.has(user?.username ?? "") ?? false)
+  );
+  if (!user || !isTicketProVoucher) {
+    return { lockedMacAddress: user?.macAddress ?? null, state: "not_voucher" };
+  }
+  const lockedMacAddress = user.macAddress && user.macAddress !== "00:00:00:00:00:00"
+    ? normalizeMac(user.macAddress)
+    : null;
+  if (!lockedMacAddress) return { lockedMacAddress: null, state: "unlocked" };
+  return {
+    lockedMacAddress,
+    state: lockedMacAddress === normalizeMac(sessionMacAddress) ? "locked" : "mismatch"
+  };
+}
+
+function normalizeMac(value: string): string {
+  return value.trim().replace(/-/g, ":").toUpperCase();
+}
+
 export function formatClientBytes(bytes: number): string {
   if (bytes <= 0) {
     return "0 o";
@@ -283,6 +451,27 @@ export function formatClientBytes(bytes: number): string {
   }
 
   return `${Math.round(megabytes)} MB`;
+}
+
+export function describeClientDataQuota(
+  client: Pick<ConnectedClientViewModel, "dataLimitBytes" | "dataQuotaState" | "dataRemainingBytes" | "planDataLimitBytes">
+): { remaining: string; total: string } {
+  switch (client.dataQuotaState) {
+    case "limited":
+      return {
+        remaining: formatClientBytes(client.dataRemainingBytes ?? 0),
+        total: formatClientBytes(client.dataLimitBytes ?? 0)
+      };
+    case "unlimited":
+      return { remaining: "Illimité", total: "Illimité" };
+    case "missing_on_router":
+      return {
+        remaining: "Non limité par le routeur",
+        total: `Aucun quota sur le routeur (plan : ${formatClientBytes(client.planDataLimitBytes ?? 0)})`
+      };
+    default:
+      return { remaining: "Non disponible", total: "Non disponible" };
+  }
 }
 
 export function parseClientDurationToSeconds(value: string | null | undefined): number {
@@ -358,4 +547,48 @@ function ticketStatusFromRecord(
 
 function normalize(value: string): string {
   return value.trim().toUpperCase();
+}
+
+export type VoucherQuotaRepairCandidate = {
+  /** Already consumed at least the quota: RouterOS will cut it at once. */
+  exceedsQuota: boolean;
+  isConnected: boolean;
+  limitBytesTotal: number;
+  planName: string;
+  usedBytes: number;
+  username: string;
+};
+
+/**
+ * RouterOS vouchers whose TicketPro plan declares a quota but which carry no
+ * limit-bytes-total. Matching is done on the voucher's current RouterOS
+ * profile; plans without quota and vouchers outside TicketPro plans are left
+ * untouched.
+ */
+export function findVouchersMissingQuota(
+  routerUsers: HotspotUser[],
+  plans: Array<Pick<HotspotPlanRecord, "data_limit_mb" | "deleted_at" | "mikrotik_profile_name" | "name">>,
+  activeUsernames: ReadonlySet<string>
+): VoucherQuotaRepairCandidate[] {
+  const planByProfile = new Map(
+    plans
+      .filter((plan) => !plan.deleted_at && plan.mikrotik_profile_name && plan.data_limit_mb && plan.data_limit_mb > 0)
+      .map((plan) => [plan.mikrotik_profile_name as string, plan])
+  );
+  return routerUsers.flatMap((user) => {
+    if (user.limitBytesTotal && user.limitBytesTotal > 0) return [];
+    const plan = planByProfile.get(user.profileName);
+    if (!plan) return [];
+    const limitBytesTotal = resolveDataLimitBytes(undefined, plan.data_limit_mb);
+    if (limitBytesTotal === null) return [];
+    const usedBytes = (user.downloadedBytes ?? 0) + (user.uploadedBytes ?? 0);
+    return [{
+      exceedsQuota: usedBytes >= limitBytesTotal,
+      isConnected: activeUsernames.has(user.username),
+      limitBytesTotal,
+      planName: plan.name,
+      usedBytes,
+      username: user.username
+    }];
+  });
 }
