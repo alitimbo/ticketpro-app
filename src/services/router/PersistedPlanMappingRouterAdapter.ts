@@ -87,6 +87,13 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
       : this.delegate.listHotspotUsers();
   }
 
+  setHotspotUserQuota(username: string, limitBytesTotal: number) {
+    if (!this.delegate.setHotspotUserQuota) {
+      return Promise.reject(new Error("Correction de quota indisponible."));
+    }
+    return this.delegate.setHotspotUserQuota(username, limitBytesTotal);
+  }
+
   listHotspotUsersByUsernames(usernames: string[]) {
     if (this.delegate.listHotspotUsersByUsernames) {
       return this.delegate.listHotspotUsersByUsernames(usernames);

@@ -1895,6 +1895,46 @@ describe("MikroTikRouterAdapter", () => {
   });
 });
 
+describe("MikroTikRouterAdapter.setHotspotUserQuota", () => {
+  it("écrit seulement limit-bytes-total puis le confirme par relecture, sans remise à zéro", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/user/print": [{ ".id": "*U1", name: "V1", profile: "6H-2G", "bytes-in": "10", "bytes-out": "20" }]
+    });
+    await expect(createAdapter(transport).setHotspotUserQuota("V1", 2147483648)).resolves.toMatchObject({ limitBytesTotal: 2147483648 });
+    const set = transport.calls.find((call) => call.command === "/ip/hotspot/user/set");
+    expect(set?.params).toEqual({ "limit-bytes-total": 2147483648, numbers: "*U1" });
+    expect(transport.calls.every((call) => !call.command.includes("reset-counters"))).toBe(true);
+  });
+});
+
+describe("MikroTikRouterAdapter.updateHotspotPlan — confirmation RouterOS", () => {
+  const draft = { dataLimitMb: null, downloadLimit: null, uploadLimit: null, durationMinutes: 240, validityMinutes: 240, name: "6H", profileName: "6H", sharedUsers: 1, priceHint: null };
+
+  it("confirme un renommage de profil relu sur RouterOS", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/hotspot/user/profile/print": [{ ".id": "*P1", name: "4H", "session-timeout": "4h" }]
+    });
+    await expect(createAdapter(transport).updateHotspotPlan("4H", draft)).resolves.toMatchObject({ id: "*P1", profileName: "6H" });
+  });
+
+  it("refuse de confirmer une modification que RouterOS n'a pas conservée", async () => {
+    class IgnoringRenameTransport extends MockRouterOsTransport {
+      async call(request: RouterOsApiRequest): Promise<RouterOsApiRow[]> {
+        if (request.command === "/ip/hotspot/user/profile/set") {
+          const params = { ...request.params };
+          delete params.name;
+          return super.call({ ...request, params });
+        }
+        return super.call(request);
+      }
+    }
+    const transport = new IgnoringRenameTransport({
+      "/ip/hotspot/user/profile/print": [{ ".id": "*P1", name: "4H", "session-timeout": "4h" }]
+    });
+    await expect(createAdapter(transport).updateHotspotPlan("4H", draft)).rejects.toThrow("RouterOS n'a pas confirmé la modification du profil.");
+  });
+});
+
 describe("verrouillage MAC appliqué par RouterOS", () => {
   class ScriptTransport extends MockRouterOsTransport {
     async call(request: RouterOsApiRequest): Promise<RouterOsApiRow[]> {
