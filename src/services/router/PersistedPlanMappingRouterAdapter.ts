@@ -87,6 +87,7 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
       : this.delegate.listHotspotUsers();
   }
 
+<<<<<<< HEAD
   listHotspotUsersByUsernames(usernames: string[]) {
     if (this.delegate.listHotspotUsersByUsernames) {
       return this.delegate.listHotspotUsersByUsernames(usernames);
@@ -95,6 +96,13 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
     return this.listHotspotUsersForVerification().then((users) =>
       users.filter((user) => requested.has(user.username))
     );
+=======
+  configureVoucherFirstMacLock(enabled: boolean, managedProfileNames: string[]) {
+    if (!this.delegate.configureVoucherFirstMacLock) {
+      return Promise.reject(new Error("Verrouillage MAC automatique indisponible."));
+    }
+    return this.delegate.configureVoucherFirstMacLock(enabled, managedProfileNames);
+>>>>>>> origin/main
   }
 
   listHotspotUsernames() {

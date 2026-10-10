@@ -194,6 +194,7 @@ export class RouterService {
     );
   }
 
+<<<<<<< HEAD
   listHotspotUsersByUsernames(usernames: string[]) {
     return this.run("listHotspotUsersByUsernames", async () => {
       if (usernames.length === 0) return [];
@@ -206,6 +207,15 @@ export class RouterService {
         : await this.adapter.listHotspotUsers();
       return users.filter((user) => requested.has(user.username));
     });
+=======
+  configureVoucherFirstMacLock(enabled: boolean, managedProfileNames: string[]) {
+    return this.run("configureVoucherFirstMacLock", async () => {
+      if (!this.adapter.configureVoucherFirstMacLock) {
+        throw new RouterServiceError("router_rejected", "Ce routeur ne permet pas le verrouillage MAC automatique.");
+      }
+      return this.adapter.configureVoucherFirstMacLock(enabled, managedProfileNames);
+    }, "router.settings.manage");
+>>>>>>> origin/main
   }
 
   listHotspotUsernames() {

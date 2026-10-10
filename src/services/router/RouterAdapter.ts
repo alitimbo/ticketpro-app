@@ -66,8 +66,15 @@ export interface RouterAdapter {
   listHotspotUsers(): Promise<HotspotUser[]>;
   listTicketProManagedVoucherUsernames?(): Promise<string[]>;
   listHotspotUsersForVerification?(): Promise<HotspotUser[]>;
+<<<<<<< HEAD
   /** Reads only the named users, without passwords. */
   listHotspotUsersByUsernames?(usernames: string[]): Promise<HotspotUser[]>;
+=======
+  configureVoucherFirstMacLock?(
+    enabled: boolean,
+    managedProfileNames: string[]
+  ): Promise<import("../../domain/router").VoucherFirstMacLockState>;
+>>>>>>> origin/main
   listHotspotUsernames?(): Promise<Array<{ username: string }>>;
   findHotspotUser(username: string): Promise<HotspotUser | null>;
   updateHotspotUser(username: string, planId: string, limits?: HotspotUserLimits): Promise<HotspotUser>;
