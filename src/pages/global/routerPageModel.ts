@@ -502,3 +502,71 @@ export function isValidHotspotDnsName(value: string): boolean {
       /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)
     );
 }
+
+/**
+ * Availability confirmed by a RouterOS test during this application session.
+ * The status stored in SQLite is history, never a confirmation.
+ */
+export type RouterLiveAvailability = {
+  checkedAt: number;
+  state: "online" | "degraded" | "offline" | "attention";
+};
+
+export type RouterAvailabilityDisplay = {
+  dot: "active" | "warning" | "offline" | "checking";
+  label: string;
+  title: string;
+};
+
+/** Healthy routers are re-checked every minute; others sooner. */
+export const routerHealthOnlineIntervalMs = 60_000;
+export const routerHealthRetryIntervalMs = 15_000;
+/** Beyond this age an "online" confirmation is no longer shown as online. */
+export const routerAvailabilityMaxAgeMs = routerHealthOnlineIntervalMs * 2 + routerHealthRetryIntervalMs;
+
+export function routerAvailabilityFromTest(
+  status: RouterConnectionTestStatus,
+  readFailed: boolean
+): RouterLiveAvailability["state"] {
+  if (status === "connected") return readFailed ? "degraded" : "online";
+  if (status === "offline" || status === "timeout" || status === "remote_unavailable") return "offline";
+  return "attention";
+}
+
+export function describeRouterAvailability(
+  availability: RouterLiveAvailability | undefined,
+  lastSeenAt: string,
+  now = Date.now()
+): RouterAvailabilityDisplay {
+  const lastConfirmed = lastSeenAt && lastSeenAt !== "Jamais" ? `Dernière connexion confirmée : ${lastSeenAt}` : "Jamais connecté";
+  if (!availability) {
+    return { dot: "checking", label: "Connexion en cours", title: `Vérification en cours. ${lastConfirmed}` };
+  }
+  const checkedAt = formatAvailabilityTime(availability.checkedAt);
+  if (availability.state === "online" && now - availability.checkedAt > routerAvailabilityMaxAgeMs) {
+    return { dot: "warning", label: "Données non actualisées", title: `En ligne lors de la dernière vérification (${checkedAt}).` };
+  }
+  switch (availability.state) {
+    case "online":
+      return { dot: "active", label: "En ligne", title: `Connexion RouterOS confirmée à ${checkedAt}.` };
+    case "degraded":
+      return { dot: "warning", label: "Données non actualisées", title: `Routeur joignable à ${checkedAt}, mais la lecture de ses informations a échoué.` };
+    case "offline":
+      return { dot: "offline", label: "Hors ligne", title: `Injoignable à ${checkedAt}. ${lastConfirmed}` };
+    default:
+      return { dot: "warning", label: "À vérifier", title: `Joignable mais refusé à ${checkedAt} (identifiants, API ou droits).` };
+  }
+}
+
+export function nextRouterHealthCheckDelayMs(
+  routerIds: string[],
+  availability: Record<string, RouterLiveAvailability | undefined>
+): number {
+  return routerIds.every((id) => availability[id]?.state === "online")
+    ? routerHealthOnlineIntervalMs
+    : routerHealthRetryIntervalMs;
+}
+
+function formatAvailabilityTime(timestamp: number): string {
+  return new Intl.DateTimeFormat("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date(timestamp));
+}

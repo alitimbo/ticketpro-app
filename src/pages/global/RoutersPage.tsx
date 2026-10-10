@@ -43,6 +43,7 @@ import {
 import {
   createRouterFromForm,
   demoRouters,
+  describeRouterAvailability,
   emptyRouterFormValues,
   filterRouters,
   formValuesFromRouter,
@@ -51,7 +52,9 @@ import {
   isRemoteConnectionMode,
   listRoutersForAccount,
   mapRouterErrorToTestStatus,
+  nextRouterHealthCheckDelayMs,
   normalizeHotspotDnsName,
+  routerAvailabilityFromTest,
   routerPageScopeKey,
   routerCardFromRecord,
   routerConnectionInputsFromCard,
@@ -59,8 +62,10 @@ import {
   remoteVpnPathForRouter,
   routerTestMessage,
   shouldPauseRouterStatusRefresh,
+  type RouterAvailabilityDisplay,
   type RouterCardData,
   type RouterConnectionTestStatus,
+  type RouterLiveAvailability,
   type RouterFilter,
   type RouterFormValues
 } from "./routerPageModel";
@@ -113,6 +118,9 @@ export function RoutersPage() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteProgress, setDeleteProgress] = useState<string | null>(null);
   const [connectingRouterIds, setConnectingRouterIds] = useState<Set<string>>(() => new Set());
+  const [availability, setAvailability] = useState<Record<string, RouterLiveAvailability>>({});
+  const availabilityRef = useRef<Record<string, RouterLiveAvailability>>({});
+  const [availabilityClock, setAvailabilityClock] = useState(() => Date.now());
   const connectionAttemptsRef = useRef<Set<string>>(new Set());
   const routersForHealthCheckRef = useRef<RouterCardData[]>([]);
   const currentScopeKey = routerPageScopeKey(accountId, organizationId);
@@ -410,6 +418,12 @@ export function RoutersPage() {
         }
       }
 
+      const nextAvailability: RouterLiveAvailability = {
+        checkedAt: Date.now(),
+        state: routerAvailabilityFromTest(result.status, result.readFailed)
+      };
+      availabilityRef.current = { ...availabilityRef.current, [router.id]: nextAvailability };
+      setAvailability(availabilityRef.current);
       setRouters((current) =>
         current.map((item) => (item.id === router.id
           ? applyTestResult(
@@ -772,7 +786,7 @@ export function RoutersPage() {
     remoteUseSsl: boolean;
     statusHint?: RouterCardData["status"];
     username: string;
-  }): Promise<{ message: string; status: RouterConnectionTestStatus; systemInfo: RouterSystemInfo | null }> => {
+  }): Promise<{ message: string; readFailed: boolean; status: RouterConnectionTestStatus; systemInfo: RouterSystemInfo | null }> => {
     const targetHost = isRemoteConnectionMode(mode) ? remoteHost : ipAddress;
     let resolvedPassword = password;
     if (!resolvedPassword.trim() && encryptedPassword) {
@@ -781,6 +795,7 @@ export function RoutersPage() {
       } catch {
         return {
           message: "Le mot de passe enregistré ne peut pas être déchiffré. Saisissez-le à nouveau.",
+          readFailed: false,
           status: "authentication_failed",
           systemInfo: null
         };
@@ -816,34 +831,67 @@ export function RoutersPage() {
 
     try {
       await service.testConnection();
-      const systemInfo = await service.getSystemInfo();
-      return { message: routerTestMessage("connected"), status: "connected", systemInfo };
     } catch (error) {
       const status = error instanceof RouterServiceError ? mapRouterErrorToTestStatus(error.code) : "timeout";
-      return { message: routerTestMessage(status), status, systemInfo: null };
+      return { message: routerTestMessage(status), readFailed: false, status, systemInfo: null };
+    }
+    // A reachable router whose information cannot be read stays reachable:
+    // availability and data freshness are reported separately.
+    try {
+      const systemInfo = await service.getSystemInfo();
+      return { message: routerTestMessage("connected"), readFailed: false, status: "connected", systemInfo };
+    } catch {
+      return {
+        message: "Routeur joignable, mais ses informations n'ont pas pu être lues.",
+        readFailed: true,
+        status: "connected",
+        systemInfo: null
+      };
     }
   };
 
   useEffect(() => {
     if (!isPersistent || !routerHealthScopeKey || pauseRouterStatusRefresh) return undefined;
     let cancelled = false;
+    let running = false;
+    let timer: number | undefined;
 
+    // One pass at a time (4 routers in parallel at most). Healthy routers are
+    // re-checked every minute; offline or unconfirmed ones every 15 s, and
+    // immediately when the network or the window comes back.
     const refreshRealStatuses = async () => {
-      if (cancelled || document.visibilityState === "hidden") return;
-      const snapshot = [...routersForHealthCheckRef.current];
-      for (let index = 0; index < snapshot.length && !cancelled; index += 4) {
-        await Promise.all(
-          snapshot.slice(index, index + 4).map((router) => testConnection(router, { silent: true }))
-        );
+      if (cancelled || running) return;
+      window.clearTimeout(timer);
+      if (document.visibilityState !== "hidden") {
+        running = true;
+        try {
+          const snapshot = [...routersForHealthCheckRef.current];
+          for (let index = 0; index < snapshot.length && !cancelled; index += 4) {
+            await Promise.all(
+              snapshot.slice(index, index + 4).map((router) => testConnection(router, { silent: true }))
+            );
+          }
+        } finally {
+          running = false;
+        }
       }
+      if (cancelled) return;
+      setAvailabilityClock(Date.now());
+      timer = window.setTimeout(
+        () => void refreshRealStatuses(),
+        nextRouterHealthCheckDelayMs(routersForHealthCheckRef.current.map((router) => router.id), availabilityRef.current)
+      );
     };
+    const refreshNow = () => void refreshRealStatuses();
 
-    const initialTimer = window.setTimeout(() => void refreshRealStatuses(), 800);
-    const interval = window.setInterval(() => void refreshRealStatuses(), 60_000);
+    timer = window.setTimeout(refreshNow, 0);
+    window.addEventListener("online", refreshNow);
+    window.addEventListener("focus", refreshNow);
     return () => {
       cancelled = true;
-      window.clearTimeout(initialTimer);
-      window.clearInterval(interval);
+      window.clearTimeout(timer);
+      window.removeEventListener("online", refreshNow);
+      window.removeEventListener("focus", refreshNow);
     };
   }, [isPersistent, pauseRouterStatusRefresh, routerHealthScopeKey]);
 
@@ -919,6 +967,9 @@ export function RoutersPage() {
               canEdit={canEditRouter}
               key={router.id}
               isConnecting={connectingRouterIds.has(router.id)}
+              availability={isPersistent
+                ? describeRouterAvailability(availability[router.id], router.lastSeenAt, availabilityClock)
+                : null}
               onConfigureRemote={() => navigate(remoteVpnPathForRouter(router.id))}
               onDelete={() => setRouterToDelete(router)}
               onEdit={() => openEditForm(router)}
@@ -987,6 +1038,7 @@ function readUnknownError(error: unknown, fallback: string): string {
 type RouterCardProps = {
   canDelete: boolean;
   canEdit: boolean;
+  availability: RouterAvailabilityDisplay | null;
   isConnecting: boolean;
   onConfigureRemote: () => void;
   onDelete: () => void;
@@ -998,7 +1050,7 @@ type RouterCardProps = {
   router: RouterCardData;
 };
 
-function RouterCard({ canDelete, canEdit, isConnecting, onConfigureRemote, onDelete, onEdit, onLocal, onOpen, onRemote, onTest, router }: RouterCardProps) {
+export function RouterCard({ availability, canDelete, canEdit, isConnecting, onConfigureRemote, onDelete, onEdit, onLocal, onOpen, onRemote, onTest, router }: RouterCardProps) {
   const routerName = router.routerName?.trim() || router.zoneName;
   const zoneName = router.zoneName.trim() || "Site non renseigné";
   const lastSeenLabel = formatRouterLastSeen(router.lastSeenAt);
@@ -1025,11 +1077,13 @@ function RouterCard({ canDelete, canEdit, isConnecting, onConfigureRemote, onDel
       onClick={onOpen}
     >
       <header className="router-card__header">
-        <div aria-live="polite" className="router-card__status" title={statusLabels[router.status]}>
-          {isConnecting ? (
+        <div aria-live="polite" className="router-card__status" title={availability?.title ?? statusLabels[router.status]}>
+          {isConnecting || availability?.dot === "checking" ? (
             <span className="router-connection-indicator router-connection-indicator--connecting">
-              <LoaderCircle aria-hidden="true" /> Connexion…
+              <LoaderCircle aria-hidden="true" /> {availability?.label ?? "Connexion…"}
             </span>
+          ) : availability ? (
+            <StatusDot label={availability.label} status={availability.dot} />
           ) : router.status === "active" ? (
             <StatusDot label={statusLabels[router.status]} status="active" />
           ) : (
@@ -1053,6 +1107,15 @@ function RouterCard({ canDelete, canEdit, isConnecting, onConfigureRemote, onDel
         <div><dt>Adresse</dt><dd title={router.ipAddress}><MapPin aria-hidden="true" />{router.ipAddress}</dd></div>
         <div><dt>RouterOS</dt><dd>{router.routerOsVersion || "Non relevé"}</dd></div>
         <div><dt>Dernière activité</dt><dd title={router.lastSeenAt}>{lastSeenLabel}</dd></div>
+        {availability ? (
+          // Full-width line: the header only has room for the dot itself.
+          <div className="router-card__availability" title={availability.title}>
+            <dt>Connexion</dt>
+            <dd className={`router-card__availability-value router-card__availability-value--${isConnecting ? "checking" : availability.dot}`}>
+              {isConnecting ? "Connexion en cours" : availability.label}
+            </dd>
+          </div>
+        ) : null}
       </dl>
     </article>
   );
