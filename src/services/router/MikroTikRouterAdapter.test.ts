@@ -1690,7 +1690,7 @@ describe("MikroTikRouterAdapter", () => {
       hotspot: "to-client",
       "new-ttl": "set:1",
       "out-interface": "ether1",
-      passthrough: "no"
+      passthrough: "yes"
     });
     expect(
       transport.calls.find((call) =>
@@ -1742,7 +1742,8 @@ describe("MikroTikRouterAdapter", () => {
     await expect(adapter.getHotspotAntiTetheringState()).resolves.toEqual({
       blockIpv4Ttl: true,
       blockIpv6: true,
-      managedRuleCount: 2
+      managedRuleCount: 2,
+      coverage: { hotspotInterfaces: [], ipv4ProtectedInterfaces: ["ether1"], ipv6ProtectedInterfaces: ["ether1"], legacyPassthroughRules: 0 }
     });
     await expect(adapter.listManagedHotspotBypasses()).resolves.toEqual([{
       address: "192.168.88.10",
@@ -1891,5 +1892,45 @@ describe("MikroTikRouterAdapter", () => {
       blockIpv6: false,
       enabled: false
     })).rejects.toThrow("RouterOS kept a TicketPro anti-tethering rule after removal");
+  });
+});
+
+describe("anti-partage : couverture réelle par réseau hotspot", () => {
+  const hotspots = [
+    { ".id": "*H1", disabled: "false", interface: "bridge-wifi", name: "hs-wifi" },
+    { ".id": "*H2", disabled: "false", interface: "vlan20", name: "hs-ext" }
+  ];
+  it("signale un réseau hotspot sans règle TTL active et une règle d'ancienne version", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/firewall/filter/print": [],
+      "/ip/firewall/mangle/print": [
+        { ".id": "*M1", comment: "TicketPro anti-tethering:IPv4 client TTL bridge-wifi", passthrough: "no" },
+        { ".id": "*M2", comment: "TicketPro anti-tethering:IPv4 client TTL vlan20", disabled: "true", passthrough: "yes" }
+      ],
+      "/ipv6/firewall/filter/print": [{ ".id": "*V1", comment: "TicketPro anti-tethering:IPv6 bridge-wifi" }],
+      "/ip/hotspot/print": hotspots
+    });
+    const state = await createAdapter(transport).getHotspotAntiTetheringState();
+    expect(state.coverage).toEqual({
+      hotspotInterfaces: ["bridge-wifi", "vlan20"],
+      ipv4ProtectedInterfaces: ["bridge-wifi"],
+      ipv6ProtectedInterfaces: ["bridge-wifi"],
+      legacyPassthroughRules: 1
+    });
+  });
+
+  it("protège chaque réseau hotspot actif sans court-circuiter les autres règles mangle", async () => {
+    const transport = new MockRouterOsTransport({
+      "/ip/firewall/filter/print": [],
+      "/ip/firewall/mangle/print": [],
+      "/ipv6/firewall/filter/print": [],
+      "/ip/hotspot/print": hotspots
+    });
+    await createAdapter(transport).configureHotspotAntiTethering({ blockIpv4Ttl: true, blockIpv6: false, enabled: true });
+    const added = transport.calls.filter((call) => call.command === "/ip/firewall/mangle/add").map((call) => call.params);
+    expect(added).toEqual([
+      expect.objectContaining({ "out-interface": "bridge-wifi", passthrough: "yes" }),
+      expect.objectContaining({ "out-interface": "vlan20", passthrough: "yes" })
+    ]);
   });
 });

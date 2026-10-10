@@ -49,6 +49,8 @@ import {
 } from "../../shared/ui";
 import {
   canEditRouterSensitiveSettings,
+  antiTetheringCoverageIssues,
+  antiTetheringCoverageSummary,
   canViewRouterSettings,
   defaultRouterSettings,
   mergeRouterManagementSecurityManifest,
@@ -133,6 +135,7 @@ export function RouterSettingsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isSavingAccessPolicy, setIsSavingAccessPolicy] = useState(false);
+  const [antiTetheringCheck, setAntiTetheringCheck] = useState<{ issues: string[]; summary: string | null } | null>(null);
   const [isTesting, setIsTesting] = useState(false);
   const [managementSecurity, setManagementSecurity] =
     useState<PreparedRouterManagementSecurity | null>(null);
@@ -909,6 +912,60 @@ export function RouterSettingsPage() {
     if (verified.blockIpv4Ttl !== expectedIpv4 || verified.blockIpv6 !== expectedIpv6) {
       throw new Error("RouterOS n'a pas confirmé l'état réel des protections anti-partage.");
     }
+    // Every enabled Hotspot interface must be covered, not just one.
+    const issues = antiTetheringCoverageIssues(policy, verified);
+    setAntiTetheringCheck({ issues, summary: antiTetheringCoverageSummary(verified) });
+    if (issues.length > 0) {
+      throw new Error(`RouterOS n'applique pas la protection partout : ${issues.join(" ")}`);
+    }
+  };
+
+  // Check what the router really enforces each time the page opens: a new
+  // Hotspot network or a rule disabled in Winbox is reported, not hidden.
+  const routerIdForAntiTethering = router?.id ?? null;
+  const savedAntiSharingKey = `${savedAccessPolicy.antiSharingMode}:${savedAccessPolicy.monitorIpv4Ttl}:${savedAccessPolicy.monitorIpv6HopLimit}`;
+  useEffect(() => {
+    if (!router || !session || savedAccessPolicy.antiSharingMode !== "strict") {
+      setAntiTetheringCheck(null);
+      return undefined;
+    }
+    let cancelled = false;
+    void (async () => {
+      const service = await createPersistedRouterService({
+        authSession: session,
+        connections: await connectionRepository.listByRouter(router.id),
+        database,
+        logActions: false,
+        router
+      });
+      const state = await service.getHotspotAntiTetheringState();
+      if (!cancelled) {
+        setAntiTetheringCheck({
+          issues: antiTetheringCoverageIssues(savedAccessPolicy, state),
+          summary: antiTetheringCoverageSummary(state)
+        });
+      }
+    })().catch(() => {
+      if (!cancelled) setAntiTetheringCheck(null);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // The policy fields are summarized by savedAntiSharingKey.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routerIdForAntiTethering, savedAntiSharingKey, session?.account_id]);
+
+  const reapplyAntiSharingPolicy = async () => {
+    setIsSavingAccessPolicy(true);
+    setFeedback(null);
+    try {
+      await applyAntiSharingPolicy(savedAccessPolicy);
+      setFeedback({ kind: "success", text: "Protection anti-partage réappliquée et vérifiée sur tous les réseaux hotspot." });
+    } catch (error) {
+      setFeedback({ kind: "error", text: accessActionError(error, "Impossible de réappliquer la protection anti-partage.") });
+    } finally {
+      setIsSavingAccessPolicy(false);
+    }
   };
 
   const refreshAccessPolicyFromRouter = async () => {
@@ -1254,6 +1311,19 @@ export function RouterSettingsPage() {
               Strict applique uniquement les protections réseau cochées ci-dessous.
             </small>
           </label>
+          {antiTetheringCheck?.issues.length ? (
+            <div className="notice notice--error" role="alert">
+              <strong>Protection incomplète sur le routeur.</strong>
+              <ul>{antiTetheringCheck.issues.map((issue) => <li key={issue}>{issue}</li>)}</ul>
+              {canEditSensitive ? (
+                <Button disabled={isSavingAccessPolicy} onClick={() => void reapplyAntiSharingPolicy()} variant="primary">
+                  Réappliquer la protection
+                </Button>
+              ) : null}
+            </div>
+          ) : antiTetheringCheck?.summary ? (
+            <p className="notice notice--success">{antiTetheringCheck.summary} (vérifié sur RouterOS).</p>
+          ) : null}
 
           <div className="anti-sharing-option-grid">
             <label className={`anti-sharing-option-card${accessPolicy.lockVoucherToFirstMac ? " is-checked" : ""}`}>
