@@ -34,7 +34,9 @@ import {
 import { ActionMenu, AsyncStateCard, Badge, Button, Card, EmptyState, FilterButton, PageHeader, StatusDot } from "../../shared/ui";
 import {
   applyTemplate,
+  describePlanChangeImpact,
   emptyPlanFormValues,
+  findPlanProfileConflict,
   formValuesToPlanDraft,
   formatPlanDisplayName,
   formatPlanMinutes,
@@ -43,6 +45,7 @@ import {
   planRecordFromDraft,
   planToFormValues,
   quickPlanTemplates,
+  routerProfileNameForPlan,
   validatePlanForm,
   type PlanFormValues,
   type PlanViewModel
@@ -280,7 +283,8 @@ export function PlansPage() {
         if (plan.syncStatus === "synced") {
           const remotePlan = (await activeService.getHotspotPlans()).find(
             (candidate) =>
-              candidate.profileName === plan.profileName
+              candidate.id === plan.mikrotikId
+              || candidate.profileName === plan.profileName
               || candidate.id === plan.profileName
           );
           if (!remotePlan) {
@@ -304,7 +308,7 @@ export function PlansPage() {
             validityMinutes: remotePlan.validityMinutes
           };
         } else {
-          const remotePlan = await updateRemotePlanIdempotently(activeService, plan.profileName, draft);
+          const remotePlan = await updateRemotePlanIdempotently(activeService, routerPlanReference(plan), draft);
           remoteMikrotikId = remotePlan.id;
         }
         const record = await planRepository.update({
@@ -353,7 +357,8 @@ export function PlansPage() {
       return;
     }
 
-    const validationError = validatePlanForm(formState.values);
+    const validationError = validatePlanForm(formState.values)
+      ?? findPlanProfileConflict(formState.values.name, plans, formState.plan?.id ?? null);
 
     if (validationError) {
       setFormState({ ...formState, error: validationError });
@@ -413,6 +418,7 @@ export function PlansPage() {
       } else if (submittedForm.plan) {
         let syncStatus: PlanViewModel["syncStatus"] = isPersistent ? "pending" : "synced";
         let updatedRouterUsers = 0;
+        let voucherImpact: { immutableTicketsSkipped: number; updatedRouterUsers: number } | undefined;
         const localRecord = planRecordFromDraft(draft, routerId, submittedForm.plan.id, isPersistent ? "pending" : "local", {
           createdByProfileId: submittedForm.plan.createdByProfileId,
           lastSyncedAt: submittedForm.plan.lastSyncedAt,
@@ -432,7 +438,7 @@ export function PlansPage() {
             const activeService = await getPersistedService();
             const remotePlan = await updateRemotePlanIdempotently(
               activeService,
-              submittedForm.plan.profileName,
+              routerPlanReference(submittedForm.plan),
               draft
             );
             const voucherSync = await synchronizePlanVouchers({
@@ -442,6 +448,18 @@ export function PlansPage() {
               service: activeService
             });
             updatedRouterUsers = voucherSync.updatedRouterUsers;
+            voucherImpact = voucherSync;
+            if (session && submittedForm.plan.profileName !== remotePlan.profileName) {
+              // RouterOS moved every voucher with the renamed profile; keep the
+              // local references identical to what the router now reports.
+              await ticketRepository.renameProfileReference({
+                accountId: session.account_id,
+                planId: submittedForm.plan.id,
+                previousProfileName: submittedForm.plan.profileName,
+                profileName: remotePlan.profileName,
+                routerId
+              });
+            }
             syncStatus = "synced";
             storedRecord = await planRepository.update({
               ...localRecord,
@@ -467,10 +485,11 @@ export function PlansPage() {
 
         setPlans((current) => current.map((plan) => (plan.id === viewModel.id ? viewModel : plan)));
         if (isPersistent) await backupRouterSnapshot();
+        const impact = describePlanChangeImpact(submittedForm.plan, draft, voucherImpact);
         setMessage(
           syncStatus === "synced"
-            ? `${viewModel.name} modifié ; ${updatedRouterUsers} voucher(s) encore présent(s) sur RouterOS mis à jour.`
-            : `${viewModel.name} modifié localement ; synchronisation RouterOS à reprendre.`
+            ? `${viewModel.name} modifié et confirmé par RouterOS ; ${updatedRouterUsers} voucher(s) mis à jour. ${impact}`
+            : `${viewModel.name} modifié localement seulement : RouterOS n'a pas confirmé la modification, synchronisation à reprendre. ${impact}`
         );
       }
 
@@ -498,7 +517,7 @@ export function PlansPage() {
     const draft = formValuesToPlanDraft({
       ...planToFormValues(plan),
       name: `${plan.name} copie`,
-      profileName: `${plan.profileName}-copie`,
+      profileName: routerProfileNameForPlan(`${plan.name} copie`),
       status: "active"
     });
     const planId = `plan-${crypto.randomUUID()}`;
@@ -550,7 +569,7 @@ export function PlansPage() {
       try {
         const remotePlan = await updateRemotePlanIdempotently(
           await getPersistedService(),
-          plan.profileName,
+          routerPlanReference(plan),
           draft
         );
         remoteMikrotikId = remotePlan.id;
@@ -605,7 +624,7 @@ export function PlansPage() {
       try {
         await deleteRemotePlanIdempotently(
           await getPersistedService(),
-          plan.profileName
+          routerPlanReference(plan)
         );
       } catch (error) {
         setMessage(
@@ -1100,4 +1119,12 @@ function PlanFormDialog({ canSubmit, formState, isSubmitting, onCancel, onChange
       </section>
     </div>
   );
+}
+
+/**
+ * RouterOS keeps a profile's .id across renames; the name alone would miss a
+ * profile renamed by an earlier, partially synchronized edit.
+ */
+function routerPlanReference(plan: Pick<PlanViewModel, "mikrotikId" | "profileName">): string {
+  return plan.mikrotikId?.trim() || plan.profileName;
 }

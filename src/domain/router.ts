@@ -318,6 +318,14 @@ export type HotspotAntiTetheringConfig = {
   enabled: boolean;
 };
 
+export type VoucherFirstMacLockState = {
+  /** The RouterOS marker script that activates the on-login lock exists. */
+  enabled: boolean;
+  managedProfiles: number;
+  /** Managed profiles whose on-login handler contains the lock. */
+  profilesWithHandler: number;
+};
+
 export type HotspotAntiTetheringState = {
   blockIpv4Ttl: boolean;
   blockIpv6: boolean;
