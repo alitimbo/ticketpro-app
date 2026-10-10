@@ -32,9 +32,13 @@ export async function reconcileRouterPlanCatalog({
 }: RouterPlanCatalogReconciliationInput): Promise<RouterPlanCatalogReconciliationResult> {
   const localPlans = await repository.listByRouter(routerId);
   const localByProfile = new Map<string, HotspotPlanRecord>();
+  const localByRouterId = new Map<string, HotspotPlanRecord>();
   for (const local of localPlans) {
     localByProfile.set(local.mikrotik_profile_name ?? local.name, local);
+    if (local.mikrotik_id) localByRouterId.set(local.mikrotik_id, local);
   }
+  const matchedLocalIds = new Set<string>();
+  const retainedPendingRecords: HotspotPlanRecord[] = [];
 
   const liveRecords: HotspotPlanRecord[] = [];
   const liveProfileNames = new Set(plans.map((plan) => plan.profileName));
@@ -43,7 +47,16 @@ export async function reconcileRouterPlanCatalog({
   let updatedCount = 0;
 
   for (const plan of plans) {
-    const local = localByProfile.get(plan.profileName);
+    // RouterOS keeps a profile's .id across renames: it identifies the plan
+    // even when a local rename has not reached the router yet.
+    const local = localByRouterId.get(plan.id) ?? localByProfile.get(plan.profileName);
+    if (local) matchedLocalIds.add(local.id);
+    if (local && (local.sync_status === "pending" || local.sync_status === "local")) {
+      // A local change still waiting for RouterOS is never overwritten by
+      // the router values: it is retained to be pushed.
+      retainedPendingRecords.push(local);
+      continue;
+    }
     if (local) {
       if (local.mikrotik_id !== plan.id) identityUpdatedCount += 1;
       const updated = await repository.update({
@@ -98,9 +111,9 @@ export async function reconcileRouterPlanCatalog({
     createdCount += 1;
   }
 
-  const retainedPendingRecords: HotspotPlanRecord[] = [];
   let removedCount = 0;
   for (const local of localPlans) {
+    if (matchedLocalIds.has(local.id)) continue;
     const profileName = local.mikrotik_profile_name ?? local.name;
     if (liveProfileNames.has(profileName)) continue;
 

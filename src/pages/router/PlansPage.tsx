@@ -50,6 +50,7 @@ import {
   type PlanFormValues,
   type PlanViewModel
 } from "./plansPageModel";
+import { resumePendingPlans } from "./planSyncResume";
 import { reconcileRouterPlanCatalog, RouterCloudRecoveryService } from "../../services/recovery";
 import type { HotspotPlanHistoryRecord } from "../../domain/database";
 
@@ -222,10 +223,41 @@ export function PlansPage() {
             ? ` ${reconciliation.removedCount} plan(s) absent(s) retiré(s) du catalogue local.`
             : "")
         );
+        let resumedCount = 0;
+        if (canManagePlans && reconciliation.retainedPendingRecords.length > 0) {
+          // RouterOS answered: push the changes an earlier failure left pending.
+          const resume = await resumePendingPlans({
+            accountId: session.account_id,
+            actorProfileId: session.internal_profile_id ?? null,
+            pending: reconciliation.retainedPendingRecords,
+            planRepository,
+            remotePlans,
+            routerId,
+            service: activeService,
+            ticketRepository
+          });
+          if (requestId !== catalogRequestIdRef.current) return;
+          resumedCount = resume.synced.length;
+          const syncedById = new Map(resume.synced.map((record) => [record.id, record]));
+          setPlans((current) => current.map((plan) => {
+            const synced = syncedById.get(plan.id);
+            return synced ? planFromRecord(synced, plan.linkedTickets) : plan;
+          }));
+          setMessage(
+            `${remotePlans.length} profil(s) relu(s) en direct sur RouterOS.`
+            + (resume.synced.length > 0
+              ? ` ${resume.synced.length} plan(s) en attente synchronisé(s) et confirmé(s) par RouterOS.`
+              : "")
+            + (resume.failed.length > 0
+              ? ` ${resume.failed.length} plan(s) toujours en attente : ${resume.failed.map((item) => `${item.plan.name} (${item.message})`).join(", ")}.`
+              : "")
+          );
+        }
         if (
           reconciliation.createdCount > 0
           || reconciliation.identityUpdatedCount > 0
           || reconciliation.removedCount > 0
+          || resumedCount > 0
         ) {
           await backupRouterSnapshot();
         }
