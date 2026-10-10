@@ -159,6 +159,8 @@ export function RouterHomePage () {
     'loading'
   )
   const [reloadToken, setReloadToken] = useState(0)
+  const [reloadAttempt, setReloadAttempt] = useState(0)
+  const [lastLiveAt, setLastLiveAt] = useState<string | null>(null)
   const actions = session
     ? getRouterQuickActions(session.internal_profile_role, routerId)
     : []
@@ -245,7 +247,7 @@ export function RouterHomePage () {
           activeService.getSystemInfo(),
           activeService.getHotspotServers(),
           activeService.getHotspotPlans(),
-          activeService.listHotspotUsers(),
+          activeService.listHotspotUsersForVerification(),
           activeService.listActiveUsers(),
           activeService.getRouterHealth(),
           activeService.getRouterDateTime()
@@ -284,8 +286,10 @@ export function RouterHomePage () {
           compareLocalAndRouterTickets(localTickets, users, activeUsers).summary
         )
         setCpuLoad(health.cpuLoad)
-        setConnectionMessage('Routeur connecté')
+        setConnectionMessage('En ligne')
         setConnectionStatus('active')
+        setLastLiveAt(observedAt)
+        setReloadAttempt(0)
         setSyncReport(observabilityReport)
         setLoadError(null)
         setLoadStatus('ready')
@@ -340,8 +344,9 @@ export function RouterHomePage () {
         if (isMounted) {
           setDashboard(null)
           setService(null)
-          setConnectionMessage('Connexion impossible')
+          setConnectionMessage('Hors ligne')
           setConnectionStatus('offline')
+          setReloadAttempt(current => current + 1)
           setLoadError(
             error instanceof Error
               ? error.message
@@ -378,46 +383,108 @@ export function RouterHomePage () {
     if (!service) {
       return undefined
     }
+    let cancelled = false
+    let running = false
+    let timer: number | undefined
+    let consecutiveFailures = 0
 
-    const interval = window.setInterval(() => {
-      void Promise.all([
-        service.getRouterHealth(),
-        service.listActiveUsers(),
-        service.listHotspotUsers()
-      ])
-        .then(([health, activeUsers, users]) => {
-          const observedAt = new Date().toISOString()
-          setCpuLoad(health.cpuLoad)
+    // Sequential live loop: never two reads at once, results of a previous
+    // router or of an unmounted view are dropped. Router health tells whether
+    // the router is reachable; sessions and vouchers tell whether the data is
+    // fresh. The last valid data stays on screen with its age.
+    const refreshLive = async () => {
+      if (cancelled || running) return
+      window.clearTimeout(timer)
+      if (document.visibilityState !== 'hidden') {
+        running = true
+        const [health, activeUsers, users] = await Promise.allSettled([
+          service.getRouterHealth(),
+          service.listActiveUsers(),
+          service.listHotspotUsersForVerification()
+        ])
+        running = false
+        if (cancelled) return
+        const observedAt = new Date().toISOString()
+        if (
+          health.status === 'fulfilled' &&
+          activeUsers.status === 'fulfilled' &&
+          users.status === 'fulfilled'
+        ) {
+          consecutiveFailures = 0
+          setCpuLoad(health.value.cpuLoad)
           setDashboard(current =>
-            current ? { ...current, activeUsers, health, users } : current
+            current
+              ? {
+                  ...current,
+                  activeUsers: activeUsers.value,
+                  health: health.value,
+                  users: users.value
+                }
+              : current
           )
-          setConnectionMessage('Routeur connecté')
+          setLastLiveAt(observedAt)
+          setConnectionMessage('En ligne')
           setConnectionStatus('active')
-          if (isPersistent && routerSession) {
-            void syncObservabilityService.inspect({
-              accountId: routerSession.account_id,
-              liveRouterObservedAt: observedAt,
-              liveTicketsObservedAt: observedAt,
-              now: observedAt,
-              routerId
-            }).then(setSyncReport).catch(() => undefined)
+        } else {
+          consecutiveFailures += 1
+          if (health.status === 'fulfilled') {
+            setCpuLoad(health.value.cpuLoad)
+            setDashboard(current =>
+              current ? { ...current, health: health.value } : current
+            )
+            setConnectionMessage('Données non actualisées')
+            setConnectionStatus('warning')
+          } else {
+            setConnectionMessage('Hors ligne')
+            setConnectionStatus('offline')
           }
-        })
-        .catch(() => {
-          setConnectionMessage('Actualisation du routeur impossible')
-          setConnectionStatus('offline')
-          if (isPersistent && routerSession) {
-            void syncObservabilityService.inspect({
-              accountId: routerSession.account_id,
-              now: new Date().toISOString(),
-              routerId
-            }).then(setSyncReport).catch(() => undefined)
-          }
-        })
-    }, 15_000)
+        }
+        if (isPersistent && routerSession) {
+          const fresh = activeUsers.status === 'fulfilled' && users.status === 'fulfilled'
+          void syncObservabilityService.inspect({
+            accountId: routerSession.account_id,
+            ...(fresh
+              ? { liveRouterObservedAt: observedAt, liveTicketsObservedAt: observedAt }
+              : {}),
+            now: observedAt,
+            routerId
+          }).then(report => { if (!cancelled) setSyncReport(report) }).catch(() => undefined)
+        }
+      }
+      if (cancelled) return
+      timer = window.setTimeout(
+        () => void refreshLive(),
+        routerLiveDelayMs(consecutiveFailures)
+      )
+    }
+    const refreshNow = () => void refreshLive()
 
-    return () => window.clearInterval(interval)
+    timer = window.setTimeout(refreshNow, routerLiveDelayMs(0))
+    window.addEventListener('online', refreshNow)
+    window.addEventListener('focus', refreshNow)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+      window.removeEventListener('online', refreshNow)
+      window.removeEventListener('focus', refreshNow)
+    }
   }, [isPersistent, routerId, routerSession, service, syncObservabilityService])
+
+  // When the first load failed, retry on its own (bounded backoff) and as
+  // soon as the network comes back, without restarting the application.
+  useEffect(() => {
+    if (loadStatus !== 'error') return undefined
+    const timer = window.setTimeout(
+      () => setReloadToken(current => current + 1),
+      routerReloadDelayMs(reloadAttempt)
+    )
+    const retryNow = () => setReloadToken(current => current + 1)
+    window.addEventListener('online', retryNow)
+    return () => {
+      window.clearTimeout(timer)
+      window.removeEventListener('online', retryNow)
+    }
+  }, [loadStatus, reloadAttempt])
 
   const testRouter = async () => {
     if (!service) {
@@ -587,7 +654,14 @@ export function RouterHomePage () {
           </div>
         </div>
         <div className='router-hero__states'>
-          <StatusDot label={connectionMessage} status={connectionStatus} />
+          <StatusDot
+            label={
+              lastLiveAt && connectionStatus !== 'active'
+                ? `${connectionMessage} · dernière synchronisation ${formatLiveTime(lastLiveAt)}`
+                : connectionMessage
+            }
+            status={connectionStatus}
+          />
           <Badge status={hotspotEnabled ? 'success' : 'warning'}>
             {hotspotEnabled ? 'Hotspot actif' : 'Hotspot à vérifier'}
           </Badge>
@@ -883,4 +957,23 @@ function iconForAction (actionId: string) {
   }
 
   return icons[actionId as keyof typeof icons] ?? Activity
+}
+
+/** Live cadence: 15 s when healthy, 5 s then 10 s after failures, never above 30 s. */
+export function routerLiveDelayMs (consecutiveFailures: number): number {
+  if (consecutiveFailures <= 0) return 15_000
+  return Math.min(30_000, 5_000 * 2 ** (consecutiveFailures - 1))
+}
+
+/** First-load retries: 5 s, 10 s, 20 s, then every 30 s. */
+export function routerReloadDelayMs (attempt: number): number {
+  return Math.min(30_000, 5_000 * 2 ** Math.max(0, attempt - 1))
+}
+
+function formatLiveTime (iso: string): string {
+  return new Intl.DateTimeFormat('fr-FR', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  }).format(new Date(iso))
 }
