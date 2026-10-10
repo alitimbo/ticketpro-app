@@ -108,3 +108,28 @@ describe("reconcileRouterPlanCatalog", () => {
     expect(unlimited.liveRecords[0].data_limit_mb).toBeNull();
   });
 });
+
+describe("reconcileRouterPlanCatalog — modification en attente", () => {
+  it("rattache un renommage en attente par .id RouterOS, sans doublon ni écrasement", async () => {
+    const database = new InMemoryDatabaseClient();
+    await database.initialize();
+    const repository = new HotspotPlanRepository(database);
+    await repository.create({
+      data_limit_mb: null, download_limit: null, duration_minutes: 360, id: "plan-6h", mikrotik_id: "*P4",
+      mikrotik_profile_name: "6H", name: "6H", price_hint: 300, router_id: "router-1", shared_users: 1,
+      status: "active", sync_status: "pending", upload_limit: null, validity_minutes: 360
+    });
+
+    const result = await reconcileRouterPlanCatalog({
+      plans: [livePlan({ durationMinutes: 240, id: "*P4", name: "4H", profileName: "4H" })],
+      repository,
+      routerId: "router-1"
+    });
+
+    expect(result.createdCount).toBe(0);
+    expect(result.removedCount).toBe(0);
+    expect(result.retainedPendingRecords.map((plan) => [plan.id, plan.duration_minutes, plan.sync_status]))
+      .toEqual([["plan-6h", 360, "pending"]]);
+    expect((await repository.listByRouter("router-1")).map((plan) => plan.id)).toEqual(["plan-6h"]);
+  });
+});

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
+import type { HotspotAntiTetheringState } from "../../domain/router";
 import {
+  antiTetheringCoverageIssues,
+  antiTetheringCoverageSummary,
   canEditRouterSensitiveSettings,
   canViewRouterSettings,
   defaultRouterSettings,
@@ -129,3 +132,30 @@ describe("routerSettingsPageModel", () => {
   });
 });
 
+
+describe("antiTetheringCoverageIssues", () => {
+  const strict = { antiSharingMode: "strict", monitorIpv4Ttl: true, monitorIpv6HopLimit: true };
+  const state = (coverage: Partial<NonNullable<HotspotAntiTetheringState["coverage"]>>): HotspotAntiTetheringState => ({
+    blockIpv4Ttl: true, blockIpv6: true, managedRuleCount: 2,
+    coverage: { hotspotInterfaces: ["bridge-wifi", "vlan20"], ipv4ProtectedInterfaces: [], ipv6ProtectedInterfaces: [], legacyPassthroughRules: 0, ...coverage }
+  });
+
+  it("ne signale rien quand chaque réseau hotspot est protégé", () => {
+    const full = state({ ipv4ProtectedInterfaces: ["bridge-wifi", "vlan20"], ipv6ProtectedInterfaces: ["bridge-wifi", "vlan20"] });
+    expect(antiTetheringCoverageIssues(strict, full)).toEqual([]);
+    expect(antiTetheringCoverageSummary(full)).toBe("2/2 réseau(x) hotspot protégé(s) par le routeur");
+  });
+
+  it("nomme les réseaux non protégés et la règle d'ancienne version", () => {
+    const partial = state({ ipv4ProtectedInterfaces: ["bridge-wifi"], ipv6ProtectedInterfaces: ["bridge-wifi"], legacyPassthroughRules: 1 });
+    expect(antiTetheringCoverageIssues(strict, partial)).toEqual([
+      "Blocage TTL absent ou désactivé sur vlan20 (1/2 réseaux hotspot protégés).",
+      "Règle TTL d'une ancienne version (passthrough=no) : elle court-circuite vos autres règles mangle postrouting.",
+      "Blocage IPv6 absent ou désactivé sur vlan20."
+    ]);
+  });
+
+  it("n'exige rien hors du mode strict", () => {
+    expect(antiTetheringCoverageIssues({ ...strict, antiSharingMode: "observe" }, state({}))).toEqual([]);
+  });
+});

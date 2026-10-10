@@ -1682,7 +1682,9 @@ export class MikroTikRouterAdapter implements RouterAdapter {
           hotspot: "to-client",
           "new-ttl": "set:1",
           "out-interface": interfaceName,
-          passthrough: "no"
+          // Let the router's own postrouting rules (QoS marks…) still see
+          // the packet: changing the TTL does not need to end the chain.
+          passthrough: "yes"
         }))
       : [];
 
@@ -1722,10 +1724,11 @@ export class MikroTikRouterAdapter implements RouterAdapter {
   }
 
   async getHotspotAntiTetheringState(): Promise<import("../../domain/router").HotspotAntiTetheringState> {
-    const [ipv4FilterRows, ipv4MangleRows, ipv6Rows] = await Promise.all([
+    const [ipv4FilterRows, ipv4MangleRows, ipv6Rows, hotspotServers] = await Promise.all([
       this.call("/ip/firewall/filter/print"),
       this.call("/ip/firewall/mangle/print"),
-      this.call("/ipv6/firewall/filter/print").catch(() => [])
+      this.call("/ipv6/firewall/filter/print").catch(() => []),
+      this.getHotspotServers()
     ]);
     const managedPrefix = "TicketPro anti-tethering:";
     const managedIpv4Filters = ipv4FilterRows.filter((row) =>
@@ -1752,7 +1755,24 @@ export class MikroTikRouterAdapter implements RouterAdapter {
         pick(row, "comment")?.startsWith(`${managedPrefix}IPv6 `)
       ),
       managedRuleCount:
-        managedIpv4Filters.length + managedIpv4Mangle.length + managedIpv6.length
+        managedIpv4Filters.length + managedIpv4Mangle.length + managedIpv6.length,
+      coverage: {
+        hotspotInterfaces: Array.from(new Set(
+          hotspotServers
+            .filter((server) => server.isEnabled && server.interfaceName !== "inconnue")
+            .map((server) => server.interfaceName)
+        )),
+        ipv4ProtectedInterfaces: managedIpv4Mangle
+          .map((row) => pick(row, "comment")?.match(/^TicketPro anti-tethering:IPv4 client TTL (.+)$/)?.[1])
+          .filter((name): name is string => Boolean(name)),
+        ipv6ProtectedInterfaces: managedIpv6
+          .map((row) => pick(row, "comment")?.match(/^TicketPro anti-tethering:IPv6 (.+)$/)?.[1])
+          .filter((name): name is string => Boolean(name)),
+        legacyPassthroughRules: managedIpv4Mangle.filter((row) =>
+          pick(row, "comment")?.startsWith(`${managedPrefix}IPv4 client TTL `)
+          && ["no", "false"].includes((pick(row, "passthrough") ?? "").toLowerCase())
+        ).length
+      }
     };
   }
 

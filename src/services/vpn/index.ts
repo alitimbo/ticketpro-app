@@ -38,3 +38,12 @@ export {
   type EmbeddedVpnProvisioningResult
 } from "./EmbeddedVpnProvisioningService";
 export type { VpnPeerConfig, WireGuardKeyPair } from "./wireguard";
+export {
+  RouterRemoteAccessError,
+  RouterRemoteAccessService,
+  remoteAccessInterfaceName,
+  routerRemoteAccessState,
+  type RouterRemoteAccessDependencies,
+  type RouterRemoteAccessState,
+  type RouterRemoteAccessStep
+} from "./RouterRemoteAccessService";
