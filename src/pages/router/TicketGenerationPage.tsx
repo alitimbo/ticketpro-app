@@ -756,7 +756,8 @@ export function TicketGenerationPage() {
       const generationService = await getRouterServiceForAction();
       await performanceMetrics.measure("LIFECYCLE_PREFLIGHT", () =>
         generationService.ensureVoucherLifecycleEngine({
-          managedProfileNames: [selectedPlan.profileName]
+          managedProfileNames: [selectedPlan.profileName],
+          planDataLimitMbByProfile: { [selectedPlan.profileName]: selectedPlan.dataLimitMb ?? null }
         })
       );
       const [existingUsers, existingLocalTickets, remotePlans, remoteServers] = await Promise.all([
