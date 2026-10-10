@@ -26,6 +26,8 @@ export type ConnectedClientViewModel = {
   id: string;
   ipAddress: string;
   macAddress: string;
+  /** Device lock read on RouterOS (/ip hotspot user mac-address). */
+  deviceLock: ClientDeviceLock;
   planId: string | null;
   planName: string;
   profileName: string | null;
@@ -42,6 +44,36 @@ export type ConnectedClientViewModel = {
   uptimeMinutes: number;
   username: string;
 };
+
+/**
+ * - locked: the RouterOS user carries the MAC of this session; RouterOS refuses
+ *   the voucher from any other device.
+ * - mismatch: the RouterOS user carries another MAC than this session.
+ * - unlocked: the RouterOS user has no MAC; any device can use the voucher.
+ * - not_voucher: no TicketPro voucher on RouterOS for this session (other
+ *   hotspot account, trial, bypass…); the first-device rule does not apply.
+ * - unverified: only the local cache is available.
+ */
+export type ClientDeviceLockState = "locked" | "mismatch" | "unlocked" | "not_voucher" | "unverified";
+
+export type ClientDeviceLock = {
+  lockedMacAddress: string | null;
+  state: ClientDeviceLockState;
+};
+
+export type DeviceLockSummary = {
+  /** Unique TicketPro vouchers among the listed sessions. */
+  concernedVouchers: number;
+  lockedVouchers: number;
+  mismatchVouchers: number;
+  /** Listed sessions that are not TicketPro vouchers. */
+  outsideSessions: number;
+  sessions: number;
+  unlockedVouchers: number;
+  unverifiedVouchers: number;
+};
+
+const ticketProVoucherCommentPrefix = "TicketPro:v1;";
 
 export type ConnectedClientPlanOption = {
   id: string;
@@ -60,7 +92,16 @@ export function buildConnectedClientViewModels(
   activeUsers: ActiveHotspotUser[],
   hotspotUsers: HotspotUser[],
   plans: HotspotPlan[],
-  router: { id: string; name: string }
+  router: { id: string; name: string },
+  /**
+   * TicketPro plan names keyed by their current RouterOS profile name. The
+   * RouterOS profile name is a technical reference: renaming a plan in
+   * TicketPro does not rename its profile, so the display name comes from
+   * the local plan whenever one points at the voucher's current profile.
+   */
+  localPlanNamesByProfile?: ReadonlyMap<string, string>,
+  /** Usernames of the TicketPro vouchers stored locally for this router. */
+  managedVoucherUsernames?: ReadonlySet<string>
 ): ConnectedClientViewModel[] {
   const ticketsByUsername = new Map(hotspotUsers.map((user) => [user.username, user]));
 
@@ -89,6 +130,7 @@ export function buildConnectedClientViewModels(
     const timeConsumed = durationLimitSeconds > 0 && uptimeSeconds >= durationLimitSeconds;
     const quotaConsumed = dataLimitBytes !== null && totalBytes >= dataLimitBytes;
     const validityExpired = expiresAt !== null && Date.parse(expiresAt) <= Date.now();
+    const deviceLock = resolveDeviceLock(ticket, activeUser.macAddress, managedVoucherUsernames);
 
     return {
       consumptionPercent: calculateConsumptionPercent(
@@ -106,8 +148,10 @@ export function buildConnectedClientViewModels(
       id: activeUser.id,
       ipAddress: activeUser.ipAddress,
       macAddress: activeUser.macAddress,
+      deviceLock,
       planId: plan?.id ?? ticket?.planId ?? null,
-      planName: plan?.name ?? ticket?.profileName ?? ticket?.planId ?? "Plan non identifié",
+      planName: (ticket?.profileName ? localPlanNamesByProfile?.get(ticket.profileName) : undefined)
+        ?? plan?.name ?? ticket?.profileName ?? ticket?.planId ?? "Plan non identifié",
       profileName: ticket?.profileName ?? plan?.profileName ?? null,
       routerId: router.id,
       routerName: router.name,
@@ -181,6 +225,10 @@ export function buildCachedConnectedClientViewModels(
       id: cachedUser.id,
       ipAddress: cachedUser.ip_address ?? "",
       macAddress: cachedUser.mac_address ?? "",
+      deviceLock: {
+        lockedMacAddress: ticket?.mac_address ?? null,
+        state: ticket ? "unverified" : "not_voucher"
+      },
       planId: plan?.id ?? ticket?.plan_id ?? null,
       planName: plan?.name ?? ticket?.plan_id ?? "Plan non identifié",
       profileName: ticket?.mikrotik_profile_name ?? plan?.mikrotik_profile_name ?? null,
@@ -266,6 +314,90 @@ export function getConnectedClientPlanOptions(
   return Array.from(options.entries())
     .map(([id, name]) => ({ id, name }))
     .sort((left, right) => left.name.localeCompare(right.name, "fr"));
+}
+
+/**
+ * Counts unique vouchers (not sessions) so a voucher shared by two sessions is
+ * counted once, and sessions outside TicketPro vouchers are reported apart.
+ */
+export function summarizeDeviceLocks(clients: ConnectedClientViewModel[]): DeviceLockSummary {
+  const byVoucher = new Map<string, ClientDeviceLockState>();
+  const rank: Record<ClientDeviceLockState, number> = { mismatch: 4, unlocked: 3, unverified: 2, locked: 1, not_voucher: 0 };
+  let outsideSessions = 0;
+  for (const client of clients) {
+    if (client.deviceLock.state === "not_voucher") {
+      outsideSessions += 1;
+      continue;
+    }
+    const current = byVoucher.get(client.username);
+    // A voucher with one locked session and one foreign session is not safe.
+    if (!current || rank[client.deviceLock.state] > rank[current]) {
+      byVoucher.set(client.username, client.deviceLock.state);
+    }
+  }
+  const states = Array.from(byVoucher.values());
+  const count = (state: ClientDeviceLockState) => states.filter((item) => item === state).length;
+  return {
+    concernedVouchers: byVoucher.size,
+    lockedVouchers: count("locked"),
+    mismatchVouchers: count("mismatch"),
+    outsideSessions,
+    sessions: clients.length,
+    unlockedVouchers: count("unlocked"),
+    unverifiedVouchers: count("unverified")
+  };
+}
+
+export function formatDeviceLockSummary(summary: DeviceLockSummary): string {
+  const parts = [
+    `${summary.lockedVouchers} ticket(s) verrouillé(s) sur ${summary.concernedVouchers} ticket(s) TicketPro concerné(s)`
+  ];
+  if (summary.unlockedVouchers > 0) parts.push(`${summary.unlockedVouchers} non verrouillé(s)`);
+  if (summary.mismatchVouchers > 0) parts.push(`${summary.mismatchVouchers} appareil(s) différent(s) du verrou`);
+  if (summary.unverifiedVouchers > 0) parts.push(`${summary.unverifiedVouchers} non vérifié(s) (cache)`);
+  if (summary.outsideSessions > 0) parts.push(`${summary.outsideSessions} session(s) hors vouchers TicketPro`);
+  return `${parts.join(" · ")} — ${summary.sessions} session(s) affichée(s).`;
+}
+
+export function deviceLockLabel(lock: ClientDeviceLock): string {
+  switch (lock.state) {
+    case "locked":
+      return `Verrouillé sur ${lock.lockedMacAddress}`;
+    case "mismatch":
+      return `Verrou sur un autre appareil (${lock.lockedMacAddress})`;
+    case "unlocked":
+      return "Non verrouillé sur RouterOS";
+    case "unverified":
+      return lock.lockedMacAddress ? `Non vérifié (cache : ${lock.lockedMacAddress})` : "Non vérifié (cache)";
+    default:
+      return "Non concerné (hors voucher TicketPro)";
+  }
+}
+
+function resolveDeviceLock(
+  user: HotspotUser | undefined,
+  sessionMacAddress: string,
+  managedVoucherUsernames: ReadonlySet<string> | undefined
+): ClientDeviceLock {
+  const isTicketProVoucher = Boolean(user) && (
+    (user?.comment ?? "").startsWith(ticketProVoucherCommentPrefix)
+    || (managedVoucherUsernames?.has(user?.username ?? "") ?? false)
+  );
+  if (!user || !isTicketProVoucher) {
+    return { lockedMacAddress: user?.macAddress ?? null, state: "not_voucher" };
+  }
+  const lockedMacAddress = user.macAddress && user.macAddress !== "00:00:00:00:00:00"
+    ? normalizeMac(user.macAddress)
+    : null;
+  if (!lockedMacAddress) return { lockedMacAddress: null, state: "unlocked" };
+  return {
+    lockedMacAddress,
+    state: lockedMacAddress === normalizeMac(sessionMacAddress) ? "locked" : "mismatch"
+  };
+}
+
+function normalizeMac(value: string): string {
+  return value.trim().replace(/-/g, ":").toUpperCase();
 }
 
 export function formatClientBytes(bytes: number): string {

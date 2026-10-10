@@ -134,4 +134,44 @@ describe("ReportPage invited reader", () => {
     expect((mocks.catalog.mock.calls[0][2] as AbortSignal).aborted).toBe(true);
     expect(screen.queryByText("Synchronisation…")).not.toBeInTheDocument();
   });
+
+  it("publishes one complete result per refresh instead of intermediate figures", async () => {
+    const cloudTicket = (id: string, username: string) => ({
+      id, batch_id: "cloud-batch", plan_id: "cloud-plan", username,
+      created_by_role: "operator", created_by_user_id: "other", created_at: new Date().toISOString(),
+      activated_at: null, completed_at: null, expires_at: null, deleted_at: null,
+      downloaded_bytes: 0, uploaded_bytes: 0, printed_count: 0, uptime_seconds: 0,
+      status: "disponible", last_router_sync_at: null, duration_minutes_snapshot: 60,
+      validity_minutes_snapshot: 180
+    });
+    mocks.catalog.mockResolvedValueOnce({ router_id: "cloud-local-1", batches: [], tickets: [cloudTicket("t1", "V1")] });
+    mocks.catalog.mockResolvedValue({ router_id: "cloud-local-1", batches: [],
+      tickets: [cloudTicket("t1", "V1"), cloudTicket("t2", "V2")] });
+    let releaseRouter!: () => void;
+    let routerReads = 0;
+    mocks.createRouter.mockResolvedValue({
+      listActiveUsers: async () => [],
+      listHotspotUsers: async () => {
+        routerReads += 1;
+        if (routerReads > 1) await new Promise<void>(resolve => { releaseRouter = resolve; });
+        return [];
+      }
+    });
+    const created = () => [...document.querySelectorAll(".stat-card")]
+      .find(card => card.querySelector(".stat-card__label")?.textContent === "Créés")
+      ?.querySelector(".stat-card__value")?.textContent;
+
+    render(view());
+    await screen.findByText("En direct");
+    expect(created()).toBe("1");
+
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    await waitFor(() => expect(routerReads).toBe(2));
+    // Shared catalogue already read, RouterOS still pending: no partial update.
+    expect(created()).toBe("1");
+    expect(screen.getByText("En direct")).toBeInTheDocument();
+
+    await act(async () => { releaseRouter(); });
+    await waitFor(() => expect(created()).toBe("2"));
+  });
 });

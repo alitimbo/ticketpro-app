@@ -87,6 +87,23 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
       : this.delegate.listHotspotUsers();
   }
 
+  listHotspotUsersByUsernames(usernames: string[]) {
+    if (this.delegate.listHotspotUsersByUsernames) {
+      return this.delegate.listHotspotUsersByUsernames(usernames);
+    }
+    const requested = new Set(usernames);
+    return this.listHotspotUsersForVerification().then((users) =>
+      users.filter((user) => requested.has(user.username))
+    );
+  }
+
+  configureVoucherFirstMacLock(enabled: boolean, managedProfileNames: string[]) {
+    if (!this.delegate.configureVoucherFirstMacLock) {
+      return Promise.reject(new Error("Verrouillage MAC automatique indisponible."));
+    }
+    return this.delegate.configureVoucherFirstMacLock(enabled, managedProfileNames);
+  }
+
   listHotspotUsernames() {
     return this.delegate.listHotspotUsernames
       ? this.delegate.listHotspotUsernames()

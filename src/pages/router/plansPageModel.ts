@@ -79,7 +79,7 @@ export function applyTemplate(values: PlanFormValues, template: PlanTemplate): P
     durationAmount: template.durationAmount,
     durationUnit: template.durationUnit,
     name: template.name,
-    profileName: toProfileName(template.name),
+    profileName: routerProfileNameForPlan(template.name),
     validityAmount: template.validityAmount ?? template.durationAmount,
     validityUnit: template.validityUnit ?? template.durationUnit
   };
@@ -116,7 +116,8 @@ export function formValuesToPlanDraft(values: PlanFormValues): CommercialHotspot
     durationMinutes: durationToMinutes(values.durationAmount, values.durationUnit),
     name: values.name.trim(),
     priceHint: values.priceHint ? Number(values.priceHint) : null,
-    profileName: values.profileName.trim() || toProfileName(values.name),
+    // The RouterOS profile always carries the plan name, as in Winbox.
+    profileName: routerProfileNameForPlan(values.name),
     sharedUsers: Number(values.sharedUsers),
     status: values.status,
     uploadLimit: values.uploadLimit || null,
@@ -348,10 +349,54 @@ function mbToDataAmount(value: number | null): Pick<PlanFormValues, "dataAmount"
   return { dataAmount: String(value), dataUnit: "mb" };
 }
 
-function toProfileName(name: string): string {
-  return name
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "");
+/**
+ * RouterOS profile name for a TicketPro plan: the plan name itself, without
+ * the characters RouterOS scripts and the API cannot quote safely.
+ */
+export function routerProfileNameForPlan(name: string): string {
+  return name.trim().replace(/["\\$;]/g, "-").replace(/\s+/g, " ");
+}
+
+/** Another plan of the router already uses this RouterOS profile name. */
+export function findPlanProfileConflict(
+  name: string,
+  plans: Array<Pick<HotspotPlan, "id" | "name" | "profileName">>,
+  currentPlanId: string | null
+): string | null {
+  const wanted = routerProfileNameForPlan(name).toLowerCase();
+  const conflict = plans.find((plan) =>
+    plan.id !== currentPlanId
+    && (plan.profileName.toLowerCase() === wanted || routerProfileNameForPlan(plan.name).toLowerCase() === wanted)
+  );
+  return conflict ? `Le plan « ${conflict.name} » utilise déjà ce nom sur le routeur.` : null;
+}
+
+/**
+ * Explains what a plan edit changes. A new name never changes the duration,
+ * validity or quota; changed limits only reach vouchers that were never used.
+ */
+export function describePlanChangeImpact(
+  previous: Pick<HotspotPlan, "dataLimitMb" | "durationMinutes" | "name" | "profileName" | "validityMinutes">,
+  next: Pick<HotspotPlanDraft, "dataLimitMb" | "durationMinutes" | "name" | "profileName" | "validityMinutes">,
+  vouchers?: { immutableTicketsSkipped: number; updatedRouterUsers: number }
+): string {
+  const parts: string[] = [];
+  if (previous.name !== next.name) parts.push(`Nom : « ${previous.name} » → « ${next.name} ».`);
+  if (previous.profileName !== next.profileName) {
+    parts.push(`Profil RouterOS : « ${previous.profileName} » → « ${next.profileName} ».`);
+  }
+  const limitsChanged = previous.durationMinutes !== next.durationMinutes
+    || (previous.validityMinutes ?? null) !== (next.validityMinutes ?? null)
+    || (previous.dataLimitMb ?? null) !== (next.dataLimitMb ?? null);
+  if (!limitsChanged) {
+    parts.push("Durée, validité et quota inchangés.");
+  } else if (vouchers) {
+    parts.push(
+      `Nouvelles limites appliquées à ${vouchers.updatedRouterUsers} ticket(s) non utilisé(s) ; `
+      + `${vouchers.immutableTicketsSkipped} ticket(s) déjà utilisé(s) conservent leurs conditions.`
+    );
+  } else {
+    parts.push("Les tickets déjà utilisés conservent leurs conditions.");
+  }
+  return parts.join(" ");
 }
