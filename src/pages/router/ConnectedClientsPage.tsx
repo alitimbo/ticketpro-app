@@ -54,10 +54,13 @@ import {
 import {
   buildConnectedClientViewModels,
   buildCachedConnectedClientViewModels,
+  deviceLockLabel,
   emptyConnectedClientFilters,
   filterConnectedClients,
   formatClientBytes,
+  formatDeviceLockSummary,
   getConnectedClientPlanOptions,
+  summarizeDeviceLocks,
   type ConnectedClientFilters,
   type ConnectedClientPlanOption,
   type ConnectedClientViewModel
@@ -97,6 +100,8 @@ export function ConnectedClientsPage() {
   const [availablePlans, setAvailablePlans] = useState<ConnectedClientPlanOption[]>([]);
   const [isLiveRefreshing, setIsLiveRefreshing] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
+  const [lockPolicyEnabled, setLockPolicyEnabled] = useState(false);
+  const managedVoucherUsernamesRef = useRef<{ routerId: string; usernames: Set<string> } | null>(null);
   const refreshRunningRef = useRef(false);
   const clientsRef = useRef<ConnectedClientViewModel[]>([]);
   const liveRouterServiceRef = useRef<{ key: string; service: RouterService } | null>(null);
@@ -170,13 +175,14 @@ export function ConnectedClientsPage() {
 
     try {
       const service = await createService(!options.silent);
-      const [activeUsers, hotspotUsers, plans, routers, localPlans] = await Promise.all([
+      const [activeUsers, routerHotspotUsers, plans, routers, localPlans] = await Promise.all([
         service.listActiveUsers(),
         service.listHotspotUsers(),
         service.getHotspotPlans(),
         isPersistent ? Promise.resolve([]) : service.listRouters(),
         isPersistent ? planRepository.listByRouter(routerId) : Promise.resolve([])
       ]);
+      let hotspotUsers = routerHotspotUsers;
       const persistedRouter = isPersistent ? await routerRepository.findById(routerId) : null;
       const router = persistedRouter ?? routers.find((item) => item.id === routerId) ?? routers[0] ?? { id: routerId, name: "Routeur" };
 
@@ -196,6 +202,11 @@ export function ConnectedClientsPage() {
             ),
             ticketRepository.listByRouter(routerId)
           ]);
+          managedVoucherUsernamesRef.current = {
+            routerId,
+            usernames: new Set(ticketRecords.map((ticket) => ticket.username))
+          };
+          setLockPolicyEnabled(policy.policy.lockVoucherToFirstMac);
           if (
             policy.policy.lockVoucherToFirstMac
             && canManageDeviceBinding
@@ -208,25 +219,34 @@ export function ConnectedClientsPage() {
               routerService: service,
               tickets: ticketRecords
             });
-            if (bindingResult.errors.length > 0) {
-              setNotice({
-                status: "error",
-                text: `${bindingResult.errors.length} voucher(s) n'ont pas pu être verrouillés. Consultez les logs puis réessayez.`
-              });
-            } else if (bindingResult.conflicts.length > 0) {
-              setNotice({
-                status: "error",
-                text: `${bindingResult.conflicts.length} partage ou changement d’appareil suspect détecté.`
-              });
+            if (bindingResult.verifiedUsers.length > 0) {
+              const verifiedByUsername = new Map(bindingResult.verifiedUsers.map((user) => [user.username, user]));
+              hotspotUsers = hotspotUsers.map((user) => verifiedByUsername.get(user.username) ?? user);
+            }
+            // The overall lock state is shown by the summary computed from
+            // RouterOS; this notice only reports what this pass changed.
+            const problems = [
+              bindingResult.errors.length > 0
+                ? `${bindingResult.errors.length} voucher(s) n'ont pas pu être verrouillés (consultez les logs puis réessayez)`
+                : null,
+              bindingResult.conflicts.length > 0
+                ? `${bindingResult.conflicts.length} partage ou changement d’appareil suspect détecté`
+                : null
+            ].filter(Boolean);
+            if (problems.length > 0) {
+              setNotice({ status: "error", text: `${problems.join(" · ")}.` });
             } else if (bindingResult.boundUsernames.length > 0) {
               setNotice({
                 status: "success",
-                text: `${bindingResult.boundUsernames.length} voucher(s) verrouillé(s) sur leur premier appareil.`
+                text: `${bindingResult.boundUsernames.length} nouveau(x) voucher(s) verrouillé(s) sur leur premier appareil lors de cette synchronisation.`
               });
             }
           }
         }
       }
+      const managedVoucherUsernames = managedVoucherUsernamesRef.current?.routerId === routerId
+        ? managedVoucherUsernamesRef.current.usernames
+        : undefined;
       const localPlanNamesByProfile = new Map(
         localPlans
           .filter((plan) => plan.mikrotik_profile_name)
@@ -237,7 +257,8 @@ export function ConnectedClientsPage() {
         hotspotUsers,
         plans,
         router,
-        localPlanNamesByProfile
+        localPlanNamesByProfile,
+        managedVoucherUsernames
       );
       setAvailablePlans(plans.map((plan) => ({ id: plan.id, name: plan.name })));
       applyClients(liveClients);
@@ -310,6 +331,10 @@ export function ConnectedClientsPage() {
   const planOptions = useMemo(
     () => getConnectedClientPlanOptions(clients, availablePlans),
     [availablePlans, clients]
+  );
+  const deviceLockSummary = useMemo(
+    () => (lockPolicyEnabled ? summarizeDeviceLocks(filteredClients) : null),
+    [filteredClients, lockPolicyEnabled]
   );
   const totalDownload = filteredClients.reduce((total, client) => total + client.downloadedBytes, 0);
   const totalUpload = filteredClients.reduce((total, client) => total + client.uploadedBytes, 0);
@@ -573,6 +598,14 @@ export function ConnectedClientsPage() {
       {notice ? (
         <p className={`form-error ${notice.status === "success" ? "form-error--success" : ""}`}>{notice.text}</p>
       ) : null}
+      {deviceLockSummary ? (
+        <p
+          className={`form-error ${deviceLockSummary.lockedVouchers === deviceLockSummary.concernedVouchers ? "form-error--success" : ""}`}
+          role="status"
+        >
+          <ShieldCheck aria-hidden="true" /> {formatDeviceLockSummary(deviceLockSummary)}
+        </p>
+      ) : null}
 
       <Card className="clients-list-card">
         {filteredClients.length > 0 ? (
@@ -586,6 +619,7 @@ export function ConnectedClientsPage() {
                 isBusy={busyUsername === client.username}
                 isCached={dataSource === "cache"}
                 key={client.id}
+                showDeviceLock={lockPolicyEnabled}
                 onCopyIp={() => void copyValue("IP", client.ipAddress)}
                 onCopyMac={() => void copyValue("MAC", client.macAddress)}
                 onDetail={() => setSelectedClient(client)}
@@ -658,6 +692,7 @@ type ConnectedClientRowProps = {
   onDisable: () => void;
   onDisconnect: () => void;
   onReleaseDevice: () => void;
+  showDeviceLock: boolean;
 };
 
 function ConnectedClientRow({
@@ -672,7 +707,8 @@ function ConnectedClientRow({
   onDetail,
   onDisable,
   onDisconnect,
-  onReleaseDevice
+  onReleaseDevice,
+  showDeviceLock
 }: ConnectedClientRowProps) {
   return (
     <article
@@ -705,6 +741,9 @@ function ConnectedClientRow({
       <div className="client-row__network">
         <span><Smartphone aria-hidden="true" /> {client.ipAddress}</span>
         <span><Laptop aria-hidden="true" /> {client.macAddress}</span>
+        {showDeviceLock ? (
+          <span><ShieldCheck aria-hidden="true" /> {deviceLockLabel(client.deviceLock)}</span>
+        ) : null}
       </div>
 
       <div className="client-row__usage">
@@ -774,6 +813,7 @@ function ClientDetailDialog({
           <DetailLine icon={Router} label="Routeur" value={client.routerName} />
           <DetailLine icon={Smartphone} label="Adresse IP" value={client.ipAddress} />
           <DetailLine icon={Laptop} label="Adresse MAC" value={client.macAddress} />
+          <DetailLine icon={ShieldCheck} label="Verrouillage appareil (RouterOS)" value={deviceLockLabel(client.deviceLock)} />
           <DetailLine icon={Clock} label="Session actuelle" value={client.currentSessionUptime} />
           <DetailLine icon={Clock} label="Temps total utilisé" value={client.uptime} />
           <DetailLine icon={Clock} label="Temps d'utilisation restant" value={client.sessionTimeLeft} />

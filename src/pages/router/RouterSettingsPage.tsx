@@ -13,6 +13,7 @@ import {
 import { useAuth } from "../../app/auth/AuthProvider";
 import type { RouterRecord } from "../../domain/database";
 import {
+  HotspotPlanRepository,
   RouterConnectionRepository,
   RouterManagedResourceManifestRepository,
   RouterRepository,
@@ -909,6 +910,19 @@ export function RouterSettingsPage() {
     if (verified.blockIpv4Ttl !== expectedIpv4 || verified.blockIpv6 !== expectedIpv6) {
       throw new Error("RouterOS n'a pas confirmé l'état réel des protections anti-partage.");
     }
+    // The first-device lock is applied by RouterOS itself at login, so it also
+    // works while TicketPro is closed.
+    const managedProfileNames = (await new HotspotPlanRepository(database).listByRouter(router.id))
+      .filter((plan) => !plan.deleted_at)
+      .map((plan) => plan.mikrotik_profile_name?.trim() || plan.name.trim())
+      .filter(Boolean);
+    const lockState = await service.configureVoucherFirstMacLock(policy.lockVoucherToFirstMac, managedProfileNames);
+    if (
+      lockState.enabled !== policy.lockVoucherToFirstMac
+      || (policy.lockVoucherToFirstMac && lockState.profilesWithHandler < lockState.managedProfiles)
+    ) {
+      throw new Error("RouterOS n'a pas confirmé le verrouillage automatique sur le premier appareil.");
+    }
   };
 
   const refreshAccessPolicyFromRouter = async () => {
@@ -1271,8 +1285,9 @@ export function RouterSettingsPage() {
               <span className="anti-sharing-option-card__content">
                 <strong>Verrouillage du voucher par MAC</strong>
                 <small>
-                  La première adresse MAC qui utilise le voucher devient la seule autorisée.
-                  Un changement d’appareil exige de libérer cette liaison dans TicketPro.
+                  Le routeur enregistre lui-même la MAC de la première connexion, même si
+                  TicketPro est fermé : elle devient la seule autorisée. Un changement
+                  d’appareil exige de libérer cette liaison dans TicketPro.
                 </small>
                 <em>Indépendant du mode réseau</em>
               </span>

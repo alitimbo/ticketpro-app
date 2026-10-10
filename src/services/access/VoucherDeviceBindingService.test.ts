@@ -6,10 +6,40 @@ import type { RouterService } from "../router";
 import { VoucherDeviceBindingService } from "./VoucherDeviceBindingService";
 
 describe("VoucherDeviceBindingService", () => {
+  it("ne compte pas un verrou que RouterOS n'a pas conservé", async () => {
+    const ticket = createTicket();
+    const update = vi.fn();
+    const bindHotspotUserToMac = vi.fn(async () => createHotspotUser());
+    const service = new VoucherDeviceBindingService({ update } as unknown as TicketRepository);
+
+    const result = await service.synchronize({
+      accountId: "account-1",
+      activeUsers: [{
+        downloadedBytes: 0,
+        id: "*A1",
+        ipAddress: "192.168.88.101",
+        macAddress: "AA:BB:CC:DD:EE:01",
+        sessionTimeLeft: "1h",
+        uploadedBytes: 0,
+        uptime: "1m",
+        username: "123456"
+      }],
+      hotspotUsers: [createHotspotUser()],
+      routerId: "router-1",
+      routerService: { bindHotspotUserToMac } as unknown as RouterService,
+      tickets: [ticket]
+    });
+
+    expect(result.boundUsernames).toEqual([]);
+    expect(result.verifiedUsers).toEqual([]);
+    expect(result.errors).toEqual([{ message: "RouterOS n'a pas conservé l'adresse MAC du voucher.", username: "123456" }]);
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it("verrouille un voucher sur la MAC de sa première session", async () => {
     const ticket = createTicket();
     const update = vi.fn(async (input) => ({ ...ticket, ...input }));
-    const bindHotspotUserToMac = vi.fn(async () => createHotspotUser());
+    const bindHotspotUserToMac = vi.fn(async (_username: string, macAddress: string) => ({ ...createHotspotUser(), macAddress }));
     const service = new VoucherDeviceBindingService({
       update
     } as unknown as TicketRepository);
@@ -90,7 +120,7 @@ describe("VoucherDeviceBindingService", () => {
   it("ne déplace pas le verrou si deux sessions du même voucher sont observées ensemble", async () => {
     const ticket = createTicket();
     const update = vi.fn(async (input) => ({ ...ticket, ...input }));
-    const bindHotspotUserToMac = vi.fn(async () => createHotspotUser());
+    const bindHotspotUserToMac = vi.fn(async (_username: string, macAddress: string) => ({ ...createHotspotUser(), macAddress }));
     const service = new VoucherDeviceBindingService({
       update
     } as unknown as TicketRepository);
