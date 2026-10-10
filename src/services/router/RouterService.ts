@@ -194,7 +194,7 @@ export class RouterService {
     );
   }
 
-<<<<<<< HEAD
+<<<<<<<<< Temporary merge branch 1
   listHotspotUsersByUsernames(usernames: string[]) {
     return this.run("listHotspotUsersByUsernames", async () => {
       if (usernames.length === 0) return [];
@@ -207,7 +207,7 @@ export class RouterService {
         : await this.adapter.listHotspotUsers();
       return users.filter((user) => requested.has(user.username));
     });
-=======
+=========
   configureVoucherFirstMacLock(enabled: boolean, managedProfileNames: string[]) {
     return this.run("configureVoucherFirstMacLock", async () => {
       if (!this.adapter.configureVoucherFirstMacLock) {
@@ -215,7 +215,7 @@ export class RouterService {
       }
       return this.adapter.configureVoucherFirstMacLock(enabled, managedProfileNames);
     }, "router.settings.manage");
->>>>>>> origin/main
+>>>>>>>>> Temporary merge branch 2
   }
 
   listHotspotUsernames() {
