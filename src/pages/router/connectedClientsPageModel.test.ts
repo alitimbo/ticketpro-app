@@ -380,3 +380,16 @@ describe("findVouchersMissingQuota", () => {
     ]);
   });
 });
+
+describe("nom de plan après renommage dans TicketPro", () => {
+  it("affiche le nom TicketPro actuel d'un profil RouterOS inchangé", () => {
+    const [client] = buildConnectedClientViewModels(
+      [activeUsers[0]],
+      [{ ...hotspotUsers[0], planId: "4H", profileName: "4H" }],
+      [{ ...plans[0], id: "*P4", name: "4H", profileName: "4H" }],
+      { id: "routeur-demo", name: "Routeur démo" },
+      new Map([["4H", "6H"]])
+    );
+    expect(client).toMatchObject({ planName: "6H", profileName: "4H" });
+  });
+});

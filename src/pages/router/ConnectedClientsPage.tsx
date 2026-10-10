@@ -175,11 +175,12 @@ export function ConnectedClientsPage() {
 
     try {
       const service = await createService(!options.silent);
-      const [activeUsers, hotspotUsers, plans, routers] = await Promise.all([
+      const [activeUsers, hotspotUsers, plans, routers, localPlans] = await Promise.all([
         service.listActiveUsers(),
         service.listHotspotUsers(),
         service.getHotspotPlans(),
-        isPersistent ? Promise.resolve([]) : service.listRouters()
+        isPersistent ? Promise.resolve([]) : service.listRouters(),
+        isPersistent ? planRepository.listByRouter(routerId) : Promise.resolve([])
       ]);
       const persistedRouter = isPersistent ? await routerRepository.findById(routerId) : null;
       const router = persistedRouter ?? routers.find((item) => item.id === routerId) ?? routers[0] ?? { id: routerId, name: "Routeur" };
@@ -231,7 +232,18 @@ export function ConnectedClientsPage() {
           }
         }
       }
-      const liveClients = buildConnectedClientViewModels(activeUsers, hotspotUsers, plans, router);
+      const localPlanNamesByProfile = new Map(
+        localPlans
+          .filter((plan) => plan.mikrotik_profile_name)
+          .map((plan) => [plan.mikrotik_profile_name as string, plan.name])
+      );
+      const liveClients = buildConnectedClientViewModels(
+        activeUsers,
+        hotspotUsers,
+        plans,
+        router,
+        localPlanNamesByProfile
+      );
       setAvailablePlans(plans.map((plan) => ({ id: plan.id, name: plan.name })));
       applyClients(liveClients);
       setDataSource("live");
