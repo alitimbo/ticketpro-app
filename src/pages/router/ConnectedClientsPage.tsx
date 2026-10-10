@@ -216,10 +216,11 @@ export function ConnectedClientsPage() {
       const service = await createService(!options.silent);
       // Only the vouchers of the active sessions are read, without passwords,
       // instead of every hotspot user of the router.
-      const [activeUsers, plans, routers] = await Promise.all([
+      const [activeUsers, plans, routers, localPlans] = await Promise.all([
         service.listActiveUsers(),
         readPlans(service, !options.silent),
-        isPersistent ? Promise.resolve([]) : service.listRouters()
+        isPersistent ? Promise.resolve([]) : service.listRouters(),
+        isPersistent ? planRepository.listByRouter(routerId) : Promise.resolve([])
       ]);
       const hotspotUsers = await service.listHotspotUsersByUsernames(
         activeUsers.map((user) => user.username)
@@ -276,7 +277,18 @@ export function ConnectedClientsPage() {
         }
       }
       if (!isCurrent()) return;
-      const liveClients = buildConnectedClientViewModels(activeUsers, hotspotUsers, plans, router);
+      const localPlanNamesByProfile = new Map(
+        localPlans
+          .filter((plan) => plan.mikrotik_profile_name)
+          .map((plan) => [plan.mikrotik_profile_name as string, plan.name])
+      );
+      const liveClients = buildConnectedClientViewModels(
+        activeUsers,
+        hotspotUsers,
+        plans,
+        router,
+        localPlanNamesByProfile
+      );
       setAvailablePlans(plans.map((plan) => ({ id: plan.id, name: plan.name })));
       applyClients(liveClients);
       setDataSource("live");
