@@ -880,6 +880,14 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     if (updated.dataLimitSource !== "routeros" || updated.dataLimitMb !== next.dataLimitMb) {
       throw new RouterAdapterError("router_rejected", "RouterOS n'a pas confirmé le quota du plan.");
     }
+    // A plan change is confirmed only once RouterOS returns the written values.
+    if (
+      updated.profileName !== next.profileName
+      || updated.sharedUsers !== next.sharedUsers
+      || updated.durationMinutes !== next.durationMinutes
+    ) {
+      throw new RouterAdapterError("router_rejected", "RouterOS n'a pas confirmé la modification du profil.");
+    }
     return updated;
   }
 

@@ -175,11 +175,12 @@ export function ConnectedClientsPage() {
 
     try {
       const service = await createService(!options.silent);
-      const [activeUsers, routerHotspotUsers, plans, routers] = await Promise.all([
+      const [activeUsers, hotspotUsers, plans, routers] = await Promise.all([
         service.listActiveUsers(),
         service.listHotspotUsers(),
         service.getHotspotPlans(),
-        isPersistent ? Promise.resolve([]) : service.listRouters()
+        isPersistent ? Promise.resolve([]) : service.listRouters(),
+        isPersistent ? planRepository.listByRouter(routerId) : Promise.resolve([])
       ]);
       let hotspotUsers = routerHotspotUsers;
       const persistedRouter = isPersistent ? await routerRepository.findById(routerId) : null;
@@ -243,10 +244,7 @@ export function ConnectedClientsPage() {
           }
         }
       }
-      const managedVoucherUsernames = managedVoucherUsernamesRef.current?.routerId === routerId
-        ? managedVoucherUsernamesRef.current.usernames
-        : undefined;
-      const liveClients = buildConnectedClientViewModels(activeUsers, hotspotUsers, plans, router, managedVoucherUsernames);
+      const liveClients = buildConnectedClientViewModels(activeUsers, hotspotUsers, plans, router);
       setAvailablePlans(plans.map((plan) => ({ id: plan.id, name: plan.name })));
       applyClients(liveClients);
       setDataSource("live");

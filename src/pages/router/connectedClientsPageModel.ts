@@ -92,9 +92,7 @@ export function buildConnectedClientViewModels(
   activeUsers: ActiveHotspotUser[],
   hotspotUsers: HotspotUser[],
   plans: HotspotPlan[],
-  router: { id: string; name: string },
-  /** Usernames of the TicketPro vouchers stored locally for this router. */
-  managedVoucherUsernames?: ReadonlySet<string>
+  router: { id: string; name: string }
 ): ConnectedClientViewModel[] {
   const ticketsByUsername = new Map(hotspotUsers.map((user) => [user.username, user]));
 
@@ -143,7 +141,8 @@ export function buildConnectedClientViewModels(
       macAddress: activeUser.macAddress,
       deviceLock,
       planId: plan?.id ?? ticket?.planId ?? null,
-      planName: plan?.name ?? ticket?.profileName ?? ticket?.planId ?? "Plan non identifié",
+      planName: (ticket?.profileName ? localPlanNamesByProfile?.get(ticket.profileName) : undefined)
+        ?? plan?.name ?? ticket?.profileName ?? ticket?.planId ?? "Plan non identifié",
       profileName: ticket?.profileName ?? plan?.profileName ?? null,
       routerId: router.id,
       routerName: router.name,
