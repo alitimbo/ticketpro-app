@@ -194,6 +194,15 @@ export class RouterService {
     );
   }
 
+  setHotspotUserQuota(username: string, limitBytesTotal: number) {
+    return this.run("setHotspotUserQuota", async () => {
+      if (!this.adapter.setHotspotUserQuota) {
+        throw new RouterServiceError("router_rejected", "Ce routeur ne permet pas de corriger le quota d'un voucher.");
+      }
+      return this.adapter.setHotspotUserQuota(username, limitBytesTotal);
+    }, "router.tickets.sync");
+  }
+
   listHotspotUsersByUsernames(usernames: string[]) {
     return this.run("listHotspotUsersByUsernames", async () => {
       if (usernames.length === 0) return [];
