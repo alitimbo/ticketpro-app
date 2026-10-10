@@ -108,16 +108,12 @@ export function ConnectedClientsPage() {
   const [availablePlans, setAvailablePlans] = useState<ConnectedClientPlanOption[]>([]);
   const [isLiveRefreshing, setIsLiveRefreshing] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
-<<<<<<<<< Temporary merge branch 1
+  const [lockPolicyEnabled, setLockPolicyEnabled] = useState(false);
+  const managedVoucherUsernamesRef = useRef<{ routerId: string; usernames: Set<string> } | null>(null);
   const refreshRunningRef = useRef<string | null>(null);
   const viewGenerationRef = useRef(0);
   const displayedRouterIdRef = useRef<string | null>(null);
   const plansCacheRef = useRef<{ key: string; plans: HotspotPlan[]; readAt: number } | null>(null);
-=========
-  const [lockPolicyEnabled, setLockPolicyEnabled] = useState(false);
-  const managedVoucherUsernamesRef = useRef<{ routerId: string; usernames: Set<string> } | null>(null);
-  const refreshRunningRef = useRef(false);
->>>>>>>>> Temporary merge branch 2
   const clientsRef = useRef<ConnectedClientViewModel[]>([]);
   const liveRouterServiceRef = useRef<{ key: string; service: RouterService } | null>(null);
 
@@ -223,26 +219,18 @@ export function ConnectedClientsPage() {
 
     try {
       const service = await createService(!options.silent);
-<<<<<<<<< Temporary merge branch 1
       // Only the vouchers of the active sessions are read, without passwords,
       // instead of every hotspot user of the router.
       const [activeUsers, plans, routers, localPlans] = await Promise.all([
-=========
-      const [activeUsers, routerHotspotUsers, plans, routers, localPlans] = await Promise.all([
->>>>>>>>> Temporary merge branch 2
         service.listActiveUsers(),
         readPlans(service, !options.silent),
         isPersistent ? Promise.resolve([]) : service.listRouters(),
         isPersistent ? planRepository.listByRouter(routerId) : Promise.resolve([])
       ]);
-<<<<<<<<< Temporary merge branch 1
-      const hotspotUsers = await service.listHotspotUsersByUsernames(
+      let hotspotUsers = await service.listHotspotUsersByUsernames(
         activeUsers.map((user) => user.username)
       );
       if (!isCurrent()) return;
-=========
-      let hotspotUsers = routerHotspotUsers;
->>>>>>>>> Temporary merge branch 2
       const persistedRouter = isPersistent ? await routerRepository.findById(routerId) : null;
       const router = persistedRouter ?? routers.find((item) => item.id === routerId) ?? routers[0] ?? { id: routerId, name: "Routeur" };
 
@@ -305,13 +293,10 @@ export function ConnectedClientsPage() {
           }
         }
       }
-<<<<<<<<< Temporary merge branch 1
       if (!isCurrent()) return;
-=========
       const managedVoucherUsernames = managedVoucherUsernamesRef.current?.routerId === routerId
         ? managedVoucherUsernamesRef.current.usernames
         : undefined;
->>>>>>>>> Temporary merge branch 2
       const localPlanNamesByProfile = new Map(
         localPlans
           .filter((plan) => plan.mikrotik_profile_name)
