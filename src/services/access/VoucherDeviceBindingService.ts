@@ -18,6 +18,8 @@ export type VoucherBindingResult = {
   errors: Array<{ message: string; username: string }>;
 };
 
+const TICKETPRO_VOUCHER_MARKER = "TicketPro:v1;";
+
 export class VoucherDeviceBindingService {
   constructor(private readonly tickets: TicketRepository) {}
 
@@ -57,17 +59,17 @@ export class VoucherDeviceBindingService {
     for (const activeUser of input.activeUsers) {
       const ticket = ticketsByUsername.get(activeUser.username);
       const hotspotUser = usersByUsername.get(activeUser.username);
-      if (
-        !ticket ||
-        ticket.account_id !== input.accountId ||
-        ticket.router_id !== input.routerId ||
-        !hotspotUser ||
-        !isMacAddress(activeUser.macAddress)
-      ) continue;
+      if (!hotspotUser || !isMacAddress(activeUser.macAddress)) continue;
+      // A voucher stored for another account or router is never touched.
+      if (ticket && (ticket.account_id !== input.accountId || ticket.router_id !== input.routerId)) continue;
+      // A TicketPro voucher absent from this computer's database (generated on
+      // another computer, before a reinstall…) is still locked on RouterOS:
+      // the rule applies to the router's vouchers, not only the local copies.
+      if (!ticket && !(hotspotUser.comment ?? "").startsWith(TICKETPRO_VOUCHER_MARKER)) continue;
 
       const observedMac = normalizeMacAddress(activeUser.macAddress);
-      const localMac = isMacAddress(ticket.mac_address ?? "")
-        ? normalizeMacAddress(ticket.mac_address ?? "")
+      const localMac = isMacAddress(ticket?.mac_address ?? "")
+        ? normalizeMacAddress(ticket?.mac_address ?? "")
         : null;
       const routerMac = isMacAddress(hotspotUser.macAddress ?? "")
         ? normalizeMacAddress(hotspotUser.macAddress ?? "")
@@ -99,17 +101,21 @@ export class VoucherDeviceBindingService {
             throw new Error("RouterOS n'a pas conservé l'adresse MAC du voucher.");
           }
           result.verifiedUsers.push(verified);
+          // Counted only when TicketPro wrote the lock itself; a voucher that
+          // RouterOS already locked at login is not a new lock.
+          result.boundUsernames.push(activeUser.username);
         }
-        await this.tickets.update({
-          ...ticket,
-          activated_at: ticket.activated_at ?? new Date().toISOString(),
-          ip_address: activeUser.ipAddress,
-          mac_address: observedMac,
-          status: ticket.status === "désactivé" ? ticket.status : "activé",
-          sync_status: "synced"
-        });
+        if (ticket) {
+          await this.tickets.update({
+            ...ticket,
+            activated_at: ticket.activated_at ?? new Date().toISOString(),
+            ip_address: activeUser.ipAddress,
+            mac_address: observedMac,
+            status: ticket.status === "désactivé" ? ticket.status : "activé",
+            sync_status: "synced"
+          });
+        }
         boundMacsByUsername.set(activeUser.username, observedMac);
-        if (!localMac || !routerMac) result.boundUsernames.push(activeUser.username);
       } catch (error) {
         result.errors.push({
           message: error instanceof Error ? error.message : "Verrouillage impossible.",
