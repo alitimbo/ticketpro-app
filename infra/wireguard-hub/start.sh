@@ -28,4 +28,19 @@ fi
 
 while iptables -D FORWARD -i wg0 -o wg0 -j ACCEPT 2>/dev/null; do :; done
 
+# Les reponses RouterOS volumineuses (liste des vouchers, sessions) traversent
+# deux tunnels WireGuard : poste -> VPS -> routeur. Sur un lien PPPoE ou 4G, un
+# segment TCP plein depasse le MTU reel et se perd sans erreur : les petites
+# requetes passent (le routeur parait en ligne) mais les grandes listes ne
+# finissent jamais de charger. Le MSS des connexions TCP relayees par wg0 est
+# donc borne a une valeur sure pour tous les liens (IPv4 1280 octets) ; un MSS
+# deja plus petit n'est jamais augmente.
+TICKETPRO_WG_TCP_MSS="${TICKETPRO_WG_TCP_MSS:-1240}"
+for direction in "-i wg0" "-o wg0"; do
+  # shellcheck disable=SC2086
+  while iptables -t mangle -D FORWARD $direction -p tcp --tcp-flags SYN,RST SYN -m tcpmss --mss "$((TICKETPRO_WG_TCP_MSS + 1)):65535" -j TCPMSS --set-mss "$TICKETPRO_WG_TCP_MSS" 2>/dev/null; do :; done
+  # shellcheck disable=SC2086
+  iptables -t mangle -A FORWARD $direction -p tcp --tcp-flags SYN,RST SYN -m tcpmss --mss "$((TICKETPRO_WG_TCP_MSS + 1)):65535" -j TCPMSS --set-mss "$TICKETPRO_WG_TCP_MSS"
+done
+
 exec node /app/server.mjs

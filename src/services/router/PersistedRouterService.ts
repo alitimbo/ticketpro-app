@@ -94,18 +94,97 @@ async function selectReachableAdapter(
   });
 
   if (adapters.length <= 1) return fallback;
+  return pickReachableAdapter(router.id, connections.map(endpointKey), adapters, fallback);
+}
 
-  for (const adapter of adapters) {
+/** Endpoint that answered last, per router, so the next page opens on it at once. */
+const reachableEndpointByRouter = new Map<string, { key: string; at: number }>();
+const REACHABLE_ENDPOINT_TTL_MS = 10 * 60_000;
+/** Once a lower-priority endpoint answers, how long a preferred one may still win. */
+const PREFERRED_ENDPOINT_GRACE_MS = 1_500;
+const REMEMBERED_ENDPOINT_PROBE_MS = 4_000;
+
+function endpointKey(connection: Pick<RouterConnectionRecord, "host" | "mode" | "port">): string {
+  return `${connection.mode}|${connection.host.trim()}|${connection.port}`;
+}
+
+/** Test helper: forget the endpoints remembered by previous connections. */
+export function resetReachableEndpointCache(): void {
+  reachableEndpointByRouter.clear();
+}
+
+/**
+ * Selects the endpoint to use. The one that answered last is tried alone
+ * first (one round trip on a pooled connection). Otherwise every endpoint is
+ * tested at the same time instead of one after the other, so a dead local
+ * address no longer delays the VPN by its whole timeout: the preferred
+ * endpoint wins if it answers, a working one is used as soon as the preferred
+ * ones failed or stayed silent for a short grace period.
+ */
+export async function pickReachableAdapter<T extends { testConnection(): Promise<unknown> }>(
+  routerId: string,
+  keys: string[],
+  adapters: T[],
+  fallback: T,
+  now: () => number = Date.now
+): Promise<T> {
+  const remembered = reachableEndpointByRouter.get(routerId);
+  const rememberedIndex = remembered && now() - remembered.at <= REACHABLE_ENDPOINT_TTL_MS
+    ? keys.indexOf(remembered.key)
+    : -1;
+  if (rememberedIndex >= 0) {
     try {
-      await adapter.testConnection();
-      return adapter;
+      // A remembered endpoint that went silent must not cost its full
+      // timeout: past a few seconds every endpoint is tested again.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        adapters[rememberedIndex].testConnection(),
+        new Promise((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("timeout")), REMEMBERED_ENDPOINT_PROBE_MS);
+        })
+      ]).finally(() => clearTimeout(timer));
+      reachableEndpointByRouter.set(routerId, { at: now(), key: keys[rememberedIndex] });
+      return adapters[rememberedIndex];
     } catch {
-      // Try the next known endpoint. The selected adapter exposes the exact
-      // RouterOS error when the requested action is executed.
+      reachableEndpointByRouter.delete(routerId);
     }
   }
 
-  return fallback;
+  const outcomes: Array<"pending" | "ok" | "failed"> = adapters.map(() => "pending");
+  return new Promise<T>((resolve) => {
+    let settled = false;
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    const choose = (index: number | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(graceTimer);
+      if (index === null) {
+        resolve(fallback);
+        return;
+      }
+      reachableEndpointByRouter.set(routerId, { at: now(), key: keys[index] });
+      resolve(adapters[index]);
+    };
+    const decide = (graceElapsed: boolean) => {
+      const firstOk = outcomes.indexOf("ok");
+      if (firstOk === -1) {
+        if (outcomes.every((outcome) => outcome === "failed")) choose(null);
+        return;
+      }
+      const preferredStillPending = outcomes.slice(0, firstOk).some((outcome) => outcome === "pending");
+      if (!preferredStillPending || graceElapsed) {
+        choose(firstOk);
+      } else if (graceTimer === undefined) {
+        graceTimer = setTimeout(() => decide(true), PREFERRED_ENDPOINT_GRACE_MS);
+      }
+    };
+    adapters.forEach((adapter, index) => {
+      adapter.testConnection().then(
+        () => { outcomes[index] = "ok"; decide(false); },
+        () => { outcomes[index] = "failed"; decide(false); }
+      );
+    });
+  });
 }
 
 function orderConnections(router: RouterRecord, storedConnections: RouterConnectionRecord[]): RouterConnectionRecord[] {

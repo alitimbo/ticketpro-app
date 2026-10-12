@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { routerHomeFirstLoadDeadlineMs, withDeadline } from "./RouterHomePage";
 import {
   buildRouterHomeIndicators,
   formatBytes,
@@ -67,5 +68,21 @@ describe("routerHomeModel", () => {
       routerPlanCount: 3,
       routerVoucherCount: 5
     });
+  });
+});
+
+describe("chargement de la maison routeur", () => {
+  it("arrête l'attente au délai maximum au lieu de tourner indéfiniment", async () => {
+    vi.useFakeTimers();
+    try {
+      const never = new Promise<never>(() => undefined);
+      const loading = withDeadline(never, routerHomeFirstLoadDeadlineMs, "Le routeur ne répond pas assez vite.");
+      const assertion = expect(loading).rejects.toThrow("Le routeur ne répond pas assez vite.");
+      await vi.advanceTimersByTimeAsync(routerHomeFirstLoadDeadlineMs);
+      await assertion;
+      await expect(withDeadline(Promise.resolve(42), 1_000, "x")).resolves.toBe(42);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
