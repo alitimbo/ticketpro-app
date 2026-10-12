@@ -94,7 +94,10 @@ export class RouterStateReconciliationService {
       localPlansBefore,
       routerUsers
     );
-    await service.ensureVoucherLifecycleEngine({ managedProfileNames });
+    await service.ensureVoucherLifecycleEngine({
+      managedProfileNames,
+      planDataLimitMbByProfile: localPlanDataLimitsByProfile(localPlansBefore)
+    });
     const policy = policyResult.policy;
     const strict = policy.antiSharingMode === "strict";
 
@@ -344,6 +347,17 @@ export class RouterStateReconciliationService {
       routerId
     });
   }
+}
+
+/** Local plan quotas by RouterOS profile, so RouterOS enforces them itself. */
+function localPlanDataLimitsByProfile(localPlans: HotspotPlanRecord[]): Record<string, number | null> {
+  const limits: Record<string, number | null> = {};
+  for (const plan of localPlans) {
+    if (plan.deleted_at) continue;
+    const name = plan.mikrotik_profile_name?.trim() || plan.name.trim();
+    if (name) limits[name] = plan.data_limit_mb ?? null;
+  }
+  return limits;
 }
 
 function managedLifecycleProfileNames(

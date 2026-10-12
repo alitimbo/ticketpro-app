@@ -6,6 +6,63 @@ import type { RouterService } from "../router";
 import { VoucherDeviceBindingService } from "./VoucherDeviceBindingService";
 
 describe("VoucherDeviceBindingService", () => {
+  const session = (username: string, macAddress: string) => ({
+    downloadedBytes: 0,
+    id: `*A-${username}`,
+    ipAddress: "192.168.88.101",
+    macAddress,
+    sessionTimeLeft: "1h",
+    uploadedBytes: 0,
+    uptime: "1m",
+    username
+  });
+
+  it("ne compte pas comme nouveau un voucher que RouterOS a déjà verrouillé à la connexion", async () => {
+    const ticket = createTicket();
+    const update = vi.fn(async (input) => ({ ...ticket, ...input }));
+    const bindHotspotUserToMac = vi.fn();
+    const service = new VoucherDeviceBindingService({ update } as unknown as TicketRepository);
+
+    const result = await service.synchronize({
+      accountId: "account-1",
+      activeUsers: [session("123456", "AA:BB:CC:DD:EE:01")],
+      hotspotUsers: [{ ...createHotspotUser(), macAddress: "AA:BB:CC:DD:EE:01" }],
+      routerId: "router-1",
+      routerService: { bindHotspotUserToMac } as unknown as RouterService,
+      tickets: [ticket]
+    });
+
+    expect(bindHotspotUserToMac).not.toHaveBeenCalled();
+    expect(result.boundUsernames).toEqual([]);
+    // The local copy still records the MAC read on RouterOS.
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ mac_address: "AA:BB:CC:DD:EE:01" }));
+  });
+
+  it("verrouille sur RouterOS un voucher TicketPro absent de la base de ce poste, et ignore les autres comptes hotspot", async () => {
+    const update = vi.fn();
+    const bindHotspotUserToMac = vi.fn(async (username: string, macAddress: string) => ({
+      ...createHotspotUser(), comment: "TicketPro:v1;validity=60;expires=0;state=active;", macAddress, username
+    }));
+    const service = new VoucherDeviceBindingService({ update } as unknown as TicketRepository);
+
+    const result = await service.synchronize({
+      accountId: "account-1",
+      activeUsers: [session("777777", "AA:BB:CC:DD:EE:07"), session("admin", "AA:BB:CC:DD:EE:08")],
+      hotspotUsers: [
+        { ...createHotspotUser(), comment: "TicketPro:v1;validity=60;expires=0;state=active;", username: "777777" },
+        { ...createHotspotUser(), comment: null, username: "admin" }
+      ],
+      routerId: "router-1",
+      routerService: { bindHotspotUserToMac } as unknown as RouterService,
+      tickets: []
+    });
+
+    expect(bindHotspotUserToMac).toHaveBeenCalledTimes(1);
+    expect(bindHotspotUserToMac).toHaveBeenCalledWith("777777", "AA:BB:CC:DD:EE:07");
+    expect(result.boundUsernames).toEqual(["777777"]);
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it("ne compte pas un verrou que RouterOS n'a pas conservé", async () => {
     const ticket = createTicket();
     const update = vi.fn();

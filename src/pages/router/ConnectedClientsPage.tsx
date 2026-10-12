@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import type { HotspotPlan } from "../../domain/router";
+import type { TicketRecord } from "../../domain/database";
 import {
   Ban,
   Clock,
@@ -17,7 +18,8 @@ import {
   Ticket,
   Upload,
   UserRound,
-  WifiOff
+  WifiOff,
+  X
 } from "lucide-react";
 import { useAuth } from "../../app/auth/AuthProvider";
 import {
@@ -545,6 +547,30 @@ export function ConnectedClientsPage() {
     }
   };
 
+  // Writes the plan quota on one voucher and confirms it on RouterOS. RouterOS
+  // fixes a session's limit when it opens, so a connected voucher is
+  // disconnected once: it reconnects under the quota (mac-cookie relogs it
+  // automatically) and is refused if the quota is already consumed. The
+  // consumption already recorded is never reset.
+  const writeVoucherQuota = async (
+    service: RouterService,
+    candidate: Pick<VoucherQuotaRepairCandidate, "isConnected" | "limitBytesTotal" | "usedBytes" | "username">,
+    ticketsByUsername: ReadonlyMap<string, TicketRecord>
+  ) => {
+    await service.setHotspotUserQuota(candidate.username, candidate.limitBytesTotal);
+    if (candidate.isConnected) {
+      await service.disconnectActiveUser(candidate.username);
+    }
+    const ticket = ticketsByUsername.get(candidate.username);
+    if (ticket) {
+      await ticketRepository.update({
+        ...ticket,
+        data_limit_mb_snapshot: candidate.limitBytesTotal / 1024 / 1024,
+        data_remaining_bytes: Math.max(0, candidate.limitBytesTotal - candidate.usedBytes)
+      });
+    }
+  };
+
   const applyVoucherQuotas = async () => {
     const candidates = quotaRepair ?? [];
     setQuotaRepair(null);
@@ -559,16 +585,8 @@ export function ConnectedClientsPage() {
       );
       for (const candidate of candidates) {
         try {
-          await service.setHotspotUserQuota(candidate.username, candidate.limitBytesTotal);
+          await writeVoucherQuota(service, candidate, ticketsByUsername);
           applied += 1;
-          const ticket = ticketsByUsername.get(candidate.username);
-          if (ticket) {
-            await ticketRepository.update({
-              ...ticket,
-              data_limit_mb_snapshot: candidate.limitBytesTotal / 1024 / 1024,
-              data_remaining_bytes: Math.max(0, candidate.limitBytesTotal - candidate.usedBytes)
-            });
-          }
         } catch {
           failed.push(candidate.username);
         }
@@ -584,6 +602,41 @@ export function ConnectedClientsPage() {
       setNotice({
         status: "error",
         text: error instanceof RouterServiceError ? error.message : "Application des quotas impossible."
+      });
+    } finally {
+      setIsRepairingQuota(false);
+    }
+  };
+
+  const closeClientDetail = useCallback(() => setSelectedClient(null), []);
+
+  const applyClientQuota = async (client: ConnectedClientViewModel) => {
+    if (!session || client.planDataLimitBytes === null) return;
+    setIsRepairingQuota(true);
+    setNotice(null);
+    try {
+      const service = await createService();
+      const ticketsByUsername = new Map(
+        (await ticketRepository.listByRouter(routerId)).map((ticket) => [ticket.username, ticket])
+      );
+      await writeVoucherQuota(service, {
+        isConnected: true,
+        limitBytesTotal: client.planDataLimitBytes,
+        usedBytes: client.totalBytes,
+        username: client.username
+      }, ticketsByUsername);
+      setSelectedClient(null);
+      setNotice({
+        status: "success",
+        text: client.totalBytes >= client.planDataLimitBytes
+          ? `Quota appliqué sur ${client.username} : le volume du plan est déjà consommé, RouterOS refuse sa reconnexion.`
+          : `Quota appliqué et confirmé sur ${client.username} : il se reconnecte sous la limite de ${formatClientBytes(client.planDataLimitBytes)}.`
+      });
+      await loadClients({ synchronizePolicy: false });
+    } catch (error) {
+      setNotice({
+        status: "error",
+        text: error instanceof RouterServiceError ? error.message : "Application du quota impossible."
       });
     } finally {
       setIsRepairingQuota(false);
@@ -826,10 +879,11 @@ export function ConnectedClientsPage() {
         confirmLabel="Appliquer les quotas"
         description={quotaRepair
           ? `${quotaRepair.length} voucher(s) n'ont pas sur RouterOS le quota prévu par leur plan`
-            + ` (dont ${quotaRepairConnected} connecté(s)). Le quota du plan sera écrit sur chaque voucher puis relu.`
+            + ` (dont ${quotaRepairConnected} connecté(s)). Le quota du plan sera écrit sur chaque voucher puis relu ;`
+            + " les vouchers connectés sont déconnectés une fois pour reprendre leur session sous ce quota."
             + " La consommation déjà enregistrée est conservée : elle n'est ni remise à zéro ni recréditée."
             + (quotaRepairExceeded > 0
-              ? ` ${quotaRepairExceeded} voucher(s) ont déjà dépassé ce quota : RouterOS les coupera immédiatement.`
+              ? ` ${quotaRepairExceeded} voucher(s) ont déjà dépassé ce quota : RouterOS refusera leur reconnexion.`
               : "")
           : ""}
         isOpen={Boolean(quotaRepair)}
@@ -840,8 +894,10 @@ export function ConnectedClientsPage() {
 
       <ClientDetailDialog
         client={selectedClient}
+        isApplyingQuota={isRepairingQuota}
         isCached={dataSource === "cache"}
-        onClose={() => setSelectedClient(null)}
+        onApplyQuota={isPersistent && canManageDeviceBinding ? (client) => void applyClientQuota(client) : undefined}
+        onClose={closeClientDetail}
       />
     </div>
   );
@@ -945,69 +1001,134 @@ function ConnectedClientRow({
   );
 }
 
-function ClientDetailDialog({
+export function ClientDetailDialog({
   client,
+  isApplyingQuota,
   isCached,
+  onApplyQuota,
   onClose
 }: {
   client: ConnectedClientViewModel | null;
+  isApplyingQuota?: boolean;
   isCached: boolean;
+  /** Writes the plan quota on this voucher when RouterOS does not carry it. */
+  onApplyQuota?: (client: ConnectedClientViewModel) => void;
   onClose: () => void;
 }) {
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const isOpen = Boolean(client);
+
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    closeButtonRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isOpen, onClose]);
+
   if (!client) {
     return null;
   }
   const dataQuota = describeClientDataQuota(client);
+  const canApplyQuota = !isCached
+    && client.dataQuotaState === "missing_on_router"
+    && client.planDataLimitBytes !== null
+    && Boolean(onApplyQuota);
 
   return (
-    <div className="dialog-backdrop" role="presentation">
-      <section aria-modal="true" className="client-detail-dialog" role="dialog">
-        <header className="connection-dialog__header">
+    <div
+      className="dialog-backdrop"
+      onMouseDown={(event) => {
+        // A click on the dimmed area closes; a click inside the card does not.
+        if (event.target === event.currentTarget) onClose();
+      }}
+      role="presentation"
+    >
+      <section
+        aria-labelledby="client-detail-title"
+        aria-modal="true"
+        className="client-detail-dialog plan-detail-dialog"
+        role="dialog"
+      >
+        <header className="connection-dialog__header client-detail-dialog__header">
           <div className="router-card__icon">
             <Ticket aria-hidden="true" />
           </div>
           <div>
-            <h2>{client.username}</h2>
+            <h2 id="client-detail-title">{client.username}</h2>
             <p>{client.planName} · {client.routerName}</p>
           </div>
           <Badge status={isCached ? "warning" : "active"}>
             {isCached ? "Dernier cache" : "Actif"}
           </Badge>
+          <button
+            aria-label="Fermer la fiche client"
+            className="dialog-close-button"
+            onClick={onClose}
+            ref={closeButtonRef}
+            type="button"
+          >
+            <X aria-hidden="true" />
+          </button>
         </header>
 
-        <dl className="client-detail-grid">
-          <DetailLine icon={ShieldCheck} label="Ticket" value={client.username} />
-          <DetailLine icon={Ticket} label="Profil RouterOS" value={client.profileName ?? "Non identifié"} />
-          <DetailLine icon={Ticket} label="Plan" value={client.planName} />
-          <DetailLine icon={Router} label="Routeur" value={client.routerName} />
-          <DetailLine icon={Smartphone} label="Adresse IP" value={client.ipAddress} />
-          <DetailLine icon={Laptop} label="Adresse MAC" value={client.macAddress} />
-          <DetailLine icon={ShieldCheck} label="Verrouillage appareil (RouterOS)" value={deviceLockLabel(client.deviceLock)} />
-          <DetailLine icon={Clock} label="Session actuelle" value={client.currentSessionUptime} />
-          <DetailLine icon={Clock} label="Temps total utilisé" value={client.uptime} />
-          <DetailLine icon={Clock} label="Temps d'utilisation restant" value={client.sessionTimeLeft} />
-          <DetailLine icon={Download} label="Download" value={formatClientBytes(client.downloadedBytes)} />
-          <DetailLine icon={Upload} label="Upload" value={formatClientBytes(client.uploadedBytes)} />
-          <DetailLine icon={Laptop} label="Volume total" value={formatClientBytes(client.totalBytes)} />
-          <DetailLine icon={Download} label="Volume restant" value={dataQuota.remaining} />
-          <DetailLine icon={Laptop} label="Quota total du voucher" value={dataQuota.total} />
-          <DetailLine icon={Download} label="Débit descendant du profil" value={client.downloadLimit ?? "Non défini"} />
-          <DetailLine icon={Upload} label="Débit montant du profil" value={client.uploadLimit ?? "Non défini"} />
-          <DetailLine icon={Smartphone} label="Appareils simultanés" value={client.sharedUsers === null ? "Non défini" : String(client.sharedUsers)} />
-          <DetailLine
-            icon={Clock}
-            label="Expiration de validité"
-            value={client.expiresAt ? formatClientDateTime(client.expiresAt) : "Non définie"}
-          />
-          <DetailLine
-            icon={ShieldCheck}
-            label="Consommation"
-            value={client.consumptionPercent === null ? "Sans limite mesurable" : `${client.consumptionPercent}%`}
-          />
-          <DetailLine icon={ShieldCheck} label="Statut ticket" value={ticketStatusLabel(client.ticketStatus)} />
-        </dl>
+        <div className="plan-detail-dialog__body">
+          {client.dataQuotaState === "missing_on_router" ? (
+            <div className="form-error client-detail-dialog__alert" role="alert">
+              <ShieldCheck aria-hidden="true" />
+              <span>
+                Ce voucher n'a pas sur RouterOS le quota de son plan ({formatClientBytes(client.planDataLimitBytes ?? 0)}) :
+                le routeur ne limite pas son volume.
+                {canApplyQuota ? " Appliquez le quota pour qu'il soit respecté." : ""}
+              </span>
+            </div>
+          ) : null}
+          <dl className="client-detail-grid">
+            <DetailLine icon={ShieldCheck} label="Ticket" value={client.username} />
+            <DetailLine icon={Ticket} label="Profil RouterOS" value={client.profileName ?? "Non identifié"} />
+            <DetailLine icon={Ticket} label="Plan" value={client.planName} />
+            <DetailLine icon={Router} label="Routeur" value={client.routerName} />
+            <DetailLine icon={Smartphone} label="Adresse IP" value={client.ipAddress} />
+            <DetailLine icon={Laptop} label="Adresse MAC" value={client.macAddress} />
+            <DetailLine icon={ShieldCheck} label="Verrouillage appareil (RouterOS)" value={deviceLockLabel(client.deviceLock)} />
+            <DetailLine icon={Clock} label="Session actuelle" value={client.currentSessionUptime} />
+            <DetailLine icon={Clock} label="Temps total utilisé" value={client.uptime} />
+            <DetailLine icon={Clock} label="Temps d'utilisation restant" value={client.sessionTimeLeft} />
+            <DetailLine icon={Download} label="Download" value={formatClientBytes(client.downloadedBytes)} />
+            <DetailLine icon={Upload} label="Upload" value={formatClientBytes(client.uploadedBytes)} />
+            <DetailLine icon={Laptop} label="Volume total" value={formatClientBytes(client.totalBytes)} />
+            <DetailLine icon={Download} label="Volume restant" value={dataQuota.remaining} />
+            <DetailLine icon={Laptop} label="Quota total du voucher" value={dataQuota.total} />
+            <DetailLine icon={Download} label="Débit descendant du profil" value={client.downloadLimit ?? "Non défini"} />
+            <DetailLine icon={Upload} label="Débit montant du profil" value={client.uploadLimit ?? "Non défini"} />
+            <DetailLine icon={Smartphone} label="Appareils simultanés" value={client.sharedUsers === null ? "Non défini" : String(client.sharedUsers)} />
+            <DetailLine
+              icon={Clock}
+              label="Expiration de validité"
+              value={client.expiresAt ? formatClientDateTime(client.expiresAt) : "Non définie"}
+            />
+            <DetailLine
+              icon={ShieldCheck}
+              label="Consommation"
+              value={client.consumptionPercent === null ? "Sans limite mesurable" : `${client.consumptionPercent}%`}
+            />
+            <DetailLine icon={ShieldCheck} label="Statut ticket" value={ticketStatusLabel(client.ticketStatus)} />
+          </dl>
+        </div>
 
         <div className="confirm-dialog__actions">
+          {canApplyQuota ? (
+            <Button
+              disabled={isApplyingQuota}
+              icon={ShieldCheck}
+              onClick={() => onApplyQuota?.(client)}
+              variant="secondary"
+            >
+              {isApplyingQuota ? "Application…" : "Appliquer le quota du plan"}
+            </Button>
+          ) : null}
           <Button onClick={onClose} variant="primary">
             Fermer
           </Button>

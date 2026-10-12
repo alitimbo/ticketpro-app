@@ -214,7 +214,11 @@ export class MikroTikRouterAdapter implements RouterAdapter {
         // lifecycle handlers of all other plans.
         continue;
       }
-      const nextOnLogin = mergeVoucherLifecycleOnLogin(currentOnLogin, systemScriptNames);
+      const nextOnLogin = withPlanQuotaEnforcement(
+        mergeVoucherLifecycleOnLogin(currentOnLogin, systemScriptNames),
+        currentOnLogin,
+        options.planDataLimitMbByProfile?.[profileName]
+      );
       const currentMacCookieTimeout = pick(profile, "mac-cookie-timeout") ?? "";
       const nextMacCookieTimeout = resolveMacCookieTimeout(
         currentMacCookieTimeout,
@@ -2831,6 +2835,31 @@ export function reconcileVoucherLifecycleComment(
   }
   const ownershipSuffix = extractVoucherBatchOwnershipSuffix(currentComment);
   return `${VOUCHER_LIFECYCLE_COMMENT_PREFIX}validity=${Math.floor(validityMinutes)};expires=${expires};state=${state};${ownershipSuffix}`;
+}
+
+/**
+ * Keeps the plan quota enforced by RouterOS on a repaired profile: the quota
+ * stored on the profile wins; a TicketPro plan whose quota is only known
+ * locally (profile imported from Winbox or another tool) writes it on the
+ * profile. A profile without quota is left unlimited.
+ */
+function withPlanQuotaEnforcement(
+  nextOnLogin: string,
+  currentOnLogin: string,
+  localDataLimitMb: number | null | undefined
+): string {
+  let stored: TicketProProfileMetadata | null;
+  try {
+    stored = readPlanQuotaMetadata(currentOnLogin);
+  } catch {
+    // An unreadable quota is reported when the plan is read; never guess here.
+    return nextOnLogin;
+  }
+  if (stored) return writePlanQuotaMetadata(nextOnLogin, stored);
+  if (localDataLimitMb !== null && localDataLimitMb !== undefined && localDataLimitMb > 0) {
+    return writePlanQuotaMetadata(nextOnLogin, { dataLimitMb: localDataLimitMb });
+  }
+  return nextOnLogin;
 }
 
 export function mergeVoucherLifecycleOnLogin(

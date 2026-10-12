@@ -3844,6 +3844,48 @@ a {
   grid-template-columns: auto minmax(0, 1fr) auto;
 }
 
+.client-detail-dialog__header > div:nth-child(2) {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.client-detail-dialog__header h2,
+.client-detail-dialog__header p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dialog-close-button {
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  color: var(--color-muted);
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 auto;
+  height: 36px;
+  justify-content: center;
+  padding: 0;
+  width: 36px;
+}
+
+.dialog-close-button:hover,
+.dialog-close-button:focus-visible {
+  background: var(--color-surface-muted, #f1f5f9);
+  color: var(--color-text);
+}
+
+.dialog-close-button svg {
+  height: 18px;
+  width: 18px;
+}
+
+.client-detail-dialog__alert {
+  margin-bottom: 12px;
+}
+
 .plan-detail-dialog {
   display: flex;
   flex-direction: column;

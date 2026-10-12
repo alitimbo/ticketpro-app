@@ -210,6 +210,11 @@ export type VoucherLifecycleEngineOptions = {
    * empty list deliberately means "do not touch user profiles".
    */
   managedProfileNames?: readonly string[];
+  /**
+   * Local TicketPro plan quota (Mo) by RouterOS profile name, written on a
+   * managed profile that does not carry its quota yet so RouterOS enforces it.
+   */
+  planDataLimitMbByProfile?: Readonly<Record<string, number | null>>;
 };
 
 export type RouterManagedResourceKind =

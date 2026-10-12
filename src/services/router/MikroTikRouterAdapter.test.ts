@@ -2131,3 +2131,41 @@ describe("MikroTikRouterAdapter.updateHotspotPlan — confirmation RouterOS", ()
     await expect(createAdapter(transport).updateHotspotPlan("4H", draft)).rejects.toThrow("RouterOS n'a pas confirmé la modification du profil.");
   });
 });
+
+describe("quota du plan appliqué par RouterOS sur les profils réparés", () => {
+  const routerState = (profiles: RouterOsApiRow[]) => ({
+    "/ip/hotspot/user/profile/print": profiles,
+    "/ip/hotspot/print": [],
+    "/ip/hotspot/profile/print": [],
+    "/system/clock/print": [{ date: "2026-08-27", time: "12:00:00" }],
+    "/system/ntp/client/print": [{ enabled: "true", status: "synchronized" }],
+    "/system/ntp/client/servers/print": [{ address: "time.cloudflare.com" }],
+    "/system/resource/print": [{ version: "7.21.5" }],
+    "/system/scheduler/print": [],
+    "/system/script/print": []
+  });
+  const onLoginOf = (transport: MockRouterOsTransport, id: string) =>
+    String(transport.calls.find((call) => call.command === "/ip/hotspot/user/profile/set" && call.params?.numbers === id)?.params?.["on-login"] ?? "");
+
+  it("installe la limite sur un profil dont le quota est enregistré mais pas encore appliqué", async () => {
+    const transport = new MockRouterOsTransport(routerState([
+      { ".id": "*P1", name: "6H-2G", "on-login": '# TICKETPRO-PLAN-QUOTA v1 {"dataLimitMb":2048}', "session-timeout": "6h" }
+    ]));
+    await createAdapter(transport).ensureVoucherLifecycleEngine({ managedProfileNames: ["6H-2G"] });
+    expect(onLoginOf(transport, "*P1")).toContain("limit-bytes-total=2147483648");
+  });
+
+  it("écrit sur le profil le quota d'un plan importé connu seulement localement, et laisse un plan illimité sans limite", async () => {
+    const transport = new MockRouterOsTransport(routerState([
+      { ".id": "*P1", name: "1-semaine", "on-login": "", "session-timeout": "1w" },
+      { ".id": "*P2", name: "illimite", "on-login": "", "session-timeout": "1d" }
+    ]));
+    await createAdapter(transport).ensureVoucherLifecycleEngine({
+      managedProfileNames: ["1-semaine", "illimite"],
+      planDataLimitMbByProfile: { "1-semaine": 8192, illimite: null }
+    });
+    expect(onLoginOf(transport, "*P1")).toContain("limit-bytes-total=8589934592");
+    expect(onLoginOf(transport, "*P1")).toContain('# TICKETPRO-PLAN-QUOTA v1 {"dataLimitMb":8192}');
+    expect(onLoginOf(transport, "*P2")).not.toContain("tpPlanQuotaId");
+  });
+});
