@@ -33,9 +33,11 @@ import {
   loginSaas,
   logoutSaas,
   readSaasSession,
+  SaasRequestError,
   switchSaasOrganization,
   type SaasAuthResult
 } from "../../services/saas";
+import { cachedSubscriptionAllowsAccess } from "../../pages/global/subscriptionPageModel";
 import { completeFirstLaunch, defaultFirstLaunchState } from "../../pages/auth/firstLaunchModel";
 import { disconnectEmbeddedVpn, getVpnProviderStatus } from "../../services/vpn";
 import { persistSaasSubscriptionSnapshot } from "../../services/subscriptions";
@@ -53,6 +55,11 @@ type AuthContextValue = {
   isMainAuthenticated: boolean;
   isSubscriptionActive: boolean;
   isSubscriptionChecked: boolean;
+  /**
+   * "unreachable" when the TicketPro server could not be asked (network,
+   * delay, server error). The subscription is then unknown, never "expired".
+   */
+  subscriptionCheckFailure: "unreachable" | null;
   loginAccount: (email: string, password: string) => Promise<LoginResult>;
   loginProfile: (role: UserRole, password: string) => Promise<LoginResult>;
   logout: () => Promise<void>;
@@ -92,6 +99,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [firstLaunchRequired] = useState(() => getFirstLaunchRequired());
   const [saasAccount, setSaasAccount] = useState<SaasAuthResult | null>(null);
   const [isSubscriptionChecked, setIsSubscriptionChecked] = useState(false);
+  const [subscriptionCheckFailure, setSubscriptionCheckFailure] = useState<"unreachable" | null>(null);
 
   const cacheSaasSubscription = useCallback(async (current: SaasAuthResult, accountId: string) => {
     try {
@@ -136,6 +144,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setAccountSession(null);
     setSaasAccount(null);
     setIsSubscriptionChecked(false);
+    setSubscriptionCheckFailure(null);
   }, []);
 
   const refreshSaasAccount = useCallback(async () => {
@@ -149,8 +158,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setSaasAccount(null);
         return;
       }
-      const current = await getSaasAccount();
+      const current = await fetchSaasAccountWithDeadline();
       setSaasAccount(current);
+      setSubscriptionCheckFailure(null);
       const storedAccount = readMainAccountSession();
       if (storedAccount) {
         await cacheSaasSubscription(current, storedAccount.accountId);
@@ -165,12 +175,44 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         storeSession(restoredSession);
         setSession(restoredSession);
       }
-    } catch {
-      setSaasAccount(null);
+    } catch (error) {
+      if (isRejectedSaasSession(error)) {
+        // The server answered and refused the session: no subscription.
+        setSaasAccount(null);
+        setSubscriptionCheckFailure(null);
+      } else {
+        // Network failure, timeout or server error: the subscription is
+        // unknown, not expired. The last answer stays in place and the check
+        // is retried on its own.
+        setSubscriptionCheckFailure("unreachable");
+      }
     } finally {
       setIsSubscriptionChecked(true);
     }
   }, [cacheSaasSubscription]);
+
+  // While the server stays unreachable and no subscription was received,
+  // retry with a bounded backoff and as soon as the network comes back.
+  useEffect(() => {
+    if (subscriptionCheckFailure !== "unreachable" || saasAccount) return undefined;
+    let attempt = 0;
+    let timer: number | undefined;
+    let cancelled = false;
+    const retry = () => {
+      if (cancelled) return;
+      window.clearTimeout(timer);
+      void refreshSaasAccount();
+      attempt += 1;
+      timer = window.setTimeout(retry, subscriptionRetryDelayMs(attempt));
+    };
+    timer = window.setTimeout(retry, subscriptionRetryDelayMs(0));
+    window.addEventListener("online", retry);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      window.removeEventListener("online", retry);
+    };
+  }, [refreshSaasAccount, saasAccount, subscriptionCheckFailure]);
 
   const refreshAccountSessionFromStorage = useCallback(() => {
     const stored = readMainAccountSession();
@@ -511,8 +553,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       firstLaunchRequired,
       isAuthenticated: Boolean(session),
       isMainAuthenticated: Boolean(accountSession),
-      isSubscriptionActive: Boolean(saasAccount?.subscription.is_active),
+      isSubscriptionActive: saasAccount
+        ? Boolean(saasAccount.subscription.is_active)
+        : subscriptionCheckFailure === "unreachable"
+          && cachedSubscriptionAllowsAccess(accountSession?.accountId),
       isSubscriptionChecked,
+      subscriptionCheckFailure,
       loginAccount,
       loginProfile,
       logout: logoutAccount,
@@ -541,11 +587,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       selectOrganization,
       saasAccount,
       session,
+      subscriptionCheckFailure,
       touchSession
     ]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+}
+
+/** First subscription check deadline: past it the server counts as unreachable. */
+export const subscriptionCheckDeadlineMs = 15_000;
+
+/** Retries of an unreachable subscription check: 5 s, 15 s, 30 s, then every minute. */
+export function subscriptionRetryDelayMs(attempt: number): number {
+  return [5_000, 15_000, 30_000][attempt] ?? 60_000;
+}
+
+/** Only a refused session (401/403) means "no subscription"; anything else is unknown. */
+export function isRejectedSaasSession(error: unknown): boolean {
+  return error instanceof SaasRequestError && (error.status === 401 || error.status === 403);
+}
+
+async function fetchSaasAccountWithDeadline(): Promise<SaasAuthResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), subscriptionCheckDeadlineMs);
+  try {
+    return await getSaasAccount(controller.signal);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export function useAuth() {

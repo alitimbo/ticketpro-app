@@ -166,6 +166,22 @@ export function loadAccountSubscription(accountId = resolveCurrentAccountId()): 
   }
 }
 
+/**
+ * Last subscription confirmed by the TicketPro server for this account, used
+ * only while the server cannot be reached. Access stays bounded by the end
+ * date the server sent (grace included); nothing is extended locally, and an
+ * account never confirmed on this device gets no offline access.
+ */
+export function cachedSubscriptionAllowsAccess(accountId: string | null | undefined, now = Date.now()): boolean {
+  if (typeof localStorage === "undefined" || !accountId) return false;
+  const cached = readAccountSubscriptions()[accountId];
+  if (!cached) return false;
+  const accessEndsAt = Date.parse(cached.currentPeriodEnd);
+  return (cached.status === "active" || cached.status === "trial")
+    && Number.isFinite(accessEndsAt)
+    && accessEndsAt > now;
+}
+
 export function saveAccountSubscription(subscription: AccountSubscription, accountId = resolveCurrentAccountId()): void {
   if (typeof localStorage === "undefined") {
     return;
@@ -353,11 +369,13 @@ export function invoiceFromRecord(record: BillingInvoiceRecord, packName: string
     invoiceNumber: record.invoice_number,
     issuedAt: record.issued_at ?? record.created_at,
     notes: record.notes,
-    packName,
+    // The invoice's own snapshot wins; the current subscription is only a
+    // fallback for invoices issued before snapshots existed.
+    packName: record.pack_name ?? packName,
     paidAt: record.paid_at,
-    periodEnd: record.due_at ?? record.created_at,
-    periodStart: record.issued_at ?? record.created_at,
-    routerLimit,
+    periodEnd: record.period_end ?? record.due_at ?? record.created_at,
+    periodStart: record.period_start ?? record.issued_at ?? record.created_at,
+    routerLimit: record.router_limit ?? routerLimit,
     status: record.status
   };
 }

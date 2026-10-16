@@ -16,7 +16,7 @@ import { Badge, Button, Card, DataListItem, PageHeader, StatCard } from "../../s
 import { formatCfa, formatDate, formatPlanDuration } from "./subscriptionPageModel";
 
 export function SubscriptionPage() {
-  const { refreshSaasAccount, saasAccount, session } = useAuth();
+  const { refreshSaasAccount, saasAccount, session, subscriptionCheckFailure } = useAuth();
   const { database, isInitialized, isPersistent } = useAppDatabase();
   const routerRepository = useMemo(() => new RouterRepository(database), [database]);
   const [plans, setPlans] = useState<LicensePlan[]>([]);
@@ -30,6 +30,9 @@ export function SubscriptionPage() {
   const subscription = saasAccount?.subscription ?? null;
   const isGracePeriod = subscription?.status === "grace_period";
   const isTrial = subscription?.status === "trial";
+  // The server could not be asked: the subscription is unknown, not expired.
+  const isUnverified = !subscription && subscriptionCheckFailure === "unreachable";
+  const isShowingLastKnown = Boolean(subscription) && subscriptionCheckFailure === "unreachable";
   const selectedPlan = plans.find((plan) => plan.id === selectedPlanId) ?? plans[0] ?? null;
   const canPay = Boolean(saasAccount?.access.can_manage_billing);
 
@@ -128,6 +131,17 @@ export function SubscriptionPage() {
       />
 
       {message ? <p className="form-error">{message}</p> : null}
+      {isUnverified || isShowingLastKnown ? (
+        <div className="notice notice--warning" role="status">
+          {isUnverified
+            ? "Le serveur TicketPro est injoignable : votre abonnement ne peut pas être vérifié pour le moment. Il n'est pas expiré pour autant."
+            : "Le serveur TicketPro est momentanément injoignable : informations du dernier état confirmé par le serveur."}
+          {" "}Nouvelle tentative automatique.{" "}
+          <Button onClick={() => void refreshSaasAccount()} variant="ghost">
+            Réessayer
+          </Button>
+        </div>
+      ) : null}
       {isGracePeriod ? (
         <div className="notice notice--warning">
           Votre abonnement est expiré, mais vos services restent actifs pendant encore{" "}
@@ -147,8 +161,8 @@ export function SubscriptionPage() {
         <StatCard
           icon={Package}
           label="Pack actuel"
-          value={subscription?.plan?.name ?? "Aucun pack actif"}
-          hint={isGracePeriod ? "Délai de grâce actif" : isTrial ? "Essai gratuit" : subscription?.is_active ? "Abonnement actif" : "Renouvellement requis"}
+          value={isUnverified ? "Non vérifié" : subscription?.plan?.name ?? "Aucun pack actif"}
+          hint={isUnverified ? "Serveur injoignable" : isGracePeriod ? "Délai de grâce actif" : isTrial ? "Essai gratuit" : subscription?.is_active ? "Abonnement actif" : "Renouvellement requis"}
         />
         <StatCard
           icon={Router}
@@ -159,8 +173,8 @@ export function SubscriptionPage() {
         <StatCard
           icon={ShieldCheck}
           label="Services"
-          value={subscription?.is_active ? "Actifs" : "Suspendus"}
-          hint={subscription?.is_active ? "Gestion distante autorisée" : "Connexion et paiement restent accessibles"}
+          value={isUnverified ? "Non vérifiés" : subscription?.is_active ? "Actifs" : "Suspendus"}
+          hint={isUnverified ? "Vérification en attente du serveur" : subscription?.is_active ? "Gestion distante autorisée" : "Connexion et paiement restent accessibles"}
         />
         <StatCard
           icon={CalendarDays}
@@ -177,11 +191,11 @@ export function SubscriptionPage() {
       <Card title="Abonnement actuel" description="Informations vérifiées directement par le serveur TicketPro.">
         <div className="subscription-overview-grid">
           <DataListItem
-            description={subscription?.plan?.name ?? "Aucun abonnement"}
+            description={isUnverified ? "Vérification impossible pour le moment" : subscription?.plan?.name ?? "Aucun abonnement"}
             icon={Package}
             meta={
               <Badge status={subscription?.is_active ? "success" : "warning"}>
-                {isGracePeriod ? "Grâce active" : isTrial ? "Essai" : subscription?.is_active ? "Actif" : "Expiré"}
+                {isUnverified ? "Non vérifié" : isGracePeriod ? "Grâce active" : isTrial ? "Essai" : subscription?.is_active ? "Actif" : "Expiré"}
               </Badge>
             }
             title="Forfait"

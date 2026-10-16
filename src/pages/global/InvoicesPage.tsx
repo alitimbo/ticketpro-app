@@ -37,7 +37,9 @@ export function InvoicesPage() {
   const isAdmin = session?.internal_profile_role === "admin";
   const accountId = accountSession?.accountId ?? session?.account_id ?? null;
   const [refreshKey, setRefreshKey] = useState(0);
-  const [message, setMessage] = useState<string | null>(null);
+  const [message, setMessageState] = useState<{ kind: "error" | "success"; text: string } | null>(null);
+  const setMessage = (text: string | null, kind: "error" | "success" = "error") =>
+    setMessageState(text ? { kind, text } : null);
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<string | null>(null);
   const [invoiceToCancel, setInvoiceToCancel] = useState<string | null>(null);
   const [persistentInvoices, setPersistentInvoices] = useState<BillingInvoice[]>([]);
@@ -65,6 +67,15 @@ export function InvoicesPage() {
   );
 
   const refresh = () => setRefreshKey((current) => current + 1);
+
+  // Every action reports its failure instead of failing silently.
+  const runAction = async (action: () => Promise<void>, fallback: string) => {
+    try {
+      await action();
+    } catch (error) {
+      setMessage(error instanceof Error && error.message ? error.message : fallback);
+    }
+  };
 
   const writeAudit = async (action: string, messageText: string, level: "info" | "warning" = "info") => {
     if (isPersistent && accountId && session) {
@@ -146,7 +157,11 @@ export function InvoicesPage() {
         invoice_number: buildInvoiceNumber(now),
         issued_at: now.toISOString(),
         notes: "Facture manuelle d'abonnement logiciel.",
+        pack_name: plan?.name ?? "Abonnement logiciel",
         paid_at: null,
+        period_end: subscription.current_period_end,
+        period_start: subscription.current_period_start,
+        router_limit: subscription.router_limit_snapshot,
         status: "draft",
         subscription_id: subscription.id
       });
@@ -156,7 +171,7 @@ export function InvoicesPage() {
       createManualInvoice();
       refresh();
     }
-    setMessage("Facture manuelle créée en brouillon.");
+    setMessage("Facture manuelle créée en brouillon.", "success");
   };
 
   const markPaid = async (invoiceId: string) => {
@@ -173,7 +188,7 @@ export function InvoicesPage() {
       markInvoicePaid(invoiceId);
       refresh();
     }
-    setMessage("Facture marquée comme payée en mode manuel.");
+    setMessage("Facture marquée comme payée en mode manuel.", "success");
   };
 
   const confirmCancel = async () => {
@@ -196,7 +211,7 @@ export function InvoicesPage() {
       refresh();
     }
     setInvoiceToCancel(null);
-    setMessage("Facture annulée.");
+    setMessage("Facture annulée.", "success");
   };
 
   const exportPdf = async (detail: InvoiceDetail) => {
@@ -220,7 +235,7 @@ export function InvoicesPage() {
       downloadPdf(`${detail.invoice.invoiceNumber}.pdf`, bytes);
     }
     await writeAudit("invoice.exported", `PDF de la facture ${detail.invoice.invoiceNumber} exporté.`);
-    setMessage("PDF de facture généré.");
+    setMessage("PDF de facture généré.", "success");
   };
 
   return (
@@ -228,7 +243,7 @@ export function InvoicesPage() {
       <PageHeader
         actions={
           isAdmin ? (
-            <Button icon={Plus} onClick={() => void createInvoice()} variant="primary">
+            <Button icon={Plus} onClick={() => void runAction(createInvoice, "La facture n'a pas pu être créée.")} variant="primary">
               Créer facture manuelle
             </Button>
           ) : null
@@ -238,7 +253,11 @@ export function InvoicesPage() {
         title="Factures"
       />
 
-      {message ? <p className="form-error form-error--success">{message}</p> : null}
+      {message ? (
+        <p className={message.kind === "success" ? "form-error form-error--success" : "form-error"} role="status">
+          {message.text}
+        </p>
+      ) : null}
 
       <Card title={`Factures (${invoices.length})`} description={`Compte connecté : ${accountSession?.email ?? "non renseigné"}`}>
         {invoices.length === 0 ? (
@@ -285,21 +304,26 @@ export function InvoicesPage() {
                         label: "Exporter PDF",
                         onSelect: () => {
                           if (detail) {
-                            void exportPdf(detail);
+                            void runAction(() => exportPdf(detail), "Le PDF de la facture n'a pas pu être généré.");
                           }
                         }
                       },
                       {
                         icon: CheckCircle2,
                         label: "Marquer payée",
-                        onSelect: () => void markPaid(invoice.id)
+                        onSelect: () => void runAction(() => markPaid(invoice.id), "La facture n'a pas pu être marquée payée.")
                       },
                       {
                         icon: XCircle,
                         label: "Annuler",
                         onSelect: () => setInvoiceToCancel(invoice.id)
                       }
-                    ].filter((item) => isAdmin || item.label === "Voir détail" || item.label === "Exporter PDF")}
+                    ].filter((item) => {
+                      if (item.label === "Voir détail" || item.label === "Exporter PDF") return true;
+                      if (!isAdmin) return false;
+                      // A paid or cancelled invoice is final.
+                      return invoice.status !== "paid" && invoice.status !== "cancelled";
+                    })}
                   />
                 </article>
               );
@@ -314,8 +338,8 @@ export function InvoicesPage() {
           isAdmin={isAdmin}
           onCancelInvoice={() => setInvoiceToCancel(selectedDetail.invoice.id)}
           onClose={() => setSelectedInvoiceId(null)}
-          onExport={() => void exportPdf(selectedDetail)}
-          onMarkPaid={() => void markPaid(selectedDetail.invoice.id)}
+          onExport={() => void runAction(() => exportPdf(selectedDetail), "Le PDF de la facture n'a pas pu être généré.")}
+          onMarkPaid={() => void runAction(() => markPaid(selectedDetail.invoice.id), "La facture n'a pas pu être marquée payée.")}
         />
       ) : null}
 
@@ -324,7 +348,7 @@ export function InvoicesPage() {
         description="Cette action marque la facture comme annulée. Aucun fichier local n'est supprimé."
         isOpen={Boolean(invoiceToCancel)}
         onCancel={() => setInvoiceToCancel(null)}
-        onConfirm={confirmCancel}
+        onConfirm={() => void runAction(confirmCancel, "La facture n'a pas pu être annulée.").finally(() => setInvoiceToCancel(null))}
         title="Annuler cette facture ?"
       />
     </div>
@@ -377,7 +401,7 @@ function InvoiceDetailDialog({
           <Button icon={FileDown} onClick={onExport} variant="secondary">
             Exporter PDF
           </Button>
-          {isAdmin ? (
+          {isAdmin && detail.invoice.status !== "paid" && detail.invoice.status !== "cancelled" ? (
             <>
               <Button icon={CheckCircle2} onClick={onMarkPaid} variant="secondary">
                 Marquer payée

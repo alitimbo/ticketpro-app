@@ -18,7 +18,9 @@ export function ProtectedRoute({ permissions = [], requireSubscription = true }:
     accountSession,
     isSubscriptionActive,
     isSubscriptionChecked,
+    refreshSaasAccount,
     saasAccount,
+    subscriptionCheckFailure,
     session,
     userCanAny
   } = useAuth();
@@ -81,6 +83,24 @@ export function ProtectedRoute({ permissions = [], requireSubscription = true }:
 
   if (requireSubscription && !isSubscriptionChecked) {
     return <main className="login-page"><p>Vérification de votre abonnement…</p></main>;
+  }
+
+  if (requireSubscription && !isSubscriptionActive && subscriptionCheckFailure === "unreachable") {
+    // Unknown is not expired: say so and retry instead of showing the
+    // subscription page as if the subscription had ended.
+    return (
+      <main className="login-page">
+        <div className="notice notice--warning" role="status">
+          <p>
+            Le serveur TicketPro est injoignable : votre abonnement ne peut pas être vérifié pour le moment.
+            Il n'est pas expiré. Nouvelle tentative automatique…
+          </p>
+          <button className="button" onClick={() => void refreshSaasAccount()} type="button">
+            Réessayer maintenant
+          </button>
+        </div>
+      </main>
+    );
   }
 
   if (requireSubscription && !isSubscriptionActive) {

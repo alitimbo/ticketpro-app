@@ -166,6 +166,11 @@ export type BillingInvoiceRecord = {
   due_at: string | null;
   paid_at: string | null;
   notes: string | null;
+  /** Snapshot taken when the invoice is issued; null on invoices issued before 0.6.6. */
+  period_start?: string | null;
+  period_end?: string | null;
+  pack_name?: string | null;
+  router_limit?: number | null;
   created_at: string;
   updated_at: string;
 };
