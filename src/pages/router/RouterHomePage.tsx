@@ -83,7 +83,8 @@ type RouterDashboardData = {
   routerName: string
   servers: HotspotServer[]
   systemInfo: RouterSystemInfo
-  users: HotspotUser[]
+  /** Every Hotspot user; read after the first display, null while loading. */
+  users: HotspotUser[] | null
 }
 
 export function RouterHomePage () {
@@ -235,23 +236,29 @@ export function RouterHomePage () {
           })
         }
 
+        // The page shows as soon as the light reads answer. The full list of
+        // Hotspot users (thousands on a busy router, the largest RouterOS
+        // answer) is read afterwards so it never holds the whole page. A
+        // deadline ends the spinner: the page then retries on its own.
         const [
           systemInfo,
           servers,
           plans,
-          users,
           activeUsers,
           health,
           dateTime
-        ] = await Promise.all([
-          activeService.getSystemInfo(),
-          activeService.getHotspotServers(),
-          activeService.getHotspotPlans(),
-          activeService.listHotspotUsersForVerification(),
-          activeService.listActiveUsers(),
-          activeService.getRouterHealth(),
-          activeService.getRouterDateTime()
-        ])
+        ] = await withDeadline(
+          Promise.all([
+            activeService.getSystemInfo(),
+            activeService.getHotspotServers(),
+            activeService.getHotspotPlans(),
+            activeService.listActiveUsers(),
+            activeService.getRouterHealth(),
+            activeService.getRouterDateTime()
+          ]),
+          routerHomeFirstLoadDeadlineMs,
+          'Le routeur ne répond pas assez vite. Nouvelle tentative automatique…'
+        )
         const observedAt = new Date().toISOString()
         const observabilityReport = isPersistent
           ? await syncObservabilityService.inspect({
@@ -280,11 +287,16 @@ export function RouterHomePage () {
           routerName,
           servers,
           systemInfo,
-          users
+          users: null
         })
-        setSyncSummary(
-          compareLocalAndRouterTickets(localTickets, users, activeUsers).summary
-        )
+        setSyncSummary(null)
+        void activeService.listHotspotUsersForVerification().then(users => {
+          if (!isMounted) return
+          setDashboard(current => (current ? { ...current, users } : current))
+          setSyncSummary(
+            compareLocalAndRouterTickets(localTickets, users, activeUsers).summary
+          )
+        }).catch(() => undefined)
         setCpuLoad(health.cpuLoad)
         setConnectionMessage('En ligne')
         setConnectionStatus('active')
@@ -387,6 +399,8 @@ export function RouterHomePage () {
     let running = false
     let timer: number | undefined
     let consecutiveFailures = 0
+    // The first load already read the user list in the background.
+    let cycle = 1
 
     // Sequential live loop: never two reads at once, results of a previous
     // router or of an unmounted view are dropped. Router health tells whether
@@ -397,10 +411,14 @@ export function RouterHomePage () {
       window.clearTimeout(timer)
       if (document.visibilityState !== 'hidden') {
         running = true
+        // Health and sessions every pass; the full user list (heavy) only
+        // every few passes.
+        const readUsers = cycle % routerLiveUsersEveryCycles === 0
+        cycle += 1
         const [health, activeUsers, users] = await Promise.allSettled([
           service.getRouterHealth(),
           service.listActiveUsers(),
-          service.listHotspotUsersForVerification()
+          readUsers ? service.listHotspotUsersForVerification() : Promise.resolve(null)
         ])
         running = false
         if (cancelled) return
@@ -418,7 +436,7 @@ export function RouterHomePage () {
                   ...current,
                   activeUsers: activeUsers.value,
                   health: health.value,
-                  users: users.value
+                  users: users.value ?? current.users
                 }
               : current
           )
@@ -572,7 +590,7 @@ export function RouterHomePage () {
     generatedPdfCount: dashboard.generatedPdfCount,
     localVoucherCount: dashboard.localVoucherCount,
     plans: dashboard.plans,
-    routerUsers: dashboard.users
+    routerUsers: dashboard.users ?? []
   })
   const memoryPercent = Math.round(
     (dashboard.health.memoryUsed / dashboard.health.memoryTotal) * 100
@@ -750,8 +768,8 @@ export function RouterHomePage () {
           <StatCard
             icon={Users}
             label='Vouchers MikroTik'
-            value={String(indicators.routerVoucherCount)}
-            hint='Comptes Hotspot présents sur le routeur'
+            value={dashboard.users === null ? '…' : String(indicators.routerVoucherCount)}
+            hint={dashboard.users === null ? 'Lecture des comptes Hotspot…' : 'Comptes Hotspot présents sur le routeur'}
           />
         </div>
         <div className='span-4'>
@@ -790,7 +808,7 @@ export function RouterHomePage () {
         <Card className='span-8' title='État du routeur'>
           <div className='data-list'>
             <DataListItem
-              description={`${dashboard.activeUsers.length} client(s) connecté(s), ${dashboard.users.length} utilisateur(s) Hotspot.`}
+              description={`${dashboard.activeUsers.length} client(s) connecté(s), ${dashboard.users === null ? 'lecture des' : dashboard.users.length} utilisateur(s) Hotspot.`}
               icon={Wifi}
               meta={<StatusDot label='Connecté' status='active' />}
               title='Connexion'
@@ -960,6 +978,24 @@ function iconForAction (actionId: string) {
 }
 
 /** Live cadence: 15 s when healthy, 5 s then 10 s after failures, never above 30 s. */
+/** First display deadline: past it the page stops spinning and retries. */
+export const routerHomeFirstLoadDeadlineMs = 25_000
+
+/** The full Hotspot user list is re-read every 4 live passes (about 1 min). */
+export const routerLiveUsersEveryCycles = 4
+
+export function withDeadline<T> (
+  promise: Promise<T>,
+  deadlineMs: number,
+  message: string
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), deadlineMs)
+  })
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer))
+}
+
 export function routerLiveDelayMs (consecutiveFailures: number): number {
   if (consecutiveFailures <= 0) return 15_000
   return Math.min(30_000, 5_000 * 2 ** (consecutiveFailures - 1))

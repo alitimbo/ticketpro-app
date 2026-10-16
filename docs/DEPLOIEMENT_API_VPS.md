@@ -2,6 +2,8 @@
 
 Cette procédure met à jour uniquement `ticketpro-license-api`. Elle ne reconstruit
 pas le hub WireGuard et ne modifie pas ses clés.
+Pour mettre à jour le hub WireGuard, suivre
+[DEPLOIEMENT_HUB_WIREGUARD_VPS.md](DEPLOIEMENT_HUB_WIREGUARD_VPS.md).
 
 ## Architecture de production
 
