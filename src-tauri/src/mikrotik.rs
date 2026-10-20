@@ -35,7 +35,15 @@ pub struct MikroTikApiBatchRequest {
     timeout_ms: Option<u64>,
     retries: Option<u8>,
     commands: Vec<MikroTikApiBatchCommand>,
+    /// Number of independent commands sent ahead of their replies. Only for
+    /// commands whose order does not matter (voucher creation, targeted
+    /// reads): RouterOS answers each tagged command separately, so a batch of
+    /// 200 vouchers costs a few round trips instead of 200.
+    pipeline_window: Option<usize>,
 }
+
+/// Upper bound of tagged commands in flight on one API connection.
+const MAX_PIPELINE_WINDOW: usize = 64;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -185,6 +193,33 @@ fn mikrotik_api_batch_blocking(
                 });
             }
         };
+        let pipeline_window = request
+            .pipeline_window
+            .unwrap_or(1)
+            .clamp(1, MAX_PIPELINE_WINDOW);
+        if pipeline_window > 1 {
+            let outcome = run_pipelined_commands(&mut stream, &request.commands, pipeline_window, &mut metrics);
+            if reused && !outcome.any_reply {
+                if let Some(error) = &outcome.connection_error {
+                    if is_stale_connection_error(error) {
+                        allow_pooled = false;
+                        metrics.retry_count += 1;
+                        continue;
+                    }
+                }
+            }
+            if outcome.connection_error.is_none() {
+                release_stream(key, stream);
+            }
+            return Ok(MikroTikApiBatchResponse {
+                completed_count: outcome.results.len(),
+                connection_error: outcome.connection_error,
+                error: None,
+                metrics,
+                results: outcome.results,
+            });
+        }
+
         let mut results = Vec::with_capacity(request.commands.len());
         let mut connection_error = None;
 
@@ -629,6 +664,129 @@ fn serialize_api_value(value: &Value) -> Option<String> {
     }
 }
 
+struct PipelinedOutcome {
+    /// Results of the commands answered without a gap from the first one.
+    /// A command after the first unanswered one is reported as uncertain
+    /// (not in `results`): the caller reconciles it by reading RouterOS.
+    results: Vec<MikroTikApiBatchItemResult>,
+    connection_error: Option<String>,
+    /// True once the router answered anything on this connection.
+    any_reply: bool,
+}
+
+fn command_words(command: &MikroTikApiBatchCommand, tag: usize) -> Vec<String> {
+    let mut words = vec![command.command.clone()];
+    append_api_words(&mut words, "=", command.params.as_ref());
+    append_api_words(&mut words, "?", command.queries.as_ref());
+    words.push(format!(".tag={tag}"));
+    words
+}
+
+fn reply_tag(words: &[String]) -> Option<usize> {
+    words.iter().find_map(|word| {
+        word.strip_prefix(".tag=")
+            .or_else(|| word.strip_prefix("=.tag="))
+            .and_then(|value| value.parse().ok())
+    })
+}
+
+/// Sends up to `window` tagged commands ahead of their replies and matches
+/// each reply to its command by tag, whatever the order RouterOS answers in.
+fn run_pipelined_commands<S: Read + Write>(
+    stream: &mut S,
+    commands: &[MikroTikApiBatchCommand],
+    window: usize,
+    metrics: &mut RouterOsNativePerformance,
+) -> PipelinedOutcome {
+    let total = commands.len();
+    let mut outcomes: Vec<Option<ApiCommandOutcome>> = (0..total).map(|_| None).collect();
+    let mut partial: HashMap<usize, ApiCommandOutcome> = HashMap::new();
+    let mut started_at: Vec<Option<Instant>> = vec![None; total];
+    let mut next_to_send = 0;
+    let mut in_flight = 0;
+    let mut answered = 0;
+    let mut any_reply = false;
+    let mut connection_error = None;
+
+    'exchange: while answered < total {
+        if next_to_send < total && in_flight < window {
+            while next_to_send < total && in_flight < window {
+                let words = command_words(&commands[next_to_send], next_to_send);
+                if let Err(error) = send_sentence(stream, &words) {
+                    connection_error = Some(error);
+                    break 'exchange;
+                }
+                metrics.command_count += 1;
+                started_at[next_to_send] = Some(Instant::now());
+                next_to_send += 1;
+                in_flight += 1;
+            }
+        }
+
+        let words = match read_sentence(stream) {
+            Ok(words) => words,
+            Err(error) => {
+                connection_error = Some(error);
+                break;
+            }
+        };
+        if words.is_empty() {
+            continue;
+        }
+        any_reply = true;
+        if words[0] == "!fatal" {
+            metrics.fatal_count += 1;
+            connection_error = Some("router offline: fatal API response".to_string());
+            break;
+        }
+        let Some(tag) = reply_tag(&words[1..]).filter(|tag| *tag < next_to_send && outcomes[*tag].is_none()) else {
+            // An untagged or unknown reply cannot be attributed to a voucher:
+            // stop rather than risk shifting results between vouchers.
+            connection_error = Some("router rejected: untagged pipelined RouterOS reply".to_string());
+            break;
+        };
+        let entry = partial.entry(tag).or_insert_with(|| ApiCommandOutcome {
+            rows: Vec::new(),
+            error: None,
+            trap_count: 0,
+        });
+        match words[0].as_str() {
+            "!re" => entry.rows.push(words_to_row(&words[1..])),
+            "!trap" => {
+                entry.trap_count += 1;
+                metrics.trap_count += 1;
+                entry.error = Some(map_trap(words_to_row(&words[1..])));
+            }
+            "!done" => {
+                let outcome = partial.remove(&tag).expect("entry inserted above");
+                metrics.command_timings.push(RouterOsCommandPerformance {
+                    command: commands[tag].command.clone(),
+                    duration_ms: started_at[tag].map(elapsed_ms).unwrap_or(0.0),
+                    outcome: if outcome.error.is_some() { "trap" } else { "success" },
+                });
+                outcomes[tag] = Some(outcome);
+                answered += 1;
+                in_flight -= 1;
+            }
+            _ => {}
+        }
+    }
+
+    let results = outcomes
+        .into_iter()
+        .map_while(|outcome| outcome)
+        .map(|outcome| MikroTikApiBatchItemResult {
+            error: outcome.error,
+            rows: outcome.rows,
+        })
+        .collect();
+    PipelinedOutcome {
+        results,
+        connection_error,
+        any_reply,
+    }
+}
+
 fn send_sentence<S: Read + Write>(stream: &mut S, words: &[String]) -> Result<(), String> {
     for word in words {
         write_word(stream, word.as_bytes())?;
@@ -995,5 +1153,82 @@ mod tests {
         let second = call(port, "secret");
         assert_eq!(second.error, None);
         assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// Fake router that waits for a whole window of tagged commands, then
+    /// answers them in reverse order (RouterOS may answer in any order).
+    /// The command whose name is "dup" is refused like a duplicate voucher.
+    fn spawn_pipelined_router(window: usize) -> u16 {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else { return };
+            let mut pending: Vec<(String, String)> = Vec::new();
+            while let Ok(words) = read_sentence(&mut stream) {
+                if words.first().map(String::as_str) == Some("/login") {
+                    send_sentence(&mut stream, &["!done".to_string()]).unwrap();
+                    continue;
+                }
+                let tag = words.iter().find_map(|w| w.strip_prefix(".tag=")).unwrap().to_string();
+                let name = words.iter().find_map(|w| w.strip_prefix("=name=")).unwrap_or("").to_string();
+                pending.push((tag, name));
+                if pending.len() < window {
+                    continue;
+                }
+                for (tag, name) in pending.drain(..).rev() {
+                    if name == "dup" {
+                        send_sentence(&mut stream, &["!trap".to_string(), "=message=failure: already have user with this name".to_string(), format!(".tag={tag}")]).unwrap();
+                    } else {
+                        send_sentence(&mut stream, &["!re".to_string(), format!("=name={name}"), format!(".tag={tag}")]).unwrap();
+                    }
+                    send_sentence(&mut stream, &["!done".to_string(), format!(".tag={tag}")]).unwrap();
+                }
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn pipelined_batch_matches_out_of_order_replies_to_their_vouchers() {
+        let port = spawn_pipelined_router(4);
+        let names = ["v1", "v2", "dup", "v4", "v5", "v6", "v7", "v8"];
+        let commands = names
+            .iter()
+            .map(|name| {
+                let mut params = HashMap::new();
+                params.insert("name".to_string(), json!(name));
+                MikroTikApiBatchCommand {
+                    command: "/ip/hotspot/user/add".to_string(),
+                    params: Some(params),
+                    queries: None,
+                }
+            })
+            .collect();
+        let response = mikrotik_api_batch_blocking(MikroTikApiBatchRequest {
+            host: "127.0.0.1".to_string(),
+            port,
+            username: "api".to_string(),
+            password: "pipelined-secret".to_string(),
+            use_ssl: false,
+            timeout_ms: Some(2000),
+            retries: Some(0),
+            commands,
+            pipeline_window: Some(4),
+        })
+        .unwrap();
+
+        assert_eq!(response.connection_error, None);
+        assert_eq!(response.completed_count, names.len());
+        for (index, name) in names.iter().enumerate() {
+            let result = &response.results[index];
+            if *name == "dup" {
+                assert_eq!(result.error.as_deref(), Some("duplicate user"));
+            } else {
+                assert_eq!(result.error, None);
+                assert_eq!(result.rows[0].get("name").map(String::as_str), Some(*name));
+            }
+        }
+        assert_eq!(response.metrics.command_count, names.len());
     }
 }

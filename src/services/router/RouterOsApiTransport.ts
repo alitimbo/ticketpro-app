@@ -60,7 +60,7 @@ type RouterOsApiCallResponse = {
 export interface RouterOsApiTransport {
   call(request: RouterOsApiRequest): Promise<RouterOsApiRow[]>;
   callBatch?(
-    request: RouterOsApiConfig & { commands: RouterOsApiBatchCommand[] }
+    request: RouterOsApiConfig & { commands: RouterOsApiBatchCommand[]; pipelineWindow?: number }
   ): Promise<RouterOsApiBatchResponse>;
 }
 
@@ -97,7 +97,7 @@ export class TauriRouterOsApiTransport implements RouterOsApiTransport {
   }
 
   async callBatch(
-    request: RouterOsApiConfig & { commands: RouterOsApiBatchCommand[] }
+    request: RouterOsApiConfig & { commands: RouterOsApiBatchCommand[]; pipelineWindow?: number }
   ): Promise<RouterOsApiBatchResponse> {
     const endpoint = `${request.host.trim().toLowerCase()}:${request.port}`;
     const limiter = getEndpointLimiter(endpoint);
@@ -112,6 +112,7 @@ export class TauriRouterOsApiTransport implements RouterOsApiTransport {
           })),
           host: request.host,
           password: request.password,
+          pipelineWindow: request.pipelineWindow ?? 1,
           port: request.port,
           retries: request.retries ?? 1,
           timeoutMs: request.timeoutMs ?? 5000,

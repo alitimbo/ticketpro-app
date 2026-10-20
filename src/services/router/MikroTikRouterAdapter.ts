@@ -72,8 +72,14 @@ const WIREGUARD_ROUTE_COMMENT = "TicketPro managed:wireguard-route:v1";
 const ROUTER_MANAGEMENT_GROUP = "ticketpro-api";
 const ROUTER_MANAGEMENT_POLICIES = ["api", "policy", "read", "sensitive", "test", "write"] as const;
 const HOTSPOT_USER_CREATE_BATCH_SIZE = 100;
+/** Independent RouterOS commands sent ahead of their replies (see mikrotik.rs). */
+const ROUTEROS_PIPELINE_WINDOW = 32;
 const PASSWORD_RESOLUTION_CONCURRENCY = 16;
-const HOTSPOT_USER_TARGETED_READ_MAX = 20;
+/**
+ * Up to this many names, one pipelined print per name is cheaper than reading
+ * every Hotspot user of the router; beyond it, one lean full print wins.
+ */
+const HOTSPOT_USER_TARGETED_READ_MAX = 250;
 const HOTSPOT_USER_VERIFICATION_PROPERTIES = [
   ".id",
   "name",
@@ -961,25 +967,64 @@ export class MikroTikRouterAdapter implements RouterAdapter {
    * mistaken for a missing voucher.
    */
   async listHotspotUsersByUsernames(usernames: string[]): Promise<HotspotUser[]> {
-    const unique = Array.from(new Set(usernames.map((username) => username.trim()).filter(Boolean)));
-    if (unique.length === 0) return [];
-    if (unique.length > HOTSPOT_USER_TARGETED_READ_MAX) {
-      return Array.from((await this.readRequestedUsers(unique)).values());
+    return Array.from((await this.readRequestedUsers(usernames)).values());
+  }
+
+  /**
+   * Reads one voucher batch for its final check: each requested voucher by
+   * name, plus every user carrying the batch's exact lifecycle comment so a
+   * stray voucher of the batch is still detected. One pipelined exchange,
+   * instead of reading every Hotspot user of the router.
+   */
+  async listVoucherBatchUsers(input: { lifecycleComment: string; usernames: string[] }): Promise<HotspotUser[]> {
+    const unique = Array.from(new Set(input.usernames.map((username) => username.trim()).filter(Boolean)));
+    if (unique.length > HOTSPOT_USER_TARGETED_READ_MAX || !input.lifecycleComment) {
+      return this.listHotspotUsersForVerification();
     }
+    const results = await this.runTargetedUserReads([
+      ...unique.map((name) => ({ name })),
+      { comment: input.lifecycleComment }
+    ]);
+    const usersById = new Map<string, HotspotUser>();
+    for (const row of results.flat()) {
+      const user = await userRowToHotspotUser(row);
+      usersById.set(user.id || user.username, user);
+    }
+    return Array.from(usersById.values());
+  }
+
+  private async runTargetedUserReads(queries: Array<Record<string, string>>): Promise<RouterOsApiRow[][]> {
+    const response = await this.callBatch(queries.map((query) => ({
+      command: "/ip/hotspot/user/print",
+      params: { ".proplist": HOTSPOT_USER_VERIFICATION_PROPERTIES },
+      queries: query
+    })), { pipelineWindow: ROUTEROS_PIPELINE_WINDOW });
+    const failure = response.connectionError
+      ?? response.error
+      ?? response.results.find((result) => result.error)?.error
+      ?? (response.results.length < queries.length ? "RouterOS batch interrupted" : null);
+    if (failure) throw normalizeMikroTikError(failure);
+    return response.results.map((result) => result.rows);
+  }
+
+  private async listUsersByNamesTargeted(unique: string[]): Promise<Map<string, HotspotUser>> {
     const response = await this.callBatch(unique.map((username) => ({
       command: "/ip/hotspot/user/print",
       params: { ".proplist": HOTSPOT_USER_VERIFICATION_PROPERTIES },
       queries: { name: username }
-    })));
+    })), { pipelineWindow: ROUTEROS_PIPELINE_WINDOW });
     const failure = response.connectionError
       ?? response.error
       ?? response.results.find((result) => result.error)?.error
       ?? (response.results.length < unique.length ? "RouterOS batch interrupted" : null);
     if (failure) throw normalizeMikroTikError(failure);
-    const users: HotspotUser[] = [];
+    const users = new Map<string, HotspotUser>();
     for (const [position, result] of response.results.entries()) {
       const row = result.rows.find((item) => pick(item, "name", "user") === unique[position]);
-      if (row) users.push(await userRowToHotspotUser(row));
+      if (row) {
+        const user = await userRowToHotspotUser(row);
+        users.set(user.username, user);
+      }
     }
     return users;
   }
@@ -1066,7 +1111,10 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     for (let pass = 0; pass < 2 && remaining.length > 0; pass += 1) {
       let connectionInterrupted = false;
       for (const commandGroup of chunkArray(remaining, HOTSPOT_USER_CREATE_BATCH_SIZE)) {
-        const response = await this.callBatch(commandGroup.map((entry) => entry.command));
+        const response = await this.callBatch(
+          commandGroup.map((entry) => entry.command),
+          { pipelineWindow: ROUTEROS_PIPELINE_WINDOW }
+        );
         response.results.forEach((result, index) => {
           const entry = commandGroup[index];
           if (entry && result.error) errors.set(entry.username, result.error);
@@ -2279,7 +2327,14 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     }
   }
 
-  private async callBatch(commands: RouterOsApiBatchCommand[]): Promise<RouterOsApiBatchResponse> {
+  /**
+   * `pipelineWindow` > 1 sends that many commands ahead of their replies. Use
+   * it only for independent commands (voucher creation, targeted reads).
+   */
+  private async callBatch(
+    commands: RouterOsApiBatchCommand[],
+    options: { pipelineWindow?: number } = {}
+  ): Promise<RouterOsApiBatchResponse> {
     if (!this.transport.callBatch) {
       const results = [];
       for (const command of commands) {
@@ -2297,14 +2352,19 @@ export class MikroTikRouterAdapter implements RouterAdapter {
     }
 
     try {
-      return await this.transport.callBatch({ ...this.config, commands });
+      return await this.transport.callBatch({ ...this.config, commands, pipelineWindow: options.pipelineWindow });
     } catch (error) {
       throw normalizeMikroTikError(error);
     }
   }
 
   private async readRequestedUsers(usernames: string[]): Promise<Map<string, HotspotUser>> {
-    const requested = new Set(usernames);
+    const unique = Array.from(new Set(usernames.map((username) => username.trim()).filter(Boolean)));
+    if (unique.length === 0) return new Map();
+    if (unique.length <= HOTSPOT_USER_TARGETED_READ_MAX) {
+      return this.listUsersByNamesTargeted(unique);
+    }
+    const requested = new Set(unique);
     const rows = (await this.call("/ip/hotspot/user/print", {
       ".proplist": HOTSPOT_USER_VERIFICATION_PROPERTIES
     })).filter((row) =>

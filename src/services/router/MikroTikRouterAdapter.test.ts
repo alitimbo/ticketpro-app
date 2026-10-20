@@ -132,7 +132,26 @@ class VoucherBatchRouterOsTransport implements RouterOsApiTransport {
     return [];
   }
 
+  readonly readBatchCalls: RouterOsApiBatchCommand[][] = [];
+  readonly pipelineWindows: Array<number | undefined> = [];
+
   async callBatch(request: Parameters<NonNullable<RouterOsApiTransport["callBatch"]>>[0]): Promise<RouterOsApiBatchResponse> {
+    this.pipelineWindows.push(request.pipelineWindow);
+    if (request.commands.every((command) => command.command === "/ip/hotspot/user/print")) {
+      // Targeted reads: each query matches like RouterOS (exact equality).
+      this.readBatchCalls.push(request.commands);
+      return {
+        completedCount: request.commands.length,
+        connectionError: null,
+        results: request.commands.map((command) => ({
+          error: null,
+          rows: this.users
+            .filter((user) => Object.entries(command.queries ?? {})
+              .every(([key, value]) => user[key] === String(value)))
+            .map((user) => ({ ...user }))
+        }))
+      };
+    }
     this.batchCalls.push(request.commands);
     const completedCount = this.interruptNextBatchAfter === null
       ? request.commands.length
@@ -941,6 +960,8 @@ describe("MikroTikRouterAdapter", () => {
     expect(results).toHaveLength(500);
     expect(results.every((result) => result.status === "confirmed")).toBe(true);
     expect(transport.batchCalls).toHaveLength(5);
+    // Creation commands are independent: they are sent ahead of their replies.
+    expect(transport.pipelineWindows.slice(0, 5).every((window) => (window ?? 1) > 1)).toBe(true);
     expect(transport.batchCalls.every((commands) => commands.length === 100)).toBe(true);
     expect(transport.calls.filter((call) => call.command === "/ip/hotspot/user/profile/print")).toHaveLength(1);
     expect(new Set(transport.users.map((user) => user.name)).size).toBe(500);

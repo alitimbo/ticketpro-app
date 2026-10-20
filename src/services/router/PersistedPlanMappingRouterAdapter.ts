@@ -94,6 +94,12 @@ export class PersistedPlanMappingRouterAdapter implements RouterAdapter {
     return this.delegate.setHotspotUserQuota(username, limitBytesTotal);
   }
 
+  listVoucherBatchUsers(input: { lifecycleComment: string; usernames: string[] }) {
+    return this.delegate.listVoucherBatchUsers
+      ? this.delegate.listVoucherBatchUsers(input)
+      : this.listHotspotUsersForVerification();
+  }
+
   listHotspotUsersByUsernames(usernames: string[]) {
     if (this.delegate.listHotspotUsersByUsernames) {
       return this.delegate.listHotspotUsersByUsernames(usernames);

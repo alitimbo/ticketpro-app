@@ -525,3 +525,29 @@ export function formatDataLimit(megabytes: number | null): string | null {
 
   return `${megabytes} Mo`;
 }
+
+/** The lifecycle engine check is repeated at most every 10 minutes per router and plan. */
+export const LIFECYCLE_PREFLIGHT_TTL_MS = 10 * 60_000;
+const lifecyclePreflightAt = new Map<string, number>();
+
+/** A plan quota change gives a new key, so the profile is checked again at once. */
+export function lifecyclePreflightKey(
+  routerId: string,
+  plan: { dataLimitMb: number | null; profileName: string }
+): string {
+  return `${routerId}|${plan.profileName}|${plan.dataLimitMb ?? "illimite"}`;
+}
+
+export function isLifecyclePreflightFresh(key: string, now = Date.now()): boolean {
+  const checkedAt = lifecyclePreflightAt.get(key);
+  return checkedAt !== undefined && now - checkedAt < LIFECYCLE_PREFLIGHT_TTL_MS;
+}
+
+export function markLifecyclePreflight(key: string, now = Date.now()): void {
+  lifecyclePreflightAt.set(key, now);
+}
+
+/** A generation that fails forgets the check, so the next one repairs the router again. */
+export function forgetLifecyclePreflight(key: string): void {
+  lifecyclePreflightAt.delete(key);
+}

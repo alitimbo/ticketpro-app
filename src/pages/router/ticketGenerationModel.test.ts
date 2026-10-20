@@ -9,7 +9,12 @@ import {
   formatDataLimit,
   getTicketSummary,
   inspectVoucherBatchIntegrity,
-  validateTicketGeneration
+  validateTicketGeneration,
+  forgetLifecyclePreflight,
+  isLifecyclePreflightFresh,
+  LIFECYCLE_PREFLIGHT_TTL_MS,
+  lifecyclePreflightKey,
+  markLifecyclePreflight
 } from "./ticketGenerationModel";
 
 const routers = [
@@ -320,5 +325,24 @@ describe("ticketGenerationModel", () => {
       profileName: "plan-1h",
       routerUsers
     })).toMatchObject({ isExact: true, managedQuantity: 100 });
+  });
+});
+
+describe("contrôle du moteur de cycle de vie avant génération", () => {
+  it("n'est refait qu'après 10 minutes, ou aussitôt si le quota du plan change ou si une génération échoue", () => {
+    const plan = { dataLimitMb: 2048, profileName: "6H-2G" };
+    const key = lifecyclePreflightKey("router-1", plan);
+    const t0 = Date.parse("2026-10-20T10:00:00.000Z");
+
+    expect(isLifecyclePreflightFresh(key, t0)).toBe(false);
+    markLifecyclePreflight(key, t0);
+    expect(isLifecyclePreflightFresh(key, t0 + 9 * 60_000)).toBe(true);
+    expect(isLifecyclePreflightFresh(key, t0 + LIFECYCLE_PREFLIGHT_TTL_MS)).toBe(false);
+    // Another quota, router or plan is never covered by this check.
+    expect(isLifecyclePreflightFresh(lifecyclePreflightKey("router-1", { ...plan, dataLimitMb: 4096 }), t0)).toBe(false);
+    expect(isLifecyclePreflightFresh(lifecyclePreflightKey("router-2", plan), t0)).toBe(false);
+
+    forgetLifecyclePreflight(key);
+    expect(isLifecyclePreflightFresh(key, t0 + 60_000)).toBe(false);
   });
 });

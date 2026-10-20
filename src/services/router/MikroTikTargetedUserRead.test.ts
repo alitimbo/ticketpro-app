@@ -9,7 +9,7 @@ import type {
   RouterOsApiTransport
 } from "./RouterOsApiTransport";
 
-type RouterOsApiBatchRequest = RouterOsApiConfig & { commands: RouterOsApiBatchCommand[] };
+type RouterOsApiBatchRequest = RouterOsApiConfig & { commands: RouterOsApiBatchCommand[]; pipelineWindow?: number };
 
 class BatchTransport implements RouterOsApiTransport {
   readonly batches: RouterOsApiBatchRequest[] = [];
@@ -23,7 +23,7 @@ class BatchTransport implements RouterOsApiTransport {
     this.batches.push(request);
     const results = request.commands.map((command, index) => index === this.failAt
       ? { error: "timeout", rows: [] }
-      : { error: null, rows: this.users.filter((row) => row.name === command.queries?.name) });
+      : { error: null, rows: this.users.filter((row) => Object.entries(command.queries ?? {}).every(([key, value]) => row[key] === value)) });
     return { completedCount: results.length, connectionError: null, results };
   }
 }
@@ -57,12 +57,12 @@ describe("MikroTikRouterAdapter.listHotspotUsersByUsernames", () => {
     await expect(adapter(transport).listHotspotUsersByUsernames(["A", "B"])).rejects.toThrow();
   });
 
-  it("au-delà de 20 sessions, une seule lecture allégée remplace les allers-retours", async () => {
-    const names = Array.from({ length: 21 }, (_, index) => `V${index}`);
+  it("au-delà de 250 vouchers, une seule lecture allégée remplace les lectures ciblées", async () => {
+    const names = Array.from({ length: 251 }, (_, index) => `V${index}`);
     const transport = new BatchTransport(names.map(row));
     const users = await adapter(transport).listHotspotUsersByUsernames(names);
 
-    expect(users).toHaveLength(21);
+    expect(users).toHaveLength(251);
     expect(transport.batches).toEqual([]);
     expect(transport.calls).toHaveLength(1);
     expect(String(transport.calls[0].params?.[".proplist"])).not.toContain("password");
@@ -74,3 +74,24 @@ describe("MikroTikRouterAdapter.listHotspotUsersByUsernames", () => {
     expect(transport.batches).toEqual([]);
   });
 });
+
+describe("MikroTikRouterAdapter.listVoucherBatchUsers", () => {
+  const batchComment = "TicketPro:v1;validity=60;expires=0;state=new;batch=lot-1;";
+  const batchRow = (name: string): RouterOsApiRow => ({ ...row(name), comment: batchComment });
+
+  it("relit le lot en une seule rafale : chaque voucher par son nom et tout voucher portant le commentaire du lot", async () => {
+    // "STRAY" carries the batch comment without being requested: the batch
+    // check must still see it. "AUTRE" belongs to another batch.
+    const transport = new BatchTransport([batchRow("A"), batchRow("B"), batchRow("STRAY"), row("AUTRE")]);
+    const users = await adapter(transport).listVoucherBatchUsers({ lifecycleComment: batchComment, usernames: ["A", "B"] });
+
+    expect(users.map((user) => user.username).sort()).toEqual(["A", "B", "STRAY"]);
+    expect(transport.calls).toEqual([]);
+    expect(transport.batches).toHaveLength(1);
+    expect(transport.batches[0].commands).toHaveLength(3);
+    expect(transport.batches[0].commands[2].queries).toEqual({ comment: batchComment });
+    // Independent reads: sent ahead of their replies.
+    expect(transport.batches[0].pipelineWindow).toBeGreaterThan(1);
+  });
+});
+

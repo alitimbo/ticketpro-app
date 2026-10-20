@@ -14,6 +14,7 @@ import { dataLimitMbToBytes } from "../../services/tickets/VoucherQuota";
 import { useAuth } from "../../app/auth/AuthProvider";
 import { AuthorizationError, requireProfilePermission } from "../../services/auth";
 import {
+  buildVoucherLifecycleComment,
   createPersistedRouterService,
   FakeRouterAdapter,
   RouterService,
@@ -82,6 +83,10 @@ import {
   ticketStatuses,
   userToTicketRecord,
   validateTicketGeneration,
+  forgetLifecyclePreflight,
+  isLifecyclePreflightFresh,
+  lifecyclePreflightKey,
+  markLifecyclePreflight,
   type TicketGenerationResult,
   type TicketGenerationState,
   type TicketGenerationStep,
@@ -751,16 +756,22 @@ export function TicketGenerationPage() {
     let succeededTickets: CreateTicketInput[] = [];
     let failedTickets: CreateTicketInput[] = [];
     let firstCreationError: string | null = null;
+    const lifecycleKey = lifecyclePreflightKey(state.selectedRouterId, selectedPlan);
 
     try {
       const generationService = await getRouterServiceForAction();
-      await performanceMetrics.measure("LIFECYCLE_PREFLIGHT", () =>
-        generationService.ensureVoucherLifecycleEngine({
-          managedProfileNames: [selectedPlan.profileName],
-          planDataLimitMbByProfile: { [selectedPlan.profileName]: selectedPlan.dataLimitMb ?? null }
-        })
-      );
-      const [existingUsers, existingLocalTickets, remotePlans, remoteServers] = await Promise.all([
+      // The lifecycle engine check runs alongside the reads below instead of
+      // before them, and only once per router/plan every few minutes.
+      const lifecyclePreflight = isLifecyclePreflightFresh(lifecycleKey)
+        ? Promise.resolve()
+        : performanceMetrics.measure("LIFECYCLE_PREFLIGHT", () =>
+            generationService.ensureVoucherLifecycleEngine({
+              managedProfileNames: [selectedPlan.profileName],
+              planDataLimitMbByProfile: { [selectedPlan.profileName]: selectedPlan.dataLimitMb ?? null }
+            })
+          ).then(() => markLifecyclePreflight(lifecycleKey));
+      const [, existingUsers, existingLocalTickets, remotePlans, remoteServers] = await Promise.all([
+        lifecyclePreflight,
         generationService.listHotspotUsernames(),
         isPersistent
           ? ticketRepository.listExistingUsernamesByRouter(state.selectedRouterId)
@@ -994,9 +1005,17 @@ export function TicketGenerationPage() {
         phase: "verifying",
         total: requestedQuantity
       });
+      // Only this batch is read back (each voucher by name and every user
+      // carrying its exact comment), not every Hotspot user of the router.
       const finalRouterUsers = await performanceMetrics.measure(
         "ROUTER_VERIFY",
-        () => generationService.listHotspotUsersForVerification()
+        () => generationService.listVoucherBatchUsers({
+          lifecycleComment: buildVoucherLifecycleComment(
+            selectedPlan.validityMinutes ?? selectedPlan.durationMinutes,
+            buildVoucherBatchOwnershipComment(batchId)
+          ),
+          usernames: pendingTickets.map((ticket) => ticket.username)
+        })
       );
       const confirmedRouterByUsername = new Map(
         findConfirmedVoucherBatchUsers({
@@ -1212,6 +1231,7 @@ export function TicketGenerationPage() {
           : `${succeededTickets.length} ticket(s) créés avec succès${createdPdf ? " et PDF enregistré." : "."}`
       );
     } catch (generationError) {
+      forgetLifecyclePreflight(lifecycleKey);
       performanceMetrics.markFailed();
       setError(readGenerationError(generationError, "La génération des tickets a échoué."));
     } finally {

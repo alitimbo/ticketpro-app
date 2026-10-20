@@ -203,6 +203,16 @@ export class RouterService {
     }, "router.tickets.sync");
   }
 
+  /** Final check of one voucher batch without reading every Hotspot user. */
+  listVoucherBatchUsers(input: { lifecycleComment: string; usernames: string[] }) {
+    return this.run("listVoucherBatchUsers", async () => {
+      if (this.adapter.listVoucherBatchUsers) return this.adapter.listVoucherBatchUsers(input);
+      return this.adapter.listHotspotUsersForVerification
+        ? this.adapter.listHotspotUsersForVerification()
+        : this.adapter.listHotspotUsers();
+    });
+  }
+
   listHotspotUsersByUsernames(usernames: string[]) {
     return this.run("listHotspotUsersByUsernames", async () => {
       if (usernames.length === 0) return [];

@@ -67,6 +67,8 @@ export interface RouterAdapter {
   listTicketProManagedVoucherUsernames?(): Promise<string[]>;
   listHotspotUsersForVerification?(): Promise<HotspotUser[]>;
   setHotspotUserQuota?(username: string, limitBytesTotal: number): Promise<HotspotUser>;
+  /** Reads one voucher batch (named vouchers + exact batch comment), without passwords. */
+  listVoucherBatchUsers?(input: { lifecycleComment: string; usernames: string[] }): Promise<HotspotUser[]>;
   /** Reads only the named users, without passwords. */
   listHotspotUsersByUsernames?(usernames: string[]): Promise<HotspotUser[]>;
   configureVoucherFirstMacLock?(

@@ -1,7 +1,7 @@
 export { DatabaseRouterActionLogger } from "./DatabaseRouterActionLogger";
 export { FakeRouterAdapter } from "./FakeRouterAdapter";
 export { FakeLocalRouterDiscoveryProvider } from "./LocalRouterDiscoveryProvider";
-export { MikroTikRouterAdapter } from "./MikroTikRouterAdapter";
+export { buildVoucherLifecycleComment, MikroTikRouterAdapter } from "./MikroTikRouterAdapter";
 export { TauriRouterOsApiTransport } from "./RouterOsApiTransport";
 export { RouterService, RouterServiceError, translateRouterError } from "./RouterService";
 export {
