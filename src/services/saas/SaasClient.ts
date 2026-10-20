@@ -593,6 +593,33 @@ export async function removeSaasTeamMember(userId: string): Promise<{ ok: boolea
   return request("/v1/saas/team/members/remove", { user_id: userId }, token);
 }
 
+/** Invoice of one paid TicketPro subscription, as issued by the server. */
+export type SaasInvoice = {
+  id: string;
+  invoice_number: string;
+  status: "paid";
+  issued_at: string;
+  paid_at: string;
+  currency: string;
+  amount: number;
+  plan: { code: string; name: string };
+  router_limit: number;
+  device_limit_mode: "limited" | "unlimited";
+  max_devices: number | null;
+  duration_days: number;
+  period_start: string;
+  period_end: string | null;
+  customer: { organization_name: string; name: string; email: string };
+  payment: { method: string; method_label: string; phone_masked: string; reference: string };
+};
+
+/** Invoices of the organization's paid subscriptions (owner only). */
+export async function listSaasInvoices(signal?: AbortSignal): Promise<SaasInvoice[]> {
+  const token = await requireSessionToken();
+  const result = await request<{ invoices: SaasInvoice[] }>("/v1/saas/billing/invoices", undefined, token, "GET", signal);
+  return result.invoices;
+}
+
 export async function getSaasAccount(signal?: AbortSignal): Promise<SaasAuthResult> {
   const token = await readSaasSession();
   if (!token) throw new Error("Session TicketPro absente.");

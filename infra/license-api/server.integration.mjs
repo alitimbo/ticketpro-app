@@ -379,6 +379,27 @@ test("l'essai SaaS dure 7 jours, limite à un routeur et un forfait payant le re
   assert.equal(upgraded.payload.subscription.router_limit, paidPlan.router_limit);
   assert.ok(Date.parse(upgraded.payload.subscription.current_period_start) <= Date.now() + 5_000);
 
+  // The paid subscription has exactly one invoice; the free trial has none.
+  const invoices = await api("/v1/saas/billing/invoices", {
+    method: "GET",
+    token: trial.payload.session.token
+  });
+  assert.equal(invoices.status, 200);
+  assert.equal(invoices.payload.invoices.length, 1);
+  const [invoice] = invoices.payload.invoices;
+  assert.equal(invoice.status, "paid");
+  assert.equal(invoice.plan.code, paidPlan.code);
+  assert.equal(invoice.amount, Number(paidPlan.price_cfa));
+  assert.equal(invoice.router_limit, paidPlan.router_limit);
+  assert.equal(invoice.customer.email, "trial.saas@example.com");
+  assert.equal(invoice.customer.organization_name, "Essai WiFi Niger");
+  assert.equal(invoice.payment.method_label, "Mobile Money");
+  assert.equal(invoice.payment.phone_masked, "**** 9090");
+  assert.match(invoice.invoice_number, /^FAC-\d{6}-[0-9A-F]{6}$/);
+  assert.equal(JSON.stringify(invoices.payload).includes("90909090"), false);
+  const unauthenticatedInvoices = await api("/v1/saas/billing/invoices", { method: "GET" });
+  assert.equal(unauthenticatedInvoices.status, 401);
+
   const secondTrial = await api("/v1/saas/register-trial", {
     body: {
       organization_name: "Essai WiFi Niger",

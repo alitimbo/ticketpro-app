@@ -6,6 +6,8 @@ export {
   completeSaasRegistration,
   createSaasTeamMember,
   getSaasAccount,
+  listSaasInvoices,
+  type SaasInvoice,
   getSaasDeviceInventory,
   getSaasRouterAccessPolicy,
   getSaasRouterAccessPolicyHistory,

@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import nodemailer from "nodemailer";
 import { subscriptionNotificationEvent } from "./subscription-notification-policy.mjs";
 import { resolveOrganizationDeviceLimit, organizationHubOperatorLimit } from "./organization-device-limit.mjs";
+import { buildOrganizationInvoice } from "./billing-invoices.mjs";
 
 const PORT = Number(process.env.LICENSE_PORT ?? 8787);
 const HOST = process.env.LICENSE_BIND ?? "127.0.0.1";
@@ -2295,6 +2296,19 @@ const statements = {
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'XOF', 'NE', ?, ?, ?, 'pending', 'pending', ?, ?, ?)
   `),
   findPaymentOrderById: db.prepare("SELECT * FROM payment_orders WHERE id = ?"),
+  listOrganizationPaidSubscriptionOrders: db.prepare(`
+    SELECT payment.*, (
+      SELECT subscription.current_period_start FROM organization_subscriptions AS subscription
+      WHERE subscription.payment_order_id = payment.id
+      ORDER BY subscription.created_at ASC LIMIT 1
+    ) AS subscription_period_start
+    FROM payment_orders AS payment
+    WHERE payment.organization_id = ?
+      AND payment.purchaser_type = 'organization'
+      AND payment.status = 'succeeded'
+      AND payment.fulfillment_status = 'fulfilled'
+    ORDER BY COALESCE(payment.paid_at, payment.created_at) DESC
+  `),
   findPaymentOrderByTransaction: db.prepare("SELECT * FROM payment_orders WHERE transaction_id = ?"),
   setPaymentProviderReferences: db.prepare(`
     UPDATE payment_orders SET provider_reference = ?, provider_public_reference = ?,
@@ -9411,6 +9425,26 @@ const handlers = [
         persistent_keepalive: 25,
         port: tenant.server_port
       }
+    };
+  }),
+
+  // Invoices of the organization's paid TicketPro subscriptions only: one per
+  // successful, fulfilled payment. Trials and administrator grants are not
+  // invoices.
+  route("GET", "/v1/saas/billing/invoices", async (request) => {
+    // Like the subscription itself, invoices belong to the organization owner.
+    const { membership, organization, user } = requireOrganizationUser(request);
+    if (membership.authority_role !== "owner") {
+      throw new HttpError(403, "Seul le propriétaire de l'organisation consulte les factures.");
+    }
+    return {
+      invoices: statements.listOrganizationPaidSubscriptionOrders.all(organization.id).map((order) =>
+        buildOrganizationInvoice(order, {
+          customerEmail: user.email,
+          organizationName: organization.name,
+          periodStart: order.subscription_period_start ?? undefined
+        })
+      )
     };
   }),
 
